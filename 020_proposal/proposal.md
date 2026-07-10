@@ -12,6 +12,21 @@ The client's ask is direct: automate options buying, use OpenAlgo as the base, e
 
 One framing decision shapes everything: this promises no predictive alpha. SEBI's own study found 93% of individual F&O traders lose money, and roughly 71% of aggregate retail losses were transaction costs, not bad directional calls. Option buyers lose structurally — theta bleeds daily, exits go unhonoured. The edge Strike Desk pursues is **discipline**: refusing marginal entries, sizing correctly, enforcing exits. That is an automation problem, and where agents earn their keep.
 
+## Discipline, not prediction — and where AI actually helps
+
+One framing has to be unambiguous, because it is the difference between an honest product and a fantasy. Strike Desk claims **no view the market doesn't already hold**. A language model does not forecast option direction better than the crowd, and any tool that says so is selling snake oil. SEBI's data is blunt: 93% of individual F&O traders lose money, and roughly 71% of aggregate retail losses are transaction costs — not wrong directional calls. The losses are **structural**: theta bleeds daily, positions are over-sized, exits go unhonoured under fear and greed. Every one of those is an execution failure, not a forecasting failure — and execution is automatable.
+
+So the edge is **discipline**, and discipline maps onto exactly what a language model is genuinely good at — and pointedly not onto the thing it is bad at:
+
+| Where retail bleeds | AI's real strength, applied as the feature |
+| --- | --- |
+| Churn / transaction costs (~71% of losses) | Reads regime across trend, momentum, volatility and OI, and **declines the marginal trade** — with a written reason you can read back |
+| Theta decay on held longs | Sizes against a stated **theta budget** and sets a time-stop before decay compounds |
+| Exits abandoned emotionally | Never tires, never hopes — the control plane fires **stops and square-off deterministically** |
+| Over-sizing | Hard lot and capital ceilings hold a **code-level veto** the model cannot argue past |
+
+The division of labour *is* the product: the model **reasons and explains** (regime read, contract rationale, a natural-language justification for every entry and every decline); deterministic code **decides and enforces** (risk limits, stops, square-off). Prediction is assigned to no one. This is the headline feature — not a signal generator, but a **disciplined execution layer that can justify itself** — and it is defensible precisely because it leans on AI's strengths (synthesising heterogeneous signals, explaining a judgment, acting the same way at 3 PM as at 9:15) rather than the forecasting it cannot do. It is also why the scoreboard is risk-adjusted discipline — entries declined, exits honoured, cost drag, drawdown — benchmarked against a rule-based baseline, never raw P&L promised.
+
 ## Product overview
 
 The real user is an active index options buyer trading NIFTY and BANKNIFTY weeklies on their own broker account. Their problem: a good playbook executed inconsistently loses money. Strike Desk runs the playbook — reads the regime, decides whether conditions justify a long call or put at all, picks strike and expiry against a theta budget, clears hard risk limits, places the order through OpenAlgo, then manages the position to a target, a stop, or a time-stop that fires before decay eats the premium.
