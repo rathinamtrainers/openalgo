@@ -1,0 +1,1 @@
+Amit wants to automate Options Buying process. He wants to use openalgo as the base product and customize it by employing AI agents where appropriate to ensure better profit is achived through better automation.

@@ -18,6 +18,19 @@ The real user is an active index options buyer trading NIFTY and BANKNIFTY weekl
 
 It is a peer of what Indian traders deploy today. **AlgoTest**, **Tradetron**, **QuantMan** and **Zerodha Streak** ship live options execution with backtesting and risk controls; **Sensibull** and **Opstra** cover analytics. Strike Desk matches that core capability at MVP altitude — live, broker-connected, position-managed, risk-limited, audited — but differs in substrate: those platforms encode strategy as a static condition tree that cannot reason mid-session. Strike Desk replaces the tree with a reasoning loop that explains why it declined a trade and leaves a record a regulator can read back.
 
+## Use cases
+
+Concrete jobs the desk does, each a slice of the plan → act → observe loop:
+
+1. **Read the regime, decide whether to trade at all.** At the session open and on cadence through the day, snapshot trend, momentum and volatility — and often conclude that conditions justify *no* entry. Refusing the marginal trade is the primary use case, not the exception.
+2. **Propose a directional long.** When conditions warrant, pick a long CE or PE with a strike and expiry sized against a theta budget, with a stated breakeven — grounded in the live chain, Greeks, IV and OI, never model memory.
+3. **Adjudicate against hard risk limits.** Clear every proposal through deterministic loss caps, position count, capital and lot ceilings, and expiry-day windows. The Risk Officer holds a code-level veto the LLM cannot override.
+4. **Place a live order behind human approval.** Route the intent through Action Center in semi-auto so a human approves each real-money order before it reaches the broker.
+5. **Manage the open position.** Run stops, targets and a theta-aware time-stop in a tight loop that fires before decay eats the premium — never blocking on a model call.
+6. **Paper-trade first in sandbox.** Run the full agent graph unattended for a complete expiry week against ₹1 Crore sandbox capital before a single rupee is live.
+7. **Fail flat and square off.** On data loss, model unavailability or a limit breach, stop trading; enforce auto square-off at exchange timings and honour the kill switch.
+8. **Review the day and learn.** Nightly, replay the decision journal, benchmark the agent against a rule-based baseline of the same playbook, and feed regime-tagged outcomes back into the loop.
+
 ## Agentic architecture
 
 The system is a supervised multi-agent graph that ticks on a cadence through market hours, running plan → act → observe each tick. A **Regime Analyst** pulls trend, momentum and volatility snapshots. An **Options Strategist** reads the chain, Greeks, IV and open interest to propose a contract with a breakeven and a theta budget. A **Risk Officer** adjudicates — deliberately not a language model: loss caps, position count, capital and lot ceilings, expiry-day windows are deterministic code holding a hard veto. The LLM proposes; arithmetic disposes. Only then does the **Execution Agent** place the order and hand it to a **Position Monitor**, whose stops and square-off run in a tight loop that never blocks on a model call — an agent waiting on an API round-trip is not a risk system.
