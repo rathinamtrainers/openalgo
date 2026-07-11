@@ -6,6 +6,8 @@
 >
 > **Outcome:** A deployed desk trading a real broker account through a human-approved loop — every decision traced, every risk limit enforced in code.
 
+![Strike Desk one-page overview: donut charts showing 93% of individual F&O traders lose money and ~71% of retail losses are transaction costs, a table mapping where retail bleeds (churn, theta decay, abandoned exits, over-sizing) to AI's applied strength, a five-stage Sense → Reason → Risk Gate → Act → Observe loop, six key use cases, the OpenAlgo advantage tiles (30+ brokers, ZeroMQ feed, sandbox, Action Center, ~112 MCP tools), an architecture overview with an agentic control plane feeding Action Center and brokers, risk guardrails, the Entries Declined / Exits Honoured / Cost Drag / Max Drawdown scoreboard, and the closing line "Strike Desk is not a crystal ball. It is discipline, codified."](images/amit-proposal-image-1.png)
+
 ## Background
 
 The client's ask is direct: automate options buying, use OpenAlgo as the base, employ AI agents where appropriate. The base is strong — thirty-plus broker integrations behind one `/api/v1/` surface, a ZeroMQ market feed, a sandbox engine with auto square-off, an Action Center that gates orders behind human approval, and an MCP server exposing some 112 tools. What is missing is a decision-maker: today a human watches the chain and clicks, or a static rule tree fires blindly.
@@ -88,6 +90,8 @@ flowchart TD
     class CHAIN,IND,EXEC ground
     class JRNL store
 ```
+
+![Agentic architecture of Strike Desk: five agent cards — Regime Analyst (trend, momentum, volatility snapshots), Options Strategist (proposes contracts against a theta budget and breakeven via MCP tools), Risk Officer (deterministic veto on loss caps, position count, capital and expiry-day windows, code not LLM), Execution Agent (routes to Action Center, places the live order), and Position Monitor (stops, targets, theta time-stops) — wired through a "Risk Veto?" diamond that declines or continues and an "Action Center OK?" diamond that aborts or releases to execution and the trade journal, beside the OpenAlgo substrate (unified /api/v1/ surface, ZeroMQ feed, sandbox auto square-off, 112-tool MCP server), guardrail icons (sandbox default, Action Center, kill switch, auto square-off, fail-flat), and a tech-stack strip naming LangGraph 1.0, Claude Sonnet 5 / Haiku 4.5 / Opus 4.8, AWS ap-south-1 Mumbai and Langfuse.](images/amit-proposal-image-2.png)
 
 ## Tech stack & why
 
