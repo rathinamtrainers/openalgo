@@ -51,6 +51,8 @@ Strike Desk PRD
 
 ---
 
+![Eleven-panel PRD poster headed by one user, one goal and never-autonomous cards, laying out the problem (93% of F&O traders lose money, ~71% of losses transaction costs, four structural failures), a five-step per-tick PLAN → DECIDE → ADJUDICATE → ACT → OBSERVE loop resolving to exactly one outcome of ENTER, DECLINE or HOLD, the user profile, MVP goals and non-goals, fifteen functional requirements FR-1 to FR-15 each stamped with its use-case ID from UC-01 through UC-20, an MVP risk-limit table (2% daily loss cap, 0.5% per-trade, 1 concurrent position, 2 lots, 10% deployed-capital ceiling, 3 trades a day, 45-minute or 15:00 IST time-stop, 09:15–09:30 and 15:15–close no-trade windows), non-functional requirements split by latency plane, reliability, SEBI security and cost, operational AgentOps/LLMOps/ModelOps/RAGOps disciplines, scope and roadmap, success metrics and assumptions.](images/amit-design-prd-image.png)
+
 ## 1. Problem statement
 
 An index options buyer with a sound playbook still loses money, and the reason is not usually the playbook. SEBI's own study found that 93% of individual F&O traders lose money and that roughly 71% of aggregate retail losses were transaction costs — not wrong directional calls. The failures are structural and repetitive: taking the marginal trade out of boredom, holding a long while theta grinds it down, sizing by conviction instead of by capital, and abandoning the exit when the position turns. Every one of those is an execution failure, and execution is automatable.

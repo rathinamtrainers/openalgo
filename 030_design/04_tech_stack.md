@@ -57,6 +57,8 @@ Strike Desk Tech Stack
 
 ---
 
+![Dark tech-stack diagram tagged "every technology choice defined, justified, and cost-aware", opening with four constraint gears — SEBI regulation and static IP, the OpenAlgo/asyncio runtime boundary, the two-plane AI cadence split and data residency — feeding a LangGraph 1.0 orchestration block with an interrupt-and-resume human approval gate and an MCP tool layer, three cost-annotated model tiers (Opus 4.8 nightly reviewer at high effort, Sonnet 5 options strategist, Haiku 4.5 regime analyst for fast low-price classification), a Python 3.12 runtime with uv and httpx, a SQLite append-only decision journal on NullPool with SQLAlchemy, an OpenAlgo substrate strip (unified broker API /api/v1/, Greeks/IV/OI services, WebSocket proxy :8765 with ZeroMQ bus :5555, Telegram alerting, Action Center semi-auto approval, ₹1 Cr sandbox engine), AWS ap-south-1 EC2 with an Elastic IP for the SEBI-registered address, self-hosted Langfuse tracing and a replay eval harness, and a testing column of pytest, Ruff, bandit, pip-audit and GitHub Actions running lint, tests, guardrail and prompt-regression jobs.](images/amit-design-tech-stack-image.png)
+
 ## 1. How the stack was chosen
 
 Four constraints did most of the choosing, and every entry below traces back to one of them.

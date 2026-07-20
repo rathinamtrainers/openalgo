@@ -61,6 +61,8 @@ Strike Desk Architecture
 
 ---
 
+![Light architecture poster subtitled "two planes, one mission: reason with LLMs, enforce with code, fail flat", showing a system-context row where a Strike Desk process (reasoning plane of LLM agents and tools, control plane of deterministic code) makes MCP tool calls into the OpenAlgo process (/api/v1/ plus 112+ MCP tools, Action Center semi-auto gate, sandbox engine, WebSocket proxy :8765, ZeroMQ bus :5555) which exchanges orders, market data, alerts, approvals and inference with broker, Telegram and model-provider externals, all writing to an append-only Strike Desk decision journal on an AWS ap-south-1 static-IP host, then detailing the agentic core (supervisor plan/act/observe graph, Regime Analyst, Options Strategist, Nightly Reviewer, grounding tools, session and durable memory), the deterministic core (Risk Officer, Position Monitor, fail-flat), five layered safeguards, key end-to-end flows for decision tick, entry-to-exit, nightly review and replay, a seven-table append-only data model, AI *Ops adoption, a fail-flat failure-semantics matrix and limitations.](images/amit-design-arch-image.png)
+
 ## 1. System context
 
 Strike Desk is a **separate process** that runs alongside an existing self-hosted OpenAlgo instance on the same host. It is not a Flask blueprint, and that is a deliberate structural decision with three reasons behind it.

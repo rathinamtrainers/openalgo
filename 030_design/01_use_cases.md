@@ -72,6 +72,8 @@ Strike Desk Use Cases
 
 ---
 
+![Use-case catalog poster subtitled "sense → decide → act → prove → widen", opening with document, audience and goal cards, then a five-wedge colour wheel around a Strike Desk robot core — green Sense (UC-01 to UC-03), blue Decide (UC-04, UC-05), orange Act (UC-06 to UC-08), teal Widen Later (UC-15 to UC-20) and purple Prove (UC-09 to UC-14) — mirrored by a full UC-01 to UC-20 catalog table on the right, over a band of the six OpenAlgo foundations (30+ brokers, ZeroMQ feed, option chain with Greeks, sandbox engine, Action Center, ~112 MCP tools) and closing panels on design principles (IDs are permanent; discipline, not prediction), the actors Amit the Trader and the Supervisor agent graph, and a desk-at-a-glance summary.](images/amit-design-uc-image-1.png)
+
 ## 1. Goal of this catalog
 
 OpenAlgo already does the hard plumbing: thirty-plus brokers behind one `/api/v1/` surface, a ZeroMQ market feed, an option chain with Greeks, a sandbox engine with exchange-aligned auto square-off, an Action Center that gates orders behind human approval, and an MCP server exposing roughly 112 tools. What it does not have is a decision-maker. Today a human watches the chain and clicks, or a static condition tree fires blindly.
@@ -179,6 +181,8 @@ Every entry carries the same fields. The **ID** is the permanent handle. The **p
 
 **UC-20 — Portfolio-level risk and multi-broker operation**
 *Primary actor:* Risk Officer. *Goal / trigger:* Adjudicate across indices, playbooks and broker accounts as one book, with aggregate exposure and drawdown limits above the per-trade ones. *Agentic behaviour and guardrail:* the deterministic veto stays deterministic at portfolio scale; SEBI static-IP and Algo-ID obligations apply per broker connection and must be satisfied per account. *Acceptance criteria:* a portfolio limit binds even when every individual position is within its own limits. *Release:* Fuller product.
+
+![Neon dark-blue map of all twenty use cases as illustrated tiles radiating from a glowing brain labelled "Strike Desk — agentic NIFTY/BANKNIFTY options": teal SENSE (UC-01 run a decision tick, UC-02 read the regime, UC-03 decline the marginal trade), orange DECIDE (UC-04 propose directional long with contract detail and theta budget, UC-05 adjudicate hard risk limits by deterministic code veto), red ACT (UC-06 place order with human approval, UC-07 manage position with stop-loss line, UC-08 fail flat and square off with kill switch), purple PROVE (UC-09 paper-trade sandbox, UC-10 journal every decision as an immutable record, UC-11 nightly review vs baseline, UC-12 replay trading day, UC-13 trace and cost view, UC-14 alert operator via Telegram) and grey WIDEN LATER (UC-15 auto mode, UC-16 more indices, UC-17 replay eval harness, UC-18 regime memory with RAG retrieval, UC-19 hedged multi-leg, UC-20 portfolio risk and multi-broker), with a footer release view marking UC-01 to UC-14 as MVP, UC-15 to UC-18 as Phase 2 and UC-19 to UC-20 as full product.](images/amit-design-uc-image-2.png)
 
 ## 5. Release view
 
