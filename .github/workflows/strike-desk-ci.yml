@@ -1,0 +1,39 @@
+name: strike-desk
+
+on:
+  push:
+    paths: ["strike_desk/**", ".github/workflows/strike-desk-ci.yml"]
+  pull_request:
+    paths: ["strike_desk/**", ".github/workflows/strike-desk-ci.yml"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: strike_desk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.12 and dependencies
+        run: |
+          uv python install 3.12
+          uv sync --group dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Guardrail and regression gate
+        run: uv run pytest tests/test_guardrails.py tests/regression -q
+
+      - name: Full suite with coverage
+        run: uv run pytest --cov=strike_desk --cov-report=term-missing --cov-fail-under=80
+
+      - name: Security scan
+        run: |
+          uv run bandit -q -r src
+          uv run pip-audit

@@ -1,0 +1,14 @@
+.venv/
+.state/
+.state-manual/
+*.db
+*.db-*
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+.env

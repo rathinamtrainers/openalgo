@@ -1,0 +1,94 @@
+{
+  "pass_bar": "every scenario must match exactly; no scenario may yield 'enter'",
+  "min_regime_confidence": 0.55,
+  "scenarios": [
+    {
+      "id": "REG-01",
+      "note": "flat book, nothing registered — the desk's default posture",
+      "state": {"book": {"open_positions": []}},
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-02",
+      "note": "one open index position — manage, never add",
+      "state": {"book": {"open_positions": [{"symbol": "NIFTY28JUL2624500CE"}]}},
+      "expect": {"outcome": "hold", "reason_code": "position-open"}
+    },
+    {
+      "id": "REG-03",
+      "note": "book unreadable — never assumed flat",
+      "state": {"book_error": "positionbook: HTTP 503"},
+      "expect": {"outcome": "decline", "reason_code": "data-quality"}
+    },
+    {
+      "id": "REG-04",
+      "note": "specialist hung",
+      "state": {
+        "book": {"open_positions": []},
+        "specialist_error": {"role": "regime", "kind": "timeout", "detail": "exceeded 12.0s"}
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-timeout"}
+    },
+    {
+      "id": "REG-05",
+      "note": "event-driven regime is not tradeable at MVP",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "event-driven",
+        "regime_confidence": 0.95
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-not-tradeable"}
+    },
+    {
+      "id": "REG-06",
+      "note": "unknown is always reachable and always safe",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "unknown",
+        "regime_confidence": 0.20
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-not-tradeable"}
+    },
+    {
+      "id": "REG-07",
+      "note": "tradeable but under the confidence floor",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.54
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-low-confidence"}
+    },
+    {
+      "id": "REG-08",
+      "note": "exactly on the confidence floor is not a breach — the floor is inclusive",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.55
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-09",
+      "note": "tradeable and confident still needs a contract proposal",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "range-bound",
+        "regime_confidence": 0.88
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-10",
+      "note": "budget overrun beats every other consideration",
+      "state": {
+        "budget_exceeded": true,
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.99
+      },
+      "expect": {"outcome": "decline", "reason_code": "tick-timeout"}
+    }
+  ]
+}
