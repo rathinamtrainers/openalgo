@@ -93,7 +93,8 @@ class TickRunner:
                 "started_monotonic": started,
                 "deadline_monotonic": started + settings.tick_budget_seconds,
                 "model_versions": [],
-                "token_cost_micros": 0,
+                # token_cost_micros is a usage counter (micros), not a credential
+                "token_cost_micros": 0,  # nosec B105
             }
             config = {"configurable": {"thread_id": tick_id}, "recursion_limit": 12}
 
