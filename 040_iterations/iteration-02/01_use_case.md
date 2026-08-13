@@ -10,6 +10,8 @@
 >
 > **Depends on:** UC-01's tick, registry, journal and trace plumbing, which this slice plugs into rather than reshapes. The Options Strategist (UC-04) remains unregistered, so a tradeable regime still ends the tick as a decline naming the missing `strategist` role.
 
+![Dark portrait one-pager for iteration 02 UC-02 Read the Regime, printing the five-label vocabulary trending, range-bound, high-volatility, event-driven and unknown, an out-of-scope card barring any non-read-only operation, a nine-step main success scenario from tick fires to decide, a full sequence diagram across Supervisor, Regime Analyst, event calendar, Claude Haiku 4.5, the stdio MCP toolbox, OpenAlgo /api/v1/ and the SQLite journal, alternate and exception flows E1 to E6, the new regime_reads table columns, thirteen acceptance criteria and a footer strip previewing docs 02 to 05.](images/amit-iter-2-image-1.png)
+
 ## 1. What this iteration builds
 
 This iteration builds the Regime Analyst end to end: an MCP toolbox that owns OpenAlgo's stdio MCP server as a supervised subprocess and exposes exactly six read-only market tools; an agent loop that plans which signals matter now, calls those tools, observes what came back, and submits one structured classification; a grounding validator that rejects any rationale citing a number the agent did not fetch; a deterministic event-window short-circuit that labels announcement windows without spending a token; a `regime_reads` table that stores every read with its evidence, its prompt artifact and its token cost; and the span coverage that makes each model call and each tool call replayable from the trace.
@@ -121,3 +123,5 @@ sequenceDiagram
 ```
 
 You build this in `02_implementation_guide.md`, verify it by hand against `03_manual_test_cases.md`, lock it down with the suite in `04_test_automation.md`, and promote the running desk to it with `05_deployment_guide.md`.
+
+![Dark landscape flow subtitled filing the regime role, running scheduler tick to a flat-book plan node to a consult node into a Claude Haiku 4.5 plan-act-observe agent loop that calls six whitelisted read-only MCP tools through the OpenAlgo API, with grounding validation of label, confidence, one-sentence rationale and cited evidence before submit_regime_read, an orange tick-declines rail for regime-not-tradeable and regime-low-confidence, alternate and exception flow cards, three guardrail pillars for tool scoping, grounding and bounded work, nested regime spans, and the regime_reads to decisions journal tables.](images/amit-iter-2-image-2.png)
