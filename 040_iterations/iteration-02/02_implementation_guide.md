@@ -197,6 +197,8 @@ source = ["strike_desk"]
 omit = [
     "*/strike_desk/__main__.py",
     "*/strike_desk/service.py",
+    # Its session lifecycle is proven against a real MCP server by hand, not by a double.
+    "*/strike_desk/mcp_toolbox.py",
 ]
 
 [tool.coverage.report]
@@ -2169,10 +2171,23 @@ def _record_read(deps: TickDeps, state: TickState, result: SpecialistResult) -> 
     status = str(payload.get("status", STATUS_DEGRADED))
 
     if status == STATUS_OK:
+        try:
+            label = str(payload["label"]).strip().lower()
+            confidence = float(payload["confidence"])
+        except (KeyError, TypeError, ValueError):
+            # A specialist that answers with junk is unavailable, not low-confidence.
+            return {
+                **spent,
+                "specialist_error": {
+                    "role": ROLE_REGIME,
+                    "kind": "unavailable",
+                    "detail": "payload lacked a usable label/confidence",
+                },
+            }
         return {
             **spent,
-            "regime_label": str(payload.get("label")),
-            "regime_confidence": float(payload.get("confidence") or 0.0),
+            "regime_label": label,
+            "regime_confidence": confidence,
             "regime_rationale": str(payload.get("rationale", "")),
         }
     if status == STATUS_UNGROUNDED:
@@ -2357,7 +2372,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .config import IST, Settings
-from .errors import JournalWriteError, McpUnavailable, ModelCallFailed
+from .errors import JournalWriteError, McpUnavailable, ModelCallFailed, PromptNotFound
 from .graph import TickDeps
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
@@ -2429,8 +2444,8 @@ class StrikeDeskService:
         toolbox = McpToolbox(self._settings)
         try:
             analyst = build_regime_analyst(self._settings, self._prompts, toolbox)
-        except ModelCallFailed:
-            logger.exception("could not build the regime model — running without an analyst")
+        except (ModelCallFailed, PromptNotFound):
+            logger.exception("could not build the regime analyst — running without one")
             return
         try:
             toolbox.start()

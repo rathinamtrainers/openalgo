@@ -1442,7 +1442,7 @@ uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py tests/reg
 uv run pytest --cov=strike_desk --cov-report=term-missing                                     # everything
 ```
 
-The coverage floor stays at 80%. `grounding.py`, `events.py`, `regime_analyst.py` and `graph.py` should each sit above 90%; `mcp_toolbox.py` sits lower because its `_serve` coroutine and loop-thread lifecycle are proven by the manual pass against a real server, not by a double. Coverage is a smoke alarm; the guardrail files and the eval gate are what protect the slice.
+The coverage floor stays at 80%, and `grounding.py`, `events.py`, `regime_analyst.py` and `graph.py` should each sit above 90%. `mcp_toolbox.py` joins `service.py` and `__main__.py` in the coverage `omit` list, because its `_serve` coroutine and loop-thread lifecycle are proven by the manual pass against a real server rather than by a double — measuring a module you deliberately do not unit-test would make the gate a number nobody trusts. Coverage is a smoke alarm; the guardrail files and the eval gate are what protect the slice.
 
 ### `.github/workflows/strike-desk-ci.yml`
 
