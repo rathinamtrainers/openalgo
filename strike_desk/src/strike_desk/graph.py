@@ -19,11 +19,18 @@ from .journal import SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
 from .prompt_registry import PromptRegistry
+from .regime_analyst import (
+    STATUS_DEGRADED,
+    STATUS_OK,
+    STATUS_UNGROUNDED,
+    build_regime_read_row,
+)
 from .specialists import (
     ROLE_REGIME,
     ROLE_STRATEGIST,
     SpecialistRegistry,
     SpecialistRequest,
+    SpecialistResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +45,7 @@ REASON_SPECIALIST_UNAVAILABLE = "specialist-unavailable"
 REASON_SPECIALIST_TIMEOUT = "specialist-timeout"
 REASON_REGIME_NOT_TRADEABLE = "regime-not-tradeable"
 REASON_REGIME_LOW_CONFIDENCE = "regime-low-confidence"
+REASON_REGIME_UNGROUNDED = "regime-ungrounded"
 REASON_TICK_TIMEOUT = "tick-timeout"
 REASON_INTERNAL_ERROR = "internal-error"
 
@@ -56,6 +64,8 @@ class TickState(TypedDict, total=False):
     budget_exceeded: bool
     regime_label: str | None
     regime_confidence: float | None
+    regime_rationale: str | None
+    regime_data_error: str | None
     specialist_error: dict[str, str] | None
     model_versions: list[str]
     token_cost_micros: int
@@ -73,6 +83,11 @@ class TickDeps:
     prompts: PromptRegistry
     span_processor: JournalSpanProcessor
     checkpointer: Any
+
+
+def _with_rationale(text: str, state: TickState) -> str:
+    rationale = (state.get("regime_rationale") or "").strip()
+    return f"{text} Analyst: {rationale}" if rationale else text
 
 
 def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str]:
@@ -105,15 +120,32 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             "This tick manages the book; it does not add to it.",
         )
 
+    regime_data_error = state.get("regime_data_error")
+    if regime_data_error:
+        return (
+            OUTCOME_DECLINE,
+            REASON_DATA_QUALITY,
+            f"Declined: the regime could not be read from live data ({regime_data_error}). "
+            "The desk does not classify a market it could not see.",
+        )
+
     error = state.get("specialist_error")
     if error:
         role = error.get("role", "?")
         detail = error.get("detail", "")
-        if error.get("kind") == "timeout":
+        kind = error.get("kind")
+        if kind == "timeout":
             return (
                 OUTCOME_DECLINE,
                 REASON_SPECIALIST_TIMEOUT,
                 f"Declined: the {role!r} specialist did not answer within its timeout ({detail}).",
+            )
+        if kind == "ungrounded":
+            return (
+                OUTCOME_DECLINE,
+                REASON_REGIME_UNGROUNDED,
+                f"Declined: the regime read cited data it did not fetch ({detail}). "
+                "An ungrounded read is a defect, not an opinion.",
             )
         return (
             OUTCOME_DECLINE,
@@ -121,8 +153,6 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             f"Declined: no usable {role!r} specialist ({detail}).",
         )
 
-    # No specialist error and no regime read means the registry was empty —
-    # the default flat-book posture (REG-01), not an explicit "unknown" label.
     if state.get("regime_label") is None:
         return (
             OUTCOME_DECLINE,
@@ -136,22 +166,83 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
         return (
             OUTCOME_DECLINE,
             REASON_REGIME_NOT_TRADEABLE,
-            f"Declined: regime read as {label!r}, which this playbook does not trade.",
+            _with_rationale(
+                f"Declined: regime read as {label!r}, which this playbook does not trade.", state
+            ),
         )
     if confidence < settings.min_regime_confidence:
         return (
             OUTCOME_DECLINE,
             REASON_REGIME_LOW_CONFIDENCE,
-            f"Declined: regime {label!r} is tradeable but confidence {confidence:.2f} "
-            f"is below the {settings.min_regime_confidence:.2f} floor.",
+            _with_rationale(
+                f"Declined: regime {label!r} is tradeable but confidence {confidence:.2f} "
+                f"is below the {settings.min_regime_confidence:.2f} floor.",
+                state,
+            ),
         )
     return (
         OUTCOME_DECLINE,
         REASON_SPECIALIST_UNAVAILABLE,
-        f"Declined: regime {label!r} is tradeable at {confidence:.2f} confidence, but no "
-        f"{ROLE_STRATEGIST!r} specialist is registered to propose a contract. "
-        "A regime read alone is never an entry.",
+        _with_rationale(
+            f"Declined: regime {label!r} is tradeable at {confidence:.2f} confidence, but no "
+            f"{ROLE_STRATEGIST!r} specialist is registered to propose a contract. "
+            "A regime read alone is never an entry.",
+            state,
+        ),
     )
+
+
+def _record_read(deps: TickDeps, state: TickState, result: SpecialistResult) -> dict[str, Any]:
+    """Append the read, then translate its status into tick state."""
+    payload = dict(result.payload)
+    deps.journal.record_regime_read(
+        **build_regime_read_row(
+            payload,
+            settings=deps.settings,
+            prompts=deps.prompts,
+            tick_id=state["tick_id"],
+            trace_id=state["trace_id"],
+            trading_day=state["trading_day"],
+            source="tick",
+        )
+    )
+
+    spent: dict[str, Any] = {
+        "model_versions": [result.model_version] if result.model_version else [],
+        "token_cost_micros": int(result.token_cost_micros),
+    }
+    status = str(payload.get("status", STATUS_DEGRADED))
+
+    if status == STATUS_OK:
+        try:
+            label = str(payload["label"]).strip().lower()
+            confidence = float(payload["confidence"])
+        except (KeyError, TypeError, ValueError):
+            # A specialist that answers with junk is unavailable, not low-confidence.
+            return {
+                **spent,
+                "specialist_error": {
+                    "role": ROLE_REGIME,
+                    "kind": "unavailable",
+                    "detail": "payload lacked a usable label/confidence",
+                },
+            }
+        return {
+            **spent,
+            "regime_label": label,
+            "regime_confidence": confidence,
+            "regime_rationale": str(payload.get("rationale", "")),
+        }
+    if status == STATUS_UNGROUNDED:
+        return {
+            **spent,
+            "specialist_error": {
+                "role": ROLE_REGIME,
+                "kind": "ungrounded",
+                "detail": str(payload.get("defect", "ungrounded submission")),
+            },
+        }
+    return {**spent, "regime_data_error": str(payload.get("defect", "the read was degraded"))}
 
 
 def build_tick_graph(deps: TickDeps) -> Any:
@@ -230,28 +321,12 @@ def build_tick_graph(deps: TickDeps) -> Any:
                     }
                 }
 
-            try:
-                label = str(result.payload["label"]).strip().lower()
-                confidence = float(result.payload["confidence"])
-            except (KeyError, TypeError, ValueError):
-                span.set_attribute("specialist.outcome", "malformed")
-                return {
-                    "specialist_error": {
-                        "role": ROLE_REGIME,
-                        "kind": "unavailable",
-                        "detail": "payload lacked a usable label/confidence",
-                    }
-                }
-
-            span.set_attribute("specialist.outcome", "answered")
-            span.set_attribute("regime.label", label)
-            span.set_attribute("regime.confidence", confidence)
-            return {
-                "regime_label": label,
-                "regime_confidence": confidence,
-                "model_versions": [result.model_version] if result.model_version else [],
-                "token_cost_micros": int(result.token_cost_micros),
-            }
+            update = _record_read(deps, state, result)
+            span.set_attribute("specialist.outcome", str(result.payload.get("status", "unknown")))
+            span.set_attribute("regime.label", str(result.payload.get("label") or "none"))
+            span.set_attribute("regime.read_id", str(result.payload.get("read_id", "")))
+            span.set_attribute("regime.token_cost_micros", int(result.token_cost_micros))
+            return update
 
     def decide(state: TickState) -> dict[str, Any]:
         with tracer.start_as_current_span("tick.decide") as span:

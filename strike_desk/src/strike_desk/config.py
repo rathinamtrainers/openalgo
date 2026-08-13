@@ -47,6 +47,7 @@ class Settings(BaseSettings):
         env_file=_ENV_FILES,
         env_file_encoding="utf-8",
         extra="forbid",
+        protected_namespaces=(),
     )
 
     # --- OpenAlgo substrate -------------------------------------------------
@@ -58,11 +59,13 @@ class Settings(BaseSettings):
     # --- Book ---------------------------------------------------------------
     index_symbol: str = "NIFTY"
     option_exchange: str = "NFO"
+    index_spot_exchange: str = "NSE_INDEX"
+    vix_symbol: str = "INDIAVIX"
 
     # --- Tick cadence and budgets ------------------------------------------
-    tick_interval_seconds: int = Field(default=300, ge=30, le=3600)
-    tick_budget_seconds: float = Field(default=20.0, gt=0, le=120)
-    specialist_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
+    tick_interval_seconds: int = Field(default=900, ge=30, le=3600)
+    tick_budget_seconds: float = Field(default=40.0, gt=0, le=120)
+    specialist_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
 
     # --- Session gates ------------------------------------------------------
     no_trade_windows: str = "09:15-09:30,15:15-15:30"
@@ -71,6 +74,23 @@ class Settings(BaseSettings):
 
     # --- Supervisor policy --------------------------------------------------
     min_regime_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+
+    # --- Regime Analyst (reasoning plane) -----------------------------------
+    anthropic_api_key: SecretStr | None = None
+    regime_model: str = "claude-haiku-4-5"
+    regime_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    regime_max_output_tokens: int = Field(default=1200, ge=256, le=8192)
+    regime_max_rounds: int = Field(default=4, ge=1, le=8)
+    regime_deadline_margin_seconds: float = Field(default=3.0, ge=0.5, le=15.0)
+    regime_tool_output_chars: int = Field(default=8000, ge=1000, le=60000)
+    regime_rationale_max_chars: int = Field(default=320, ge=80, le=1000)
+    price_in_per_mtok: float = Field(default=1.0, ge=0.0, le=1000.0)
+    price_out_per_mtok: float = Field(default=5.0, ge=0.0, le=1000.0)
+
+    # --- MCP toolbox --------------------------------------------------------
+    mcp_python: Path = Path("/opt/openalgo/.venv/bin/python")
+    mcp_server_script: Path = Path("/opt/openalgo/mcp/mcpserver.py")
+    mcp_startup_timeout_seconds: float = Field(default=45.0, gt=0, le=180)
 
     # --- Paths --------------------------------------------------------------
     state_dir: Path = Path("/var/lib/strike-desk")
@@ -111,6 +131,11 @@ class Settings(BaseSettings):
         return time.fromisoformat(self.expiry_cutoff)
 
     @property
+    def analyst_deadline_seconds(self) -> float:
+        """The analyst's own budget, always under the registry's timeout."""
+        return max(1.0, self.specialist_timeout_seconds - self.regime_deadline_margin_seconds)
+
+    @property
     def db_path(self) -> Path:
         return self.state_dir / "strike_desk.db"
 
@@ -129,6 +154,10 @@ class Settings(BaseSettings):
     @property
     def pid_path(self) -> Path:
         return self.state_dir / "strike-desk.pid"
+
+    @property
+    def events_path(self) -> Path:
+        return self.state_dir / "events.json"
 
 
 @lru_cache(maxsize=1)

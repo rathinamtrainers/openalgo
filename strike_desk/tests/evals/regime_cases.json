@@ -1,0 +1,62 @@
+[
+  {
+    "id": "strong-uptrend",
+    "expect": ["trending"],
+    "tools": {
+      "get_quote": "{\"status\":\"success\",\"data\":{\"ltp\":24512.35,\"open\":24310.00,\"high\":24528.90,\"low\":24298.40,\"prev_close\":24280.15,\"volume\":0,\"oi\":0}}",
+      "get_trend_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"bars_loaded\":252,\"last_close\":24512.35,\"indicators\":{\"sma_20\":24380.10,\"sma_50\":24105.60,\"sma_200\":23540.20,\"ema_20\":24448.70,\"supertrend\":[24361.05,1],\"adx_di\":[31.20,12.40,34.60]},\"legend\":{\"adx_di\":\"[+DI, -DI, ADX]\"}}",
+      "get_momentum_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"rsi_14\":63.80,\"macd\":[42.10,28.60,13.50],\"stochastic\":[78.40,71.20],\"cci_20\":118.30}}",
+      "get_volatility_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"atr_14\":74.20,\"natr_14\":0.303,\"bb_width\":1.84,\"historical_volatility\":10.90}}",
+      "get_expiry_dates": "{\"status\":\"success\",\"data\":[\"26AUG26\",\"24SEP26\"]}",
+      "get_historical_data": "{\"count\":60,\"returned\":6,\"data\":[{\"close\":24310.0},{\"close\":24358.4},{\"close\":24401.7},{\"close\":24447.2},{\"close\":24489.9},{\"close\":24512.35}]}"
+    }
+  },
+  {
+    "id": "tight-range",
+    "expect": ["range-bound"],
+    "tools": {
+      "get_quote": "{\"status\":\"success\",\"data\":{\"ltp\":24188.65,\"open\":24180.20,\"high\":24212.40,\"low\":24164.80,\"prev_close\":24191.05,\"volume\":0,\"oi\":0}}",
+      "get_trend_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"bars_loaded\":252,\"last_close\":24188.65,\"indicators\":{\"sma_20\":24186.40,\"sma_50\":24190.85,\"sma_200\":24150.10,\"ema_20\":24187.90,\"supertrend\":[24176.30,1],\"adx_di\":[14.20,13.80,11.40]},\"legend\":{\"adx_di\":\"[+DI, -DI, ADX]\"}}",
+      "get_momentum_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"rsi_14\":50.60,\"macd\":[1.20,1.40,-0.20],\"stochastic\":[48.90,51.30],\"cci_20\":-8.40}}",
+      "get_volatility_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"atr_14\":28.40,\"natr_14\":0.117,\"bb_width\":0.42,\"historical_volatility\":6.20}}",
+      "get_expiry_dates": "{\"status\":\"success\",\"data\":[\"26AUG26\",\"24SEP26\"]}",
+      "get_historical_data": "{\"count\":60,\"returned\":6,\"data\":[{\"close\":24191.0},{\"close\":24178.4},{\"close\":24196.7},{\"close\":24183.2},{\"close\":24199.9},{\"close\":24188.65}]}"
+    }
+  },
+  {
+    "id": "volatility-spike",
+    "expect": ["high-volatility"],
+    "tools": {
+      "get_quote": "{\"status\":\"success\",\"data\":{\"ltp\":23640.10,\"open\":24120.55,\"high\":24160.30,\"low\":23570.80,\"prev_close\":24118.40,\"volume\":0,\"oi\":0}}",
+      "get_trend_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"bars_loaded\":252,\"last_close\":23640.10,\"indicators\":{\"sma_20\":23980.40,\"sma_50\":24090.15,\"sma_200\":23860.70,\"ema_20\":23870.20,\"supertrend\":[24010.60,-1],\"adx_di\":[9.80,38.40,29.10]},\"legend\":{\"adx_di\":\"[+DI, -DI, ADX]\"}}",
+      "get_momentum_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"rsi_14\":24.30,\"macd\":[-86.40,-31.20,-55.20],\"stochastic\":[8.10,14.60],\"cci_20\":-212.70}}",
+      "get_volatility_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"atr_14\":268.40,\"natr_14\":1.135,\"bb_width\":6.90,\"historical_volatility\":31.80}}",
+      "get_expiry_dates": "{\"status\":\"success\",\"data\":[\"26AUG26\",\"24SEP26\"]}",
+      "get_historical_data": "{\"count\":60,\"returned\":6,\"data\":[{\"close\":24118.4},{\"close\":23980.2},{\"close\":24060.9},{\"close\":23740.5},{\"close\":23820.7},{\"close\":23640.1}]}"
+    }
+  },
+  {
+    "id": "thin-data",
+    "expect": ["unknown", "range-bound"],
+    "tools": {
+      "get_quote": "{\"status\":\"success\",\"data\":{\"ltp\":24010.00,\"open\":0,\"high\":0,\"low\":0,\"prev_close\":0,\"volume\":0,\"oi\":0}}",
+      "get_trend_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"bars_loaded\":3,\"last_close\":24010.00,\"indicators\":{\"sma_20\":null,\"sma_50\":null,\"sma_200\":null,\"ema_20\":null,\"supertrend\":[null,0],\"adx_di\":[null,null,null]},\"legend\":{\"adx_di\":\"[+DI, -DI, ADX]\"}}",
+      "get_momentum_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"rsi_14\":null,\"macd\":[null,null,null],\"stochastic\":[null,null],\"cci_20\":null}}",
+      "get_volatility_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"atr_14\":null,\"natr_14\":null,\"bb_width\":null,\"historical_volatility\":null}}",
+      "get_expiry_dates": "{\"status\":\"success\",\"data\":[\"26AUG26\"]}",
+      "get_historical_data": "{\"count\":3,\"returned\":3,\"data\":[{\"close\":24008.0},{\"close\":24011.5},{\"close\":24010.0}]}"
+    }
+  },
+  {
+    "id": "mixed-signals",
+    "expect": ["range-bound", "unknown", "high-volatility"],
+    "tools": {
+      "get_quote": "{\"status\":\"success\",\"data\":{\"ltp\":24305.75,\"open\":24290.10,\"high\":24418.60,\"low\":24201.30,\"prev_close\":24298.85,\"volume\":0,\"oi\":0}}",
+      "get_trend_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"bars_loaded\":252,\"last_close\":24305.75,\"indicators\":{\"sma_20\":24312.60,\"sma_50\":24280.40,\"sma_200\":24010.90,\"ema_20\":24308.10,\"supertrend\":[24290.50,1],\"adx_di\":[19.60,21.10,17.80]},\"legend\":{\"adx_di\":\"[+DI, -DI, ADX]\"}}",
+      "get_momentum_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"rsi_14\":54.20,\"macd\":[6.40,9.10,-2.70],\"stochastic\":[62.80,44.30],\"cci_20\":31.60}}",
+      "get_volatility_snapshot": "{\"symbol\":\"NIFTY\",\"interval\":\"15m\",\"indicators\":{\"atr_14\":112.30,\"natr_14\":0.462,\"bb_width\":2.60,\"historical_volatility\":17.40}}",
+      "get_expiry_dates": "{\"status\":\"success\",\"data\":[\"26AUG26\",\"24SEP26\"]}",
+      "get_historical_data": "{\"count\":60,\"returned\":6,\"data\":[{\"close\":24298.9},{\"close\":24380.2},{\"close\":24240.6},{\"close\":24360.4},{\"close\":24250.1},{\"close\":24305.75}]}"
+    }
+  }
+]

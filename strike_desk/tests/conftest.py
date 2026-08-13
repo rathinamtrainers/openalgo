@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from langchain_core.messages import AIMessage
+from langchain_core.tools import BaseTool
 from opentelemetry import trace as otel_trace
+from pydantic import Field
 
+import strike_desk
 from strike_desk.config import IST, Settings
 from strike_desk.graph import TickDeps
 from strike_desk.journal import Journal
@@ -23,6 +29,8 @@ from strike_desk.specialists import SpecialistRegistry, shutdown_executor
 
 BASE_URL = "http://openalgo.test"
 API_KEY = "test-api-key-0123456789abcdef"
+MODEL_KEY = "test-anthropic-key-0123456789abcdef"
+PACKAGED_PROMPTS = Path(strike_desk.__file__).parent / "prompts"
 
 
 def epoch_ms(day: date, at: time) -> int:
@@ -84,10 +92,11 @@ def settings(tmp_path) -> Settings:
     return Settings(
         openalgo_base_url=BASE_URL,
         openalgo_api_key=API_KEY,
+        anthropic_api_key=MODEL_KEY,
         openalgo_retries=0,
         openalgo_timeout_seconds=2.0,
         state_dir=state_dir,
-        prompts_dir=tmp_path / "prompts",
+        prompts_dir=PACKAGED_PROMPTS,
         tick_interval_seconds=60,
         tick_budget_seconds=20.0,
         specialist_timeout_seconds=0.5,
@@ -108,7 +117,7 @@ def journal(settings: Settings) -> Journal:
 @pytest.fixture
 def tracing(settings: Settings, journal: Journal):
     _reset_global_tracer_provider()
-    provider, processor = configure_tracing(settings, journal, Redactor([API_KEY]))
+    provider, processor = configure_tracing(settings, journal, Redactor([API_KEY, MODEL_KEY]))
     yield processor
     provider.shutdown()
     _reset_global_tracer_provider()
@@ -151,7 +160,12 @@ def registry() -> SpecialistRegistry:
 
 
 @pytest.fixture
-def deps(settings, client, journal, registry, tracing) -> TickDeps:
+def prompts(settings: Settings) -> PromptRegistry:
+    return PromptRegistry.load(settings.prompts_dir)
+
+
+@pytest.fixture
+def deps(settings, client, journal, registry, tracing, prompts) -> TickDeps:
     import sqlite3
 
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -164,7 +178,7 @@ def deps(settings, client, journal, registry, tracing) -> TickDeps:
         client=client,
         journal=journal,
         registry=registry,
-        prompts=PromptRegistry.load(settings.prompts_dir),
+        prompts=prompts,
         span_processor=tracing,
         checkpointer=checkpointer,
     )
@@ -186,10 +200,105 @@ class StubSpecialist:
 
     def __init__(self, role: str = "regime", payload: dict[str, Any] | None = None, **kwargs):
         self.role = role
-        self._payload = payload or {}
+        self._payload = {"status": "ok", **(payload or {})}
         self._kwargs = kwargs
 
     def run(self, request):
         from strike_desk.specialists import SpecialistResult
 
         return SpecialistResult(role=self.role, payload=self._payload, **self._kwargs)
+
+
+# --- doubles for the reasoning plane ---------------------------------------
+
+
+class CannedTool(BaseTool):
+    """A market tool that returns a fixed string and remembers how it was called."""
+
+    name: str
+    description: str = "canned market tool"
+    output: str = "{}"
+    raises: bool = False
+    record: list[dict[str, Any]] = Field(default_factory=list)
+
+    def _run(self, **kwargs: Any) -> str:
+        self.record.append(dict(kwargs))
+        if self.raises:
+            raise RuntimeError("tool exploded")
+        return self.output
+
+    async def _arun(self, **kwargs: Any) -> str:
+        return self._run(**kwargs)
+
+
+def ai_message(
+    tool_calls: list[dict[str, Any]] | None = None,
+    content: str = "",
+    input_tokens: int = 900,
+    output_tokens: int = 120,
+    stop_reason: str = "tool_use",
+) -> AIMessage:
+    """One scripted assistant turn, shaped the way ChatAnthropic returns them."""
+    calls = [
+        {"name": call["name"], "args": call["args"], "id": call.get("id", f"call-{index}"),
+         "type": "tool_call"}
+        for index, call in enumerate(tool_calls or [])
+    ]
+    return AIMessage(
+        content=content,
+        tool_calls=calls,
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+        response_metadata={"stop_reason": stop_reason},
+    )
+
+
+class ScriptedModel:
+    """Stands in for ChatAnthropic and replays a fixed sequence of answers."""
+
+    def __init__(self, answers: list[AIMessage], delay: float = 0.0) -> None:
+        self.answers = list(answers)
+        self.delay = delay
+        self.bindings: list[tuple[list[str], Any]] = []
+        self.rounds = 0
+
+    def bind_tools(self, tools, tool_choice=None):
+        self.bindings.append(([tool.name for tool in tools], tool_choice))
+        return self
+
+    async def ainvoke(self, messages):
+        self.rounds += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if not self.answers:
+            raise AssertionError("the analyst asked for more rounds than the script provides")
+        return self.answers.pop(0)
+
+
+class LocalToolSource:
+    """Runs the analyst's coroutine in the calling thread, with canned tools."""
+
+    def __init__(self, tools: list[BaseTool] | None = None) -> None:
+        self._tools = tools or []
+        self.starts = 0
+        self.fail_to_start: Exception | None = None
+
+    def ensure_started(self) -> None:
+        self.starts += 1
+        if self.fail_to_start is not None:
+            raise self.fail_to_start
+
+    def tools(self) -> list[BaseTool]:
+        return list(self._tools)
+
+    def submit(self, factory, timeout: float):
+        async def _run():
+            return await asyncio.wait_for(factory(), timeout)
+
+        try:
+            return asyncio.run(_run())
+        except TimeoutError as exc:  # asyncio.TimeoutError is TimeoutError on 3.12
+            raise TimeoutError(f"exceeded the {timeout:.1f}s analyst deadline") from exc

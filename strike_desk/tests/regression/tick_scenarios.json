@@ -89,6 +89,19 @@
         "regime_confidence": 0.99
       },
       "expect": {"outcome": "decline", "reason_code": "tick-timeout"}
+    },
+    {
+      "id": "REG-11",
+      "note": "ungrounded regime submission is a defect, not an opinion",
+      "state": {
+        "book": {"open_positions": []},
+        "specialist_error": {
+          "role": "regime",
+          "kind": "ungrounded",
+          "detail": "rationale cites 24500 which was never fetched"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-ungrounded"}
     }
   ]
 }

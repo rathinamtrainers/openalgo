@@ -99,8 +99,13 @@ class SpecialistRegistry:
         except FuturesTimeout as exc:
             future.cancel()
             raise SpecialistTimeout(role, f"exceeded {timeout_seconds:.1f}s") from exc
+        except (SpecialistTimeout, SpecialistUnavailable):
+            # A specialist that policed its own deadline keeps its own reason code.
+            raise
         except Exception as exc:
-            raise SpecialistUnavailable(role, f"raised {type(exc).__name__}") from exc
+            raise SpecialistUnavailable(
+                role, f"raised {type(exc).__name__}: {str(exc)[:160]}"
+            ) from exc
 
         if not isinstance(result, SpecialistResult) or result.role != role:
             raise SpecialistUnavailable(role, "returned a malformed result")
