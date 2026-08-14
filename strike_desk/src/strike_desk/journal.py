@@ -1,4 +1,4 @@
-"""Append-only SQLite journal: the ``decisions`` and ``traces`` tables."""
+"""Append-only SQLite journal: ``decisions``, ``traces`` and ``regime_reads``."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from sqlalchemy.pool import NullPool
 
 from .errors import JournalWriteError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Base(DeclarativeBase):
@@ -78,8 +78,42 @@ class TraceSpan(Base):
     attributes_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class RegimeRead(Base):
+    """One row per regime classification attempt. Never updated, never deleted."""
+
+    __tablename__ = "regime_reads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    read_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    tick_id: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    index_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(8), nullable=False)  # tick | cli
+    status: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    defect: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tool_error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    token_cost_micros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_set_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+
 # Append-only enforcement lives in the database, not in application discipline.
-for _table in (Decision.__table__, TraceSpan.__table__):
+for _table in (Decision.__table__, TraceSpan.__table__, RegimeRead.__table__):
     for _operation in ("UPDATE", "DELETE"):
         event.listen(
             _table,
@@ -154,6 +188,17 @@ class Journal:
         except SQLAlchemyError as exc:
             raise JournalWriteError(f"could not append span: {exc.__class__.__name__}") from exc
 
+    def record_regime_read(self, **fields: Any) -> str:
+        """Append one regime read. Raises JournalWriteError so the tick fails closed."""
+        try:
+            with self.session_scope() as session:
+                session.add(RegimeRead(**fields))
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(
+                f"could not append regime read: {exc.__class__.__name__}"
+            ) from exc
+        return str(fields["read_id"])
+
     def count_decisions(self, trading_day: str) -> int:
         with self.session_scope() as session:
             statement = select(func.count()).select_from(Decision).where(
@@ -170,6 +215,24 @@ class Journal:
                 .limit(limit)
             )
             return list(session.execute(statement).scalars())
+
+    def list_regime_reads(self, trading_day: str, limit: int = 100) -> Sequence[RegimeRead]:
+        with self.session_scope() as session:
+            statement = (
+                select(RegimeRead)
+                .where(RegimeRead.trading_day == trading_day)
+                .order_by(RegimeRead.created_at_utc.desc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def token_cost_micros(self, trading_day: str) -> int:
+        """What the day's reads have cost, in USD micro-dollars."""
+        with self.session_scope() as session:
+            statement = select(func.coalesce(func.sum(RegimeRead.token_cost_micros), 0)).where(
+                RegimeRead.trading_day == trading_day
+            )
+            return int(session.execute(statement).scalar_one())
 
     def spans_for_trace(self, trace_id: str) -> Sequence[TraceSpan]:
         with self.session_scope() as session:

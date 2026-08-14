@@ -28,7 +28,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Guardrail and regression gate
-        run: uv run pytest tests/test_guardrails.py tests/regression -q
+        run: uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py tests/regression -q
 
       - name: Full suite with coverage
         run: uv run pytest --cov=strike_desk --cov-report=term-missing --cov-fail-under=80
@@ -37,3 +37,40 @@ jobs:
         run: |
           uv run bandit -q -r src
           uv run pip-audit
+
+  evals:
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: strike_desk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the reasoning plane changed
+        id: changed
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > /tmp/changed.txt
+          if grep -qE 'strike_desk/src/strike_desk/(prompts/|regime_analyst|grounding|model_client)' /tmp/changed.txt \
+             || grep -q 'strike_desk/tests/evals/' /tmp/changed.txt; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        if: steps.changed.outputs.run == 'true'
+        with:
+          enable-cache: true
+
+      - name: Install and run the regime evals
+        if: steps.changed.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv python install 3.12
+          uv sync --group dev
+          uv run pytest tests/evals -m evals -q

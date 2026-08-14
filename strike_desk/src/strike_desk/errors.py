@@ -51,3 +51,15 @@ class JournalWriteError(StrikeDeskError):
 
 class PromptNotFound(StrikeDeskError):
     """A prompt artifact was requested that the registry does not hold."""
+
+
+class McpUnavailable(StrikeDeskError):
+    """The OpenAlgo MCP server could not be started, reached, or trusted."""
+
+
+class ModelCallFailed(StrikeDeskError):
+    """The model provider refused, errored, or was not configured."""
+
+
+class EventCalendarInvalid(StrikeDeskError):
+    """The event calendar exists but cannot be parsed; the desk must not guess."""

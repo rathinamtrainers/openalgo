@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
+import uuid
 from datetime import UTC, datetime
 
 from .config import IST, Settings, get_settings
+from .errors import McpUnavailable, ModelCallFailed, StrikeDeskError
 from .journal import Journal
+from .mcp_toolbox import McpToolbox
+from .observability import Redactor, configure_logging, configure_tracing, get_tracer
 from .prompt_registry import PromptRegistry
+from .regime_analyst import build_regime_analyst, build_regime_read_row
 from .service import StrikeDeskService
+from .specialists import SpecialistRequest
 
 
 def _today() -> str:
@@ -75,9 +82,15 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         for decision in decisions:
             by_reason[decision.reason_code] = by_reason.get(decision.reason_code, 0) + 1
 
+        reads = journal.list_regime_reads(day, limit=1000)
+        by_status: dict[str, int] = {}
+        for read in reads:
+            by_status[read.status] = by_status.get(read.status, 0) + 1
+
         killed = settings.kill_switch_path.exists()
         print(f"index            : {settings.index_symbol}")
         print(f"cadence          : {settings.tick_interval_seconds}s")
+        print(f"model            : {settings.regime_model}")
         print(f"prompt set       : {PromptRegistry.load(settings.prompts_dir).set_version}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
         if killed:
@@ -93,6 +106,10 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"decisions {day}: {len(decisions)}")
         for reason, count in sorted(by_reason.items()):
             print(f"  {reason:<26} {count}")
+        cost = journal.token_cost_micros(day)
+        print(f"regime reads {day}: {len(reads)}  (${cost / 1_000_000:.4f})")
+        for status, count in sorted(by_status.items()):
+            print(f"  {status:<26} {count}")
     finally:
         journal.close()
     return 0
@@ -116,6 +133,67 @@ def _cmd_journal(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_regime(settings: Settings, _args: argparse.Namespace) -> int:
+    """Run one regime read out of band, print it, and journal it as a CLI read."""
+    secrets = [settings.openalgo_api_key.get_secret_value()]
+    if settings.anthropic_api_key is not None:
+        secrets.append(settings.anthropic_api_key.get_secret_value())
+    redactor = Redactor(secrets)
+    configure_logging(settings, redactor)
+
+    journal = Journal(settings.db_path)
+    journal.create_schema()
+    provider, _processor = configure_tracing(settings, journal, redactor)
+    prompts = PromptRegistry.load(settings.prompts_dir)
+    toolbox = McpToolbox(settings)
+    tick_id = f"cli:{uuid.uuid4()}"
+    try:
+        analyst = build_regime_analyst(settings, prompts, toolbox)
+        with get_tracer().start_as_current_span("strike_desk.regime_cli") as root:
+            trace_id = format(root.get_span_context().trace_id, "032x")
+            result = analyst.run(
+                SpecialistRequest(
+                    tick_id=tick_id,
+                    index_symbol=settings.index_symbol,
+                    as_of=datetime.now(tz=UTC),
+                    book={},
+                )
+            )
+        journal.record_regime_read(
+            **build_regime_read_row(
+                dict(result.payload),
+                settings=settings,
+                prompts=prompts,
+                tick_id=tick_id,
+                trace_id=trace_id,
+                trading_day=_today(),
+                source="cli",
+            )
+        )
+        payload = result.payload
+        print(f"status     : {payload['status']}")
+        print(f"label      : {payload.get('label')}")
+        print(f"confidence : {payload.get('confidence')}")
+        print(f"rationale  : {payload.get('rationale')}")
+        print(f"tool calls : {payload.get('tool_call_count')} "
+              f"({payload.get('tool_error_count')} failed)")
+        print(f"cost       : ${result.token_cost_micros / 1_000_000:.4f}")
+        print(f"trace      : {trace_id}")
+        if payload.get("defect"):
+            print(f"defect     : {payload['defect']}")
+        print("evidence   :")
+        for item in payload.get("evidence") or []:
+            print(f"  {json.dumps(item, sort_keys=True)}")
+        return 0 if payload["status"] == "ok" else 2
+    except (McpUnavailable, ModelCallFailed, StrikeDeskError) as exc:
+        print(f"regime read failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        toolbox.close()
+        provider.shutdown()
+        journal.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -127,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     kill_parser.add_argument("--reason", default="engaged by the trader")
 
     subparsers.add_parser("resume", help="release the kill switch")
-    subparsers.add_parser("status", help="show liveness, kill state and today's decisions")
+    subparsers.add_parser("status", help="show liveness, kill state, decisions and reads")
+    subparsers.add_parser("regime", help="run one regime read now and print it")
 
     journal_parser = subparsers.add_parser("journal", help="print today's decisions")
     journal_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
@@ -141,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         "kill": _cmd_kill,
         "resume": _cmd_resume,
         "status": _cmd_status,
+        "regime": _cmd_regime,
         "journal": _cmd_journal,
     }
     return handlers[args.command](settings, args)

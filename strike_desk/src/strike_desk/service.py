@@ -15,12 +15,14 @@ from apscheduler.triggers.interval import IntervalTrigger
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .config import IST, Settings
-from .errors import JournalWriteError
+from .errors import JournalWriteError, McpUnavailable, ModelCallFailed, PromptNotFound
 from .graph import TickDeps
 from .journal import Journal
+from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing
 from .openalgo_client import OpenAlgoClient
 from .prompt_registry import PromptRegistry
+from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
 from .session import SessionGate
 from .specialists import SpecialistRegistry, shutdown_executor
@@ -37,7 +39,10 @@ class StrikeDeskService:
         self._settings = settings
         settings.state_dir.mkdir(parents=True, exist_ok=True)
 
-        redactor = Redactor([settings.openalgo_api_key.get_secret_value()])
+        secrets = [settings.openalgo_api_key.get_secret_value()]
+        if settings.anthropic_api_key is not None:
+            secrets.append(settings.anthropic_api_key.get_secret_value())
+        redactor = Redactor(secrets)
         configure_logging(settings, redactor)
 
         self._journal = Journal(settings.db_path)
@@ -47,6 +52,8 @@ class StrikeDeskService:
         self._client = OpenAlgoClient(settings)
         self._prompts = PromptRegistry.load(settings.prompts_dir)
         self.registry = SpecialistRegistry()
+        self._toolbox: McpToolbox | None = None
+        self._register_regime_analyst()
 
         self._checkpoint_conn = sqlite3.connect(
             str(settings.checkpoint_path), check_same_thread=False
@@ -68,6 +75,27 @@ class StrikeDeskService:
         self._stop = threading.Event()
         self._manual = threading.Event()
         self._journal_failures = 0
+
+    def _register_regime_analyst(self) -> None:
+        """Stand up the reasoning plane, or run without it and decline every tick."""
+        if self._settings.anthropic_api_key is None:
+            logger.warning(
+                "no Anthropic API key configured — the desk will tick and decline with "
+                "specialist-unavailable until one is set"
+            )
+            return
+        toolbox = McpToolbox(self._settings)
+        try:
+            analyst = build_regime_analyst(self._settings, self._prompts, toolbox)
+        except (ModelCallFailed, PromptNotFound):
+            logger.exception("could not build the regime analyst — running without one")
+            return
+        try:
+            toolbox.start()
+        except McpUnavailable:
+            logger.exception("MCP session unavailable at startup — it will retry on each read")
+        self._toolbox = toolbox
+        self.registry.register(analyst)
 
     def _safe_tick(self, trigger: str) -> None:
         """Never let one bad tick kill the daemon — but never let it hide, either."""
@@ -101,11 +129,12 @@ class StrikeDeskService:
     def start(self) -> None:
         self._client.ping()
         logger.info(
-            "strike-desk starting: index=%s cadence=%ss prompts=%s roles=%s",
+            "strike-desk starting: index=%s cadence=%ss prompts=%s roles=%s model=%s",
             self._settings.index_symbol,
             self._settings.tick_interval_seconds,
             self._prompts.set_version,
             self.registry.registered_roles() or "(none)",
+            self._settings.regime_model,
         )
         self._settings.pid_path.write_text(str(os.getpid()), encoding="utf-8")
         self._scheduler.add_job(
@@ -140,6 +169,8 @@ class StrikeDeskService:
         except Exception:  # noqa: BLE001
             logger.exception("scheduler shutdown failed")
         shutdown_executor()
+        if self._toolbox is not None:
+            self._toolbox.close()
         self._provider.shutdown()
         self._client.close()
         try:

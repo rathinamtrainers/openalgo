@@ -1,11 +1,16 @@
 [project]
 name = "strike-desk"
-version = "0.1.0"
-description = "Agentic options-buying desk on OpenAlgo — supervisor decision tick."
+version = "0.2.0"
+description = "Agentic options-buying desk on OpenAlgo — supervisor tick and regime analyst."
 requires-python = ">=3.12"
 dependencies = [
-    "langgraph==1.2.9",
-    "langgraph-checkpoint-sqlite==3.1.0",
+    "langgraph==1.2.11",
+    "langgraph-checkpoint-sqlite==3.1.1",
+    "langchain-core==1.5.4",
+    "langchain-anthropic==1.5.6",
+    "langchain-mcp-adapters==0.3.2",
+    "mcp==1.29.0",
+    "anthropic==0.121.0",
     "sqlalchemy==2.0.51",
     "httpx==0.28.1",
     "pydantic==2.13.4",
@@ -46,7 +51,10 @@ select = ["E", "F", "W", "I", "B", "C4", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers -m 'not evals'"
+markers = [
+    "evals: live-model regime evaluations; need ANTHROPIC_API_KEY and cost money",
+]
 filterwarnings = ["error::DeprecationWarning:strike_desk.*"]
 
 [tool.coverage.run]
@@ -54,6 +62,8 @@ source = ["strike_desk"]
 omit = [
     "*/strike_desk/__main__.py",
     "*/strike_desk/service.py",
+    # Its session lifecycle is proven against a real MCP server by hand, not by a double.
+    "*/strike_desk/mcp_toolbox.py",
 ]
 
 [tool.coverage.report]
