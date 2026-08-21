@@ -6,7 +6,7 @@
 >
 > **Outcome:** A deployed desk trading a real broker account through a human-approved loop — every decision traced, every risk limit enforced in code.
 
-![Navy one-page Strike Desk poster whose red 93% and orange 71% donuts print the retail F&O loss figures, with a where-AI-helps table pairing churn, theta decay, abandoned exits and over-sizing against a purple LLM-reasons bar and a green code-decides bar, a five-stage Sense, Reason, Risk Gate, Act, Observe strip, six numbered use cases, OpenAlgo advantage tiles, an Analyst to Risk Officer to Execution Officer to Observer control-plane overview, and guardrail, scoreboard and deployment footers.](images/amit-proposal-image-1.png)
+![Dark-navy tall poster titled Strike Desk, an agentic options-buying desk on OpenAlgo, opening with a promise panel of no predictive alpha, discipline is the edge and every decision traced, then a reality column whose 93 percent red ring and 71 percent orange ring sit above a structural-losses warning, a bleed-versus-strength table matching churn, theta decay, emotional exits and over-sizing to LLM answers split into a purple reasons-and-explains bar and a green code-decides-and-enforces bar, a product-at-a-glance column, a numbered Sense, Reason, Risk Gate, Act, Observe loop ending in a trophy of outcomes, six key use cases, eight OpenAlgo advantage tiles from 30+ brokers to a 112-tool MCP server, an architecture strip routing market data, broker APIs and news through an agentic control plane and Action Center to brokers over a memory and audit trail, and closing blocks on guardrails, metrics such as cost drag in bps, deployment, and the line that Strike Desk is not a crystal ball but discipline codified.](images/amit-proposal-image-1.png)
 
 ## Background
 
@@ -91,7 +91,7 @@ flowchart TD
     class JRNL store
 ```
 
-![Pale mint circuit-board schematic stacking Regime Analyst, Options Strategist, Risk Officer, Execution Agent and Position Monitor cards through a Risk Veto? diamond branching to DECLINE and an Action Center OK? diamond branching to a red ABORT, on into execution, position monitoring and a trade journal, beside a dark OpenAlgo substrate panel, five guardrail medallions, and a footer naming LangGraph 1.0, Claude Sonnet 5, Haiku 4.5 and Opus 4.8, AWS ap-south-1 Mumbai and Langfuse.](images/amit-proposal-image-2.png)
+![Wide mint-and-teal circuit-board banner under a discipline-not-prediction ribbon, whose left stack of five role cards — Regime Analyst reading trend, momentum and volatility, Options Strategist proposing contracts against a theta budget, a code-not-LLM Risk Officer with a deterministic veto, Execution Agent routing to Action Center, and Position Monitor holding stops, targets and theta time-stops — feeds a Risk Veto diamond whose Yes arm declines and whose No arm continues to an Action Center OK diamond that either aborts in red or runs execution and position monitoring into a trade journal, with a dark substrate panel listing the unified /api/v1/ surface, ZeroMQ feed, sandbox auto square-off and a 112-tool MCP server, five guardrail circles for sandbox default, Action Center, kill switch, auto square-off and fail-flat, and a tech-stack rail naming LangGraph 1.0, Claude Sonnet 5, Haiku 4.5 and Opus 4.8, AWS ap-south-1 Mumbai with EC2 ARM and an Elastic IP, and Langfuse tracing.](images/amit-proposal-image-2.png)
 
 ## Tech stack & why
 
