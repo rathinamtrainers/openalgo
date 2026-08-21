@@ -694,14 +694,14 @@ class Journal:
         """Widen an existing table in place. No row is read, rewritten or deleted."""
         with self._engine.begin() as connection:
             for table, column, column_type in ADDED_COLUMNS:
-                rows = connection.exec_driver_sql(
-                    f"PRAGMA table_info({table})"  # nosec B608 — table names are module constants
-                ).fetchall()
+                # Every name interpolated below comes from ADDED_COLUMNS, a module
+                # constant; no caller-supplied value ever reaches this SQL.
+                rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
                 present = {str(row[1]) for row in rows}
                 if not present or column in present:
                     continue
                 connection.exec_driver_sql(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"  # nosec B608
+                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
                 )
                 logger.info("journal migration: added %s.%s", table, column)
 
@@ -2183,7 +2183,10 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
 
 def _cmd_declines(settings: Settings, args: argparse.Namespace) -> int:
     """Count and classify what the desk decided, for one day or a window of days."""
-    redactor = Redactor([settings.openalgo_api_key.get_secret_value()])
+    secrets = [settings.openalgo_api_key.get_secret_value()]
+    if settings.anthropic_api_key is not None:
+        secrets.append(settings.anthropic_api_key.get_secret_value())
+    redactor = Redactor(secrets)
     configure_logging(settings, redactor)
     journal = Journal(settings.db_path)
     journal.create_schema()

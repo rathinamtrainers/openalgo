@@ -25,6 +25,7 @@ mindmap
     9 Teardown
     10 Production target
     11 Reference
+    12 Limitations
 ```
 
 ## 1. What changes on the host
@@ -254,6 +255,8 @@ Every item here is a tier, a schedule or an additional resource; none of it edit
 ## 12. Limitations
 
 Rows written before this release carry `NULL` in both new columns permanently. The report classifies them from the taxonomy so nothing is lost, but a direct query against the columns will show the gap, and the append-only triggers mean it can never be filled.
+
+The report unit reads `/run/strike-desk/env`, which the main service renders on tmpfs when it starts. If `strike-desk` is deliberately stopped, the timer therefore fails on a missing environment file rather than on anything about the report — a failed unit is the right signal in that case, but it is worth recognising for what it is.
 
 The timer reports the day it runs, so a day the instance was down is reported on the next boot by `Persistent=true` — which will report *that* day, not the missed one. Recovering a missed day is `strike-desk declines --day <the date>` by hand; nothing about the journal is lost either way.
 
