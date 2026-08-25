@@ -14,6 +14,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from .book_state import read_book_state
 from .config import Settings
+from .decline_taxonomy import describe, render
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
 from .journal import SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
@@ -85,19 +86,29 @@ class TickDeps:
     checkpointer: Any
 
 
-def _with_rationale(text: str, state: TickState) -> str:
-    rationale = (state.get("regime_rationale") or "").strip()
-    return f"{text} Analyst: {rationale}" if rationale else text
+def _rationale(state: TickState) -> str | None:
+    """The analyst's own sentence, when this tick had one."""
+    text = (state.get("regime_rationale") or "").strip()
+    return text or None
 
 
 def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str]:
-    """The complete decision table. Returns (outcome, reason_code, reason_text)."""
+    """The complete decision table. Returns (outcome, reason_code, reason_text).
+
+    Every branch names its reason code and lets the taxonomy write the sentence, so the
+    wording of a verdict lives in exactly one place and is pinned by a golden test.
+    """
+    cap = settings.reason_text_max_chars
+
     if state.get("budget_exceeded"):
         return (
             OUTCOME_DECLINE,
             REASON_TICK_TIMEOUT,
-            f"Declined: the tick exceeded its {settings.tick_budget_seconds:.0f}s budget "
-            "before a decision could be assembled.",
+            render(
+                REASON_TICK_TIMEOUT,
+                max_chars=cap,
+                budget=f"{settings.tick_budget_seconds:.0f}",
+            ),
         )
 
     book_error = state.get("book_error")
@@ -105,19 +116,22 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
         return (
             OUTCOME_DECLINE,
             REASON_DATA_QUALITY,
-            f"Declined: the book could not be read from OpenAlgo ({book_error}). "
-            "An unreadable book is never assumed flat.",
+            render(REASON_DATA_QUALITY, max_chars=cap, variant="book", detail=book_error),
         )
 
     book = state.get("book") or {}
     positions = book.get("open_positions") or []
     if positions:
-        symbols = ", ".join(str(position.get("symbol", "?")) for position in positions)
         return (
             OUTCOME_HOLD,
             REASON_POSITION_OPEN,
-            f"Held: {len(positions)} open {settings.index_symbol} position(s) ({symbols}). "
-            "This tick manages the book; it does not add to it.",
+            render(
+                REASON_POSITION_OPEN,
+                max_chars=cap,
+                count=len(positions),
+                index=settings.index_symbol,
+                symbols=", ".join(str(position.get("symbol", "?")) for position in positions),
+            ),
         )
 
     regime_data_error = state.get("regime_data_error")
@@ -125,8 +139,7 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
         return (
             OUTCOME_DECLINE,
             REASON_DATA_QUALITY,
-            f"Declined: the regime could not be read from live data ({regime_data_error}). "
-            "The desk does not classify a market it could not see.",
+            render(REASON_DATA_QUALITY, max_chars=cap, variant="regime", detail=regime_data_error),
         )
 
     error = state.get("specialist_error")
@@ -138,26 +151,30 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             return (
                 OUTCOME_DECLINE,
                 REASON_SPECIALIST_TIMEOUT,
-                f"Declined: the {role!r} specialist did not answer within its timeout ({detail}).",
+                render(REASON_SPECIALIST_TIMEOUT, max_chars=cap, role=role, detail=detail),
             )
         if kind == "ungrounded":
             return (
                 OUTCOME_DECLINE,
                 REASON_REGIME_UNGROUNDED,
-                f"Declined: the regime read cited data it did not fetch ({detail}). "
-                "An ungrounded read is a defect, not an opinion.",
+                render(REASON_REGIME_UNGROUNDED, max_chars=cap, detail=detail),
             )
         return (
             OUTCOME_DECLINE,
             REASON_SPECIALIST_UNAVAILABLE,
-            f"Declined: no usable {role!r} specialist ({detail}).",
+            render(REASON_SPECIALIST_UNAVAILABLE, max_chars=cap, role=role, detail=detail),
         )
 
     if state.get("regime_label") is None:
         return (
             OUTCOME_DECLINE,
             REASON_SPECIALIST_UNAVAILABLE,
-            "Declined: no usable 'regime' specialist (no specialist registered for this role).",
+            render(
+                REASON_SPECIALIST_UNAVAILABLE,
+                max_chars=cap,
+                role=ROLE_REGIME,
+                detail="no specialist registered for this role",
+            ),
         )
 
     label = state.get("regime_label") or "unknown"
@@ -166,28 +183,37 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
         return (
             OUTCOME_DECLINE,
             REASON_REGIME_NOT_TRADEABLE,
-            _with_rationale(
-                f"Declined: regime read as {label!r}, which this playbook does not trade.", state
+            render(
+                REASON_REGIME_NOT_TRADEABLE,
+                max_chars=cap,
+                rationale=_rationale(state),
+                label=label,
             ),
         )
     if confidence < settings.min_regime_confidence:
         return (
             OUTCOME_DECLINE,
             REASON_REGIME_LOW_CONFIDENCE,
-            _with_rationale(
-                f"Declined: regime {label!r} is tradeable but confidence {confidence:.2f} "
-                f"is below the {settings.min_regime_confidence:.2f} floor.",
-                state,
+            render(
+                REASON_REGIME_LOW_CONFIDENCE,
+                max_chars=cap,
+                rationale=_rationale(state),
+                label=label,
+                confidence=f"{confidence:.2f}",
+                floor=f"{settings.min_regime_confidence:.2f}",
             ),
         )
     return (
         OUTCOME_DECLINE,
         REASON_SPECIALIST_UNAVAILABLE,
-        _with_rationale(
-            f"Declined: regime {label!r} is tradeable at {confidence:.2f} confidence, but no "
-            f"{ROLE_STRATEGIST!r} specialist is registered to propose a contract. "
-            "A regime read alone is never an entry.",
-            state,
+        render(
+            REASON_SPECIALIST_UNAVAILABLE,
+            max_chars=cap,
+            variant="no_strategist",
+            rationale=_rationale(state),
+            label=label,
+            confidence=f"{confidence:.2f}",
+            role=ROLE_STRATEGIST,
         ),
     )
 
@@ -333,8 +359,11 @@ def build_tick_graph(deps: TickDeps) -> Any:
             if _over_budget(state) and not state.get("budget_exceeded"):
                 state = {**state, "budget_exceeded": True}
             outcome, reason_code, reason_text = _decide_outcome(state, deps.settings)
+            entry = describe(reason_code)
             span.set_attribute("decision.outcome", outcome)
             span.set_attribute("decision.reason_code", reason_code)
+            span.set_attribute("decision.reason_category", entry.category)
+            span.set_attribute("decision.reason_disposition", entry.disposition)
             return {
                 "outcome": outcome,
                 "reason_code": reason_code,
@@ -347,6 +376,7 @@ def build_tick_graph(deps: TickDeps) -> Any:
             latency_ms = int((time.monotonic() - state["started_monotonic"]) * 1000)
             trace_complete = not deps.span_processor.had_failure(state["trace_id"])
             models = [version for version in (state.get("model_versions") or []) if version]
+            entry = describe(state["reason_code"])
             deps.journal.record_decision(
                 tick_id=state["tick_id"],
                 trace_id=state["trace_id"],
@@ -357,6 +387,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
                 outcome=state["outcome"],
                 reason_code=state["reason_code"],
                 reason_text=state["reason_text"],
+                reason_category=entry.category,
+                reason_disposition=entry.disposition,
                 regime_label=state.get("regime_label"),
                 regime_confidence=state.get("regime_confidence"),
                 book_state_json=json.dumps(state.get("book"), default=str, sort_keys=True),
@@ -370,10 +402,12 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("journal.latency_ms", latency_ms)
             span.set_attribute("journal.trace_complete", trace_complete)
             logger.info(
-                "tick %s -> %s/%s in %dms",
+                "tick %s -> %s/%s (%s/%s) in %dms",
                 state["tick_id"],
                 state["outcome"],
                 state["reason_code"],
+                entry.category,
+                entry.disposition,
                 latency_ms,
             )
             return {}

@@ -28,7 +28,13 @@ jobs:
         run: uv run ruff check .
 
       - name: Guardrail and regression gate
-        run: uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py tests/regression -q
+        run: >-
+          uv run pytest -q
+          tests/test_guardrails.py
+          tests/test_guardrails_regime.py
+          tests/test_decline_taxonomy.py
+          tests/test_journal_migration.py
+          tests/regression
 
       - name: Full suite with coverage
         run: uv run pytest --cov=strike_desk --cov-report=term-missing --cov-fail-under=80

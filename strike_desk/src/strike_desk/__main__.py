@@ -8,9 +8,19 @@ import os
 import signal
 import sys
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from .config import IST, Settings, get_settings
+from .decline_report import (
+    DayReport,
+    WindowReport,
+    build_day_report,
+    build_window_report,
+    render_day,
+    render_window,
+    to_json,
+)
+from .decline_taxonomy import TAXONOMY_ARTIFACT
 from .errors import McpUnavailable, ModelCallFailed, StrikeDeskError
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
@@ -23,6 +33,24 @@ from .specialists import SpecialistRequest
 
 def _today() -> str:
     return datetime.now(tz=IST).date().isoformat()
+
+
+def _trading_day(raw: str) -> str:
+    """An IST trading day, rejected at the boundary rather than deep in a query."""
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not an IST date as YYYY-MM-DD") from exc
+
+
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
 
 
 def _cmd_run(settings: Settings, _args: argparse.Namespace) -> int:
@@ -77,10 +105,7 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
     try:
         journal.create_schema()
         day = _today()
-        decisions = journal.list_decisions(day, limit=1000)
-        by_reason: dict[str, int] = {}
-        for decision in decisions:
-            by_reason[decision.reason_code] = by_reason.get(decision.reason_code, 0) + 1
+        report = build_day_report(journal, day, settings.index_symbol)
 
         reads = journal.list_regime_reads(day, limit=1000)
         by_status: dict[str, int] = {}
@@ -92,6 +117,7 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"cadence          : {settings.tick_interval_seconds}s")
         print(f"model            : {settings.regime_model}")
         print(f"prompt set       : {PromptRegistry.load(settings.prompts_dir).set_version}")
+        print(f"taxonomy         : {TAXONOMY_ARTIFACT}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
         if killed:
             reason = settings.kill_switch_path.read_text(encoding="utf-8").strip()
@@ -103,9 +129,12 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
             print(f"last tick attempt: {beat.isoformat()} ({age:.0f}s ago)")
         else:
             print("last tick attempt: never")
-        print(f"decisions {day}: {len(decisions)}")
-        for reason, count in sorted(by_reason.items()):
-            print(f"  {reason:<26} {count}")
+        print(
+            f"decisions {day}: {report.total}"
+            f"  (declines {report.declines} | holds {report.holds} | entries {report.entries})"
+        )
+        for row in report.reasons:
+            print(f"  {row.code:<26} {row.count:>4}  {row.category}/{row.disposition}")
         cost = journal.token_cost_micros(day)
         print(f"regime reads {day}: {len(reads)}  (${cost / 1_000_000:.4f})")
         for status, count in sorted(by_status.items()):
@@ -115,6 +144,42 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_declines(settings: Settings, args: argparse.Namespace) -> int:
+    """Count and classify what the desk decided, for one day or a window of days."""
+    secrets = [settings.openalgo_api_key.get_secret_value()]
+    if settings.anthropic_api_key is not None:
+        secrets.append(settings.anthropic_api_key.get_secret_value())
+    redactor = Redactor(secrets)
+    configure_logging(settings, redactor)
+    journal = Journal(settings.db_path)
+    journal.create_schema()
+    provider, _processor = configure_tracing(settings, journal, redactor)
+    try:
+        with get_tracer().start_as_current_span("report.declines") as span:
+            span.set_attribute("report.taxonomy", TAXONOMY_ARTIFACT)
+            report: DayReport | WindowReport
+            if args.since is not None:
+                days = args.since or settings.report_default_days
+                report = build_window_report(journal, settings.index_symbol, limit=days)
+                rendered = render_window(report)
+                span.set_attribute("report.days", len(report.days))
+            else:
+                day = args.day or _today()
+                report = build_day_report(journal, day, settings.index_symbol)
+                rendered = render_day(report)
+                span.set_attribute("report.days", 1)
+                span.set_attribute("report.trading_day", day)
+            span.set_attribute("report.total", report.total)
+            span.set_attribute("report.defects", report.defects)
+            span.set_attribute("report.unknown_codes", ",".join(report.unknown_codes) or "none")
+            span.set_attribute("report.healthy", report.healthy)
+        print(to_json(report) if args.json else rendered)
+        return 0 if report.healthy else 2
+    finally:
+        provider.shutdown()
+        journal.close()
+
+
 def _cmd_journal(settings: Settings, args: argparse.Namespace) -> int:
     journal = Journal(settings.db_path)
     try:
@@ -122,9 +187,10 @@ def _cmd_journal(settings: Settings, args: argparse.Namespace) -> int:
         day = args.day or _today()
         for decision in journal.list_decisions(day, limit=args.limit):
             flag = "" if decision.trace_complete else "  [TRACE INCOMPLETE]"
+            category = decision.reason_category or "unstamped"
             print(
                 f"{decision.created_at_utc.isoformat()}  {decision.outcome:<8}"
-                f"{decision.reason_code:<26} {decision.latency_ms:>5}ms  "
+                f"{decision.reason_code:<26} {category:<12} {decision.latency_ms:>5}ms  "
                 f"{decision.trace_id}{flag}"
             )
             print(f"    {decision.reason_text}")
@@ -209,10 +275,28 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("regime", help="run one regime read now and print it")
 
     journal_parser = subparsers.add_parser("journal", help="print today's decisions")
-    journal_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
-    journal_parser.add_argument("--limit", type=int, default=50)
+    journal_parser.add_argument("--day", type=_trading_day, help="IST trading day as YYYY-MM-DD")
+    journal_parser.add_argument("--limit", type=_positive_int, default=50)
+
+    declines_parser = subparsers.add_parser(
+        "declines", help="count and classify the desk's no-trade decisions"
+    )
+    declines_parser.add_argument("--day", type=_trading_day, help="IST trading day as YYYY-MM-DD")
+    declines_parser.add_argument(
+        "--since",
+        type=_positive_int,
+        nargs="?",
+        const=0,
+        help="report the most recent N journalled trading days instead of one day; "
+        "bare --since uses STRIKE_DESK_REPORT_DEFAULT_DAYS",
+    )
+    declines_parser.add_argument(
+        "--json", action="store_true", help="print the same numbers as a JSON document"
+    )
 
     args = parser.parse_args(argv)
+    if getattr(args, "since", None) is not None and getattr(args, "day", None) is not None:
+        parser.error("--day and --since are alternatives; pass one of them")
     settings = get_settings()
     handlers = {
         "run": _cmd_run,
@@ -222,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "regime": _cmd_regime,
         "journal": _cmd_journal,
+        "declines": _cmd_declines,
     }
     return handlers[args.command](settings, args)
 

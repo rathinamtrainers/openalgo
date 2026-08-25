@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -28,7 +29,9 @@ from sqlalchemy.pool import NullPool
 
 from .errors import JournalWriteError
 
-SCHEMA_VERSION = 2
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 3
 
 
 class Base(DeclarativeBase):
@@ -50,6 +53,10 @@ class Decision(Base):
     outcome: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
     reason_code: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
     reason_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Written from the taxonomy, nullable because a journal from an earlier release has
+    # rows that predate these columns and an append-only table can never be backfilled.
+    reason_category: Mapped[str | None] = mapped_column(String(24), index=True, nullable=True)
+    reason_disposition: Mapped[str | None] = mapped_column(String(16), nullable=True)
     regime_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
     regime_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     book_state_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -125,6 +132,13 @@ for _table in (Decision.__table__, TraceSpan.__table__, RegimeRead.__table__):
             ),
         )
 
+# Columns added after a table shipped. Always nullable and never given a default, so an
+# older binary can still write rows and a newer one can still read the older rows.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("decisions", "reason_category", "VARCHAR(24)"),
+    ("decisions", "reason_disposition", "VARCHAR(16)"),
+)
+
 
 def _configure_connection(dbapi_connection: Any, _record: Any) -> None:
     """Apply the SQLite pragmas an audit journal needs on every fresh connection."""
@@ -155,8 +169,24 @@ class Journal:
         return self._path
 
     def create_schema(self) -> None:
-        """Create tables and append-only triggers if they do not already exist."""
+        """Create tables and triggers if absent, then add any column this release added."""
         Base.metadata.create_all(self._engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Widen an existing table in place. No row is read, rewritten or deleted."""
+        with self._engine.begin() as connection:
+            for table, column, column_type in ADDED_COLUMNS:
+                # Every name interpolated below comes from ADDED_COLUMNS, a module
+                # constant; no caller-supplied value ever reaches this SQL.
+                rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+                present = {str(row[1]) for row in rows}
+                if not present or column in present:
+                    continue
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+                )
+                logger.info("journal migration: added %s.%s", table, column)
 
     @contextmanager
     def session_scope(self) -> Iterator[Session]:
@@ -233,6 +263,94 @@ class Journal:
                 RegimeRead.trading_day == trading_day
             )
             return int(session.execute(statement).scalar_one())
+
+    # --- reporting reads ----------------------------------------------------
+
+    def decision_rollup(self, trading_day: str) -> list[dict[str, Any]]:
+        """One row per (outcome, reason code, stored category) group, with its count."""
+        with self.session_scope() as session:
+            statement = (
+                select(
+                    Decision.outcome,
+                    Decision.reason_code,
+                    Decision.reason_category,
+                    Decision.reason_disposition,
+                    func.count().label("total"),
+                )
+                .where(Decision.trading_day == trading_day)
+                .group_by(
+                    Decision.outcome,
+                    Decision.reason_code,
+                    Decision.reason_category,
+                    Decision.reason_disposition,
+                )
+            )
+            return [
+                {
+                    "outcome": str(row.outcome),
+                    "reason_code": str(row.reason_code),
+                    "reason_category": row.reason_category,
+                    "reason_disposition": row.reason_disposition,
+                    "count": int(row.total),
+                }
+                for row in session.execute(statement)
+            ]
+
+    def decision_bounds(self, trading_day: str) -> tuple[datetime | None, datetime | None]:
+        """When the day's first and last decisions were written."""
+        with self.session_scope() as session:
+            base = select(Decision.created_at_utc).where(Decision.trading_day == trading_day)
+            first = session.execute(
+                base.order_by(Decision.created_at_utc.asc()).limit(1)
+            ).scalar_one_or_none()
+            last = session.execute(
+                base.order_by(Decision.created_at_utc.desc()).limit(1)
+            ).scalar_one_or_none()
+            return first, last
+
+    def decision_cost_micros(self, trading_day: str) -> int:
+        """What the day's decisions cost in tokens, in USD micro-dollars."""
+        with self.session_scope() as session:
+            statement = select(func.coalesce(func.sum(Decision.token_cost_micros), 0)).where(
+                Decision.trading_day == trading_day
+            )
+            return int(session.execute(statement).scalar_one())
+
+    def incomplete_trace_count(self, trading_day: str) -> int:
+        """Decisions whose trace did not persist cleanly — a safety-system defect."""
+        with self.session_scope() as session:
+            statement = (
+                select(func.count())
+                .select_from(Decision)
+                .where(Decision.trading_day == trading_day, Decision.trace_complete.is_(False))
+            )
+            return int(session.execute(statement).scalar_one())
+
+    def regime_label_rollup(self, trading_day: str) -> dict[str, int]:
+        """The labels the day's ticks actually read, counted."""
+        with self.session_scope() as session:
+            statement = (
+                select(RegimeRead.label, func.count().label("total"))
+                .where(
+                    RegimeRead.trading_day == trading_day,
+                    RegimeRead.source == "tick",
+                    RegimeRead.label.is_not(None),
+                )
+                .group_by(RegimeRead.label)
+                .order_by(func.count().desc())
+            )
+            return {str(row.label): int(row.total) for row in session.execute(statement)}
+
+    def recent_trading_days(self, limit: int = 5) -> list[str]:
+        """The most recent days that hold at least one decision, newest first."""
+        with self.session_scope() as session:
+            statement = (
+                select(Decision.trading_day)
+                .group_by(Decision.trading_day)
+                .order_by(Decision.trading_day.desc())
+                .limit(limit)
+            )
+            return [str(day) for day in session.execute(statement).scalars()]
 
     def spans_for_trace(self, trace_id: str) -> Sequence[TraceSpan]:
         with self.session_scope() as session:

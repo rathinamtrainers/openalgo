@@ -74,6 +74,10 @@ class Settings(BaseSettings):
 
     # --- Supervisor policy --------------------------------------------------
     min_regime_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    reason_text_max_chars: int = Field(default=400, ge=120, le=1000)
+
+    # --- Reporting ----------------------------------------------------------
+    report_default_days: int = Field(default=5, ge=1, le=60)
 
     # --- Regime Analyst (reasoning plane) -----------------------------------
     anthropic_api_key: SecretStr | None = None
