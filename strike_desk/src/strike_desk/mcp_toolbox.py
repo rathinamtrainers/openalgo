@@ -1,4 +1,4 @@
-"""The MCP toolbox: OpenAlgo's tool surface, scoped to six read-only market tools."""
+"""The MCP toolbox: OpenAlgo's tool surface, scoped per specialist role."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import asyncio
 import logging
 import os
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FuturesTimeout
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from langchain_core.tools import BaseTool
@@ -18,13 +19,13 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from .config import Settings
 from .errors import McpUnavailable
+from .specialists import ROLE_REGIME, ROLE_STRATEGIST
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "openalgo"
 
-#: Everything the Regime Analyst may reach. Nothing here can place, modify,
-#: cancel or square off an order, and nothing here can send a message.
+#: Everything the Regime Analyst may reach. Unchanged from iteration 02.
 REGIME_TOOLS: tuple[str, ...] = (
     "get_quote",
     "get_historical_data",
@@ -34,24 +35,78 @@ REGIME_TOOLS: tuple[str, ...] = (
     "get_expiry_dates",
 )
 
+#: Everything the Options Strategist may reach. It reads the chain, resolves a symbol and
+#: prices the Greeks; it forms its own directional view from trend and momentum. Nothing
+#: here can place, modify, cancel or square off an order, and nothing here can send a
+#: message.
+STRATEGIST_TOOLS: tuple[str, ...] = (
+    "get_quote",
+    "get_expiry_dates",
+    "get_option_chain",
+    "get_option_symbol",
+    "get_option_greeks",
+    "get_trend_snapshot",
+    "get_momentum_snapshot",
+)
+
+#: The union, loaded once from one session.
+REQUIRED_TOOLS: tuple[str, ...] = tuple(sorted(set(REGIME_TOOLS) | set(STRATEGIST_TOOLS)))
+
+TOOLS_BY_ROLE: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {ROLE_REGIME: REGIME_TOOLS, ROLE_STRATEGIST: STRATEGIST_TOOLS}
+)
+
+#: A whitelisted tool name may never begin with a verb that changes state at the broker.
+FORBIDDEN_PREFIXES: tuple[str, ...] = (
+    "place",
+    "modify",
+    "cancel",
+    "close",
+    "square",
+    "send",
+    "set",
+    "toggle",
+)
+
+
+def _assert_read_only(names: tuple[str, ...]) -> None:
+    """Import-time guardrail: a mutating tool cannot reach a whitelist by accident."""
+    offenders = sorted(name for name in names if name.startswith(FORBIDDEN_PREFIXES))
+    if offenders:
+        raise ValueError(
+            f"whitelisted tools must be read-only; these are not: {', '.join(offenders)}"
+        )
+
+
+_assert_read_only(REQUIRED_TOOLS)
+
 
 class ToolSource(Protocol):
-    """What the Regime Analyst needs from whatever holds its tools."""
+    """What a specialist needs from whatever holds its tools."""
 
     def ensure_started(self) -> None: ...
 
-    def tools(self) -> list[BaseTool]: ...
+    def tools(self, role: str) -> list[BaseTool]: ...
 
     def submit(self, factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float) -> Any: ...
 
 
 def select_tools(loaded: list[BaseTool]) -> list[BaseTool]:
-    """Keep exactly the whitelisted tools, in order, and fail closed if one is absent."""
+    """Keep exactly the union whitelist, in order, and fail closed if one is absent."""
     by_name = {tool.name: tool for tool in loaded}
-    missing = [name for name in REGIME_TOOLS if name not in by_name]
+    missing = [name for name in REQUIRED_TOOLS if name not in by_name]
     if missing:
         raise McpUnavailable(f"MCP server is missing required tools: {', '.join(missing)}")
-    return [by_name[name] for name in REGIME_TOOLS]
+    return [by_name[name] for name in REQUIRED_TOOLS]
+
+
+def tools_for_role(loaded: list[BaseTool], role: str) -> list[BaseTool]:
+    """The slice of the loaded union that one role may reach."""
+    allowed = TOOLS_BY_ROLE.get(role)
+    if allowed is None:
+        raise McpUnavailable(f"no tool whitelist is defined for role {role!r}")
+    by_name = {tool.name: tool for tool in loaded}
+    return [by_name[name] for name in allowed if name in by_name]
 
 
 class McpToolbox:
@@ -186,11 +241,15 @@ class McpToolbox:
 
     # -- use ----------------------------------------------------------------
 
-    def tools(self) -> list[BaseTool]:
+    def tools(self, role: str) -> list[BaseTool]:
         with self._lock:
             if not self._tools:
                 raise McpUnavailable("no MCP tools are loaded")
-            return list(self._tools)
+            loaded = list(self._tools)
+        selected = tools_for_role(loaded, role)
+        if not selected:
+            raise McpUnavailable(f"no tools are loaded for role {role!r}")
+        return selected
 
     def submit(self, factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float) -> Any:
         """Run one coroutine on the MCP loop, cancelling it if it outstays its deadline."""

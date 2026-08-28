@@ -26,6 +26,21 @@ def build_regime_model(settings: Settings) -> ChatAnthropic:
     )
 
 
+def build_strategist_model(settings: Settings) -> ChatAnthropic:
+    """Claude Sonnet 5 — the deliberation tier. Temperature 0: a chooser, not a writer."""
+    if settings.anthropic_api_key is None:
+        raise ModelCallFailed("STRIKE_DESK_ANTHROPIC_API_KEY is not configured")
+    return ChatAnthropic(
+        model=settings.strategist_model,
+        temperature=settings.strategist_temperature,
+        max_tokens=settings.strategist_max_output_tokens,
+        timeout=settings.strategist_deadline_seconds,
+        max_retries=1,
+        stop=None,
+        api_key=settings.anthropic_api_key,
+    )
+
+
 def token_usage(message: AIMessage) -> tuple[int, int]:
     """Input and output tokens for one model round, whatever shape the metadata takes."""
     usage: dict[str, Any] = dict(message.usage_metadata or {})
@@ -42,4 +57,12 @@ def cost_micros(settings: Settings, input_tokens: int, output_tokens: int) -> in
     """Cost in USD micro-dollars. A price of $1 per MTok is exactly 1 micro-dollar per token."""
     return round(
         input_tokens * settings.price_in_per_mtok + output_tokens * settings.price_out_per_mtok
+    )
+
+
+def strategist_cost_micros(settings: Settings, input_tokens: int, output_tokens: int) -> int:
+    """Cost in USD micro-dollars at the strategist's own tier prices."""
+    return round(
+        input_tokens * settings.strategist_price_in_per_mtok
+        + output_tokens * settings.strategist_price_out_per_mtok
     )

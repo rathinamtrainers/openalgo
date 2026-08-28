@@ -21,6 +21,7 @@ from .journal import Journal
 from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing
 from .openalgo_client import OpenAlgoClient
+from .options_strategist import build_options_strategist
 from .prompt_registry import PromptRegistry
 from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
@@ -53,7 +54,7 @@ class StrikeDeskService:
         self._prompts = PromptRegistry.load(settings.prompts_dir)
         self.registry = SpecialistRegistry()
         self._toolbox: McpToolbox | None = None
-        self._register_regime_analyst()
+        self._register_specialists()
 
         self._checkpoint_conn = sqlite3.connect(
             str(settings.checkpoint_path), check_same_thread=False
@@ -76,7 +77,7 @@ class StrikeDeskService:
         self._manual = threading.Event()
         self._journal_failures = 0
 
-    def _register_regime_analyst(self) -> None:
+    def _register_specialists(self) -> None:
         """Stand up the reasoning plane, or run without it and decline every tick."""
         if self._settings.anthropic_api_key is None:
             logger.warning(
@@ -85,17 +86,25 @@ class StrikeDeskService:
             )
             return
         toolbox = McpToolbox(self._settings)
+        specialists = []
         try:
-            analyst = build_regime_analyst(self._settings, self._prompts, toolbox)
+            specialists.append(build_regime_analyst(self._settings, self._prompts, toolbox))
         except (ModelCallFailed, PromptNotFound):
             logger.exception("could not build the regime analyst — running without one")
+        try:
+            specialists.append(build_options_strategist(self._settings, self._prompts, toolbox))
+        except (ModelCallFailed, PromptNotFound):
+            logger.exception("could not build the options strategist — running without one")
+        if not specialists:
+            toolbox.close()
             return
         try:
             toolbox.start()
         except McpUnavailable:
             logger.exception("MCP session unavailable at startup — it will retry on each read")
         self._toolbox = toolbox
-        self.registry.register(analyst)
+        for specialist in specialists:
+            self.registry.register(specialist)
 
     def _safe_tick(self, trigger: str) -> None:
         """Never let one bad tick kill the daemon — but never let it hide, either."""

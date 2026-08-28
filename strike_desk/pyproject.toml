@@ -1,7 +1,7 @@
 [project]
 name = "strike-desk"
-version = "0.2.0"
-description = "Agentic options-buying desk on OpenAlgo — supervisor tick and regime analyst."
+version = "0.5.0"
+description = "Agentic options-buying desk on OpenAlgo - tick, regime analyst and decline record."
 requires-python = ">=3.12"
 dependencies = [
     "langgraph==1.2.11",

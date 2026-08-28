@@ -40,8 +40,12 @@ def test_no_state_including_the_new_ones_can_produce_an_entry(settings):
     ]
     books = [None, {"open_positions": []}, {"open_positions": [{"symbol": "NIFTY...CE"}]}]
     for label, book, error, confidence, data_error, budget in itertools.product(
-        labels, books, errors, [0.0, 0.54, 0.55, 1.0], [None, "every tool call failed"],
-        [False, True]
+        labels,
+        books,
+        errors,
+        [0.0, 0.54, 0.55, 1.0],
+        [None, "every tool call failed"],
+        [False, True],
     ):
         state = {
             "budget_exceeded": budget,

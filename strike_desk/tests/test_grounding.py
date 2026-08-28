@@ -9,6 +9,7 @@ from strike_desk.grounding import (
     RegimeSubmission,
     ToolObservation,
     extract_numbers,
+    validate_proposal,
     validate_submission,
 )
 
@@ -113,3 +114,23 @@ def test_confidence_outside_zero_to_one_is_rejected():
             rationale="a" * 20,
             evidence=[{"tool": "t", "field": "f", "value": "1"}],
         )
+
+
+def test_a_recorded_proposal_is_grounded():
+    from tests.chain_fixtures import grounded_ledger, valid_proposal
+
+    assert validate_proposal(valid_proposal(), grounded_ledger(), 700) is None
+
+
+def test_an_invented_structured_field_is_ungrounded():
+    from tests.chain_fixtures import grounded_ledger, valid_proposal
+
+    defect = validate_proposal(valid_proposal(open_interest=1_999_999), grounded_ledger(), 700)
+    assert defect is not None and "open_interest" in defect
+
+
+def test_an_invented_symbol_is_ungrounded():
+    from tests.chain_fixtures import grounded_ledger, valid_proposal
+
+    defect = validate_proposal(valid_proposal(symbol="NIFTY02SEP2699999CE"), grounded_ledger(), 700)
+    assert defect is not None and "symbol" in defect

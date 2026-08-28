@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +100,7 @@ def settings(tmp_path) -> Settings:
         tick_interval_seconds=60,
         tick_budget_seconds=20.0,
         specialist_timeout_seconds=0.5,
+        strategist_timeout_seconds=2.0,
         # Neutralised so integration tests exercise the graph, not the calendar.
         no_trade_windows="00:00-00:01",
         expiry_cutoff="23:59",
@@ -240,8 +241,12 @@ def ai_message(
 ) -> AIMessage:
     """One scripted assistant turn, shaped the way ChatAnthropic returns them."""
     calls = [
-        {"name": call["name"], "args": call["args"], "id": call.get("id", f"call-{index}"),
-         "type": "tool_call"}
+        {
+            "name": call["name"],
+            "args": call["args"],
+            "id": call.get("id", f"call-{index}"),
+            "type": "tool_call",
+        }
         for index, call in enumerate(tool_calls or [])
     ]
     return AIMessage(
@@ -291,7 +296,7 @@ class LocalToolSource:
         if self.fail_to_start is not None:
             raise self.fail_to_start
 
-    def tools(self) -> list[BaseTool]:
+    def tools(self, role: str = "") -> list[BaseTool]:
         return list(self._tools)
 
     def submit(self, factory, timeout: float):
@@ -302,3 +307,262 @@ class LocalToolSource:
             return asyncio.run(_run())
         except TimeoutError as exc:  # asyncio.TimeoutError is TimeoutError on 3.12
             raise TimeoutError(f"exceeded the {timeout:.1f}s analyst deadline") from exc
+
+
+@pytest.fixture
+def fake_tools() -> list[CannedTool]:
+    """The union whitelist, each tool returning the recorded chain (or empty JSON)."""
+    from strike_desk.mcp_toolbox import REQUIRED_TOOLS
+    from tests.chain_fixtures import (
+        expiry_dates,
+        momentum_up,
+        option_chain,
+        option_greeks,
+        option_symbol,
+        trend_up,
+    )
+
+    outputs = {
+        "get_expiry_dates": expiry_dates(),
+        "get_option_chain": option_chain(),
+        "get_option_symbol": option_symbol(),
+        "get_option_greeks": option_greeks(),
+        "get_trend_snapshot": trend_up(),
+        "get_momentum_snapshot": momentum_up(),
+        "get_quote": '{"ltp": 24812.35}',
+        "get_historical_data": "{}",
+        "get_volatility_snapshot": "{}",
+    }
+    return [CannedTool(name=name, output=outputs.get(name, "{}")) for name in REQUIRED_TOOLS]
+
+
+@pytest.fixture
+def strategist_harness(settings, prompts, fake_tools, tracing, journal):
+    """A real OptionsStrategist over canned tools and a scripted model, clock frozen."""
+
+    from freezegun import freeze_time
+
+    from strike_desk.observability import get_tracer
+    from strike_desk.options_strategist import OptionsStrategist
+    from strike_desk.specialists import SpecialistRequest
+
+    class Harness:
+        def __init__(self) -> None:
+            self._log: list[str] = []
+            tools = list(fake_tools)
+            for tool in tools:
+                original = tool._run
+
+                def _run(*, _original=original, _name=tool.name, **kwargs: Any) -> str:
+                    self._log.append(_name)
+                    return _original(**kwargs)
+
+                tool._run = _run  # type: ignore[method-assign]
+            self.source = LocalToolSource(tools)
+            self.model = ScriptedModel([])
+            self.strategist = OptionsStrategist(settings, prompts, self.source, self.model)
+            self.trace_id = "0" * 32
+
+        def executed_tools(self) -> list[str]:
+            return list(self._log)
+
+        def run(self, rounds, all_tools_fail: bool = False):
+            if all_tools_fail:
+                for tool in fake_tools:
+                    tool.raises = True
+            answers = [ai_message(calls) for calls in rounds]
+            remaining = settings.strategist_max_rounds - len(answers)
+            if remaining > 0:
+                answers.extend(ai_message(content=".") for _ in range(remaining))
+            self.model.answers = answers
+            request = SpecialistRequest(
+                tick_id="tick-1",
+                index_symbol=settings.index_symbol,
+                as_of=datetime.now(tz=UTC),
+                book={
+                    "open_positions": [],
+                    "regime": {
+                        "label": "trending",
+                        "confidence": 0.78,
+                        "rationale": "ADX at 27.4 confirms the move.",
+                    },
+                },
+            )
+            with freeze_time("2026-08-25T06:00:00+00:00"):
+                with get_tracer().start_as_current_span("test.proposal") as span:
+                    self.trace_id = format(span.get_span_context().trace_id, "032x")
+                    return self.strategist.run(request)
+
+    return Harness()
+
+
+@pytest.fixture
+def tick_state() -> dict[str, Any]:
+    return {
+        "tick_id": "tick-1",
+        "trace_id": "0" * 32,
+        "trigger": "schedule",
+        "trading_day": "2026-08-25",
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.8,
+        "regime_rationale": "ADX at 27.4.",
+    }
+
+
+@pytest.fixture
+def tick_harness(runner, deps, journal, today, openalgo):
+    """A real graph with stubbed regime and strategist specialists."""
+    import uuid
+
+    import httpx
+
+    from strike_desk.errors import JournalWriteError
+    from strike_desk.options_strategist import STATUS_PROPOSED
+    from strike_desk.specialists import ROLE_REGIME, ROLE_STRATEGIST, SpecialistResult
+    from tests.chain_fixtures import LOT_SIZE, RATIONALE, proposal_args
+    from tests.risk_fixtures import book_with
+
+    class Harness:
+        def __init__(self) -> None:
+            self.runner = runner
+            self.deps = deps
+            self.journal = journal
+            self.today = today
+            self.openalgo = openalgo
+            self.analyst_calls = 0
+            self.strategist_calls = 0
+            self._regime = {
+                "label": "trending",
+                "confidence": 0.8,
+                "rationale": "ADX at 27.4 confirms the move.",
+            }
+            self._proposal_status = STATUS_PROPOSED
+            self._proposal = proposal_args()
+            self._journal_fails = False
+            self._register()
+
+        def set_regime(self, label: str, confidence: float) -> None:
+            self._regime = {
+                "label": label,
+                "confidence": confidence,
+                "rationale": "ADX at 27.4 confirms the move.",
+            }
+            self._register()
+
+        def set_proposal(
+            self, status: str, journal_fails: bool = False, lots: int | None = None
+        ) -> None:
+            self._proposal_status = status
+            self._journal_fails = journal_fails
+            args = proposal_args()
+            if lots is not None:
+                args["lots"] = lots
+                args["quantity"] = lots * LOT_SIZE
+            self._proposal = args
+            self._register()
+
+        def set_book(self, **kwargs: Any) -> None:
+            snapshot = book_with(**kwargs)
+            funds = {
+                "availablecash": str(snapshot["available_cash"]),
+                "collateral": "0.00",
+                "m2munrealized": str(snapshot["unrealised_pnl"]),
+                "m2mrealized": str(snapshot["realised_pnl"]),
+                "utiliseddebits": str(snapshot["utilised_margin"]),
+            }
+            self.openalgo.post("/api/v1/funds").mock(
+                return_value=httpx.Response(200, json={"status": "success", "data": funds})
+            )
+            self.openalgo.post("/api/v1/positionbook").mock(
+                return_value=httpx.Response(
+                    200, json={"status": "success", "data": snapshot["open_positions"]}
+                )
+            )
+
+        def _register(self) -> None:
+            harness = self
+
+            class CountingAnalyst:
+                role = ROLE_REGIME
+
+                def run(self, request):
+                    harness.analyst_calls += 1
+                    return StubSpecialist(
+                        payload={
+                            "label": harness._regime["label"],
+                            "confidence": harness._regime["confidence"],
+                            "rationale": harness._regime["rationale"],
+                        },
+                        model_version="stub-haiku",
+                    ).run(request)
+
+            self.deps.registry.register(CountingAnalyst())
+
+            class CountingStrategist:
+                role = ROLE_STRATEGIST
+
+                def run(self, request):
+                    harness.strategist_calls += 1
+                    return SpecialistResult(
+                        role=ROLE_STRATEGIST,
+                        payload={
+                            "proposal_id": str(uuid.uuid4()),
+                            "status": harness._proposal_status,
+                            "proposal": harness._proposal,
+                            "rationale": RATIONALE,
+                            "evidence": [],
+                            "calls": [],
+                            "playbook_artifact": "pb-1+testdigest",
+                            "playbook_verdict": "pass",
+                            "violations": [],
+                            "defect": None,
+                            "tool_call_count": 6,
+                            "tool_error_count": 0,
+                            "rejected_tool_count": 0,
+                            "model_calls": 2,
+                            "input_tokens": 100,
+                            "output_tokens": 40,
+                            "latency_ms": 12,
+                            "prompt_name": "options_strategist",
+                            "prompt_version": "v1",
+                            "prompt_digest": "d" * 16,
+                        },
+                        model_version="stub-sonnet",
+                        token_cost_micros=100,
+                    )
+
+            self.deps.registry.register(CountingStrategist())
+
+        def proposal_rows(self):
+            return self.journal.list_proposals(self.today)
+
+        def decision_rows(self):
+            return self.journal.list_decisions(self.today)
+
+        def verdict_rows(self):
+            return self.journal.list_risk_verdicts(self.today)
+
+        def requested_paths(self) -> set[str]:
+            return {str(call.request.url.path) for call in self.openalgo.calls}
+
+        def run_tick(self):
+            from freezegun import freeze_time
+
+            if self._journal_fails:
+
+                def explode(**_fields):
+                    raise JournalWriteError("disk is read-only")
+
+                self.deps.journal.record_proposal = explode  # type: ignore[method-assign]
+            self.analyst_calls = 0
+            self.strategist_calls = 0
+            # Adjudication re-checks a reduced proposal against the playbook clock.
+            # Freeze to the session's morning so a 14:45 time-stop stays in the future.
+            frozen = datetime.now(tz=IST).replace(hour=11, minute=30, second=0, microsecond=0)
+            with freeze_time(frozen):
+                self.runner.run_tick("schedule")
+            rows = self.journal.list_decisions(self.today)
+            return rows[0] if rows else None
+
+    return Harness()

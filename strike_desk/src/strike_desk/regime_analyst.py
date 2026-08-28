@@ -202,7 +202,7 @@ class RegimeAnalyst:
     # -- the loop -----------------------------------------------------------
 
     async def _agent(self, request: SpecialistRequest, now_ist: datetime) -> ReadOutcome:
-        tools = self._tool_source.tools()
+        tools = self._tool_source.tools(ROLE_REGIME)
         by_name = {tool.name: tool for tool in tools}
         submit = submit_tool()
         ledger = EvidenceLedger()
@@ -217,9 +217,7 @@ class RegimeAnalyst:
             final = round_index == self._settings.regime_max_rounds
             bound = self._model.bind_tools(
                 [submit] if final else [*tools, submit],
-                tool_choice=(
-                    {"type": "tool", "name": SUBMIT_TOOL_NAME} if final else "auto"
-                ),
+                tool_choice=({"type": "tool", "name": SUBMIT_TOOL_NAME} if final else "auto"),
             )
             with self._tracer.start_as_current_span("regime.model_call") as span:
                 span.set_attribute("model.id", self._settings.regime_model)
@@ -373,9 +371,7 @@ class RegimeAnalyst:
                 **base,
             )
 
-        defect = validate_submission(
-            submission, ledger, self._settings.regime_rationale_max_chars
-        )
+        defect = validate_submission(submission, ledger, self._settings.regime_rationale_max_chars)
         evidence = [item.model_dump() for item in submission.evidence]
         if defect is not None:
             return ReadOutcome(

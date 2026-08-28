@@ -133,8 +133,10 @@ def test_no_successful_tool_call_degrades(settings, prompts, tracing):
 
 
 def test_an_error_string_from_a_tool_counts_as_a_failure(settings, prompts, tracing):
-    tools = [CannedTool(name=name, output="Error getting quote: broker session expired")
-             for name in TREND_SNAPSHOT]
+    tools = [
+        CannedTool(name=name, output="Error getting quote: broker session expired")
+        for name in TREND_SNAPSHOT
+    ]
     model = ScriptedModel(
         [
             ai_message([{"name": "get_quote", "args": {"symbol": "NIFTY"}}]),
@@ -203,8 +205,14 @@ def test_tool_output_is_truncated_at_the_cap(settings, prompts, tracing):
     model = ScriptedModel(
         [
             ai_message([{"name": "get_quote", "args": {"symbol": "NIFTY"}}]),
-            ai_message([submit(rationale="Nothing numeric here at all.", evidence=[
-                {"tool": "get_quote", "field": "ltp", "value": "unreadable"}])]),
+            ai_message(
+                [
+                    submit(
+                        rationale="Nothing numeric here at all.",
+                        evidence=[{"tool": "get_quote", "field": "ltp", "value": "unreadable"}],
+                    )
+                ]
+            ),
         ]
     )
     analyst, _ = build(settings, prompts, model, tools=tools)
@@ -233,8 +241,11 @@ def test_an_active_event_window_skips_the_model_entirely(settings, prompts, trac
 
     result = analyst.run(a_request())
     payload = result.payload
-    assert (payload["status"], payload["label"], payload["confidence"]) == (STATUS_OK,
-                                                                           "event-driven", 1.0)
+    assert (payload["status"], payload["label"], payload["confidence"]) == (
+        STATUS_OK,
+        "event-driven",
+        1.0,
+    )
     assert payload["evidence"][0]["tool"] == "event-calendar"
     assert payload["model_calls"] == 0
     assert result.model_version is None and result.token_cost_micros == 0

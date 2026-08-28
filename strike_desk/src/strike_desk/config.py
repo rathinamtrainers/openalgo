@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -64,8 +64,9 @@ class Settings(BaseSettings):
 
     # --- Tick cadence and budgets ------------------------------------------
     tick_interval_seconds: int = Field(default=900, ge=30, le=3600)
-    tick_budget_seconds: float = Field(default=40.0, gt=0, le=120)
+    tick_budget_seconds: float = Field(default=90.0, gt=0, le=300)
     specialist_timeout_seconds: float = Field(default=25.0, gt=0, le=60)
+    strategist_timeout_seconds: float = Field(default=35.0, gt=0, le=120)
 
     # --- Session gates ------------------------------------------------------
     no_trade_windows: str = "09:15-09:30,15:15-15:30"
@@ -74,6 +75,11 @@ class Settings(BaseSettings):
 
     # --- Supervisor policy --------------------------------------------------
     min_regime_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    directional_regimes: str = "trending"
+    reason_text_max_chars: int = Field(default=400, ge=120, le=1000)
+
+    # --- Reporting ----------------------------------------------------------
+    report_default_days: int = Field(default=5, ge=1, le=60)
 
     # --- Regime Analyst (reasoning plane) -----------------------------------
     anthropic_api_key: SecretStr | None = None
@@ -86,6 +92,40 @@ class Settings(BaseSettings):
     regime_rationale_max_chars: int = Field(default=320, ge=80, le=1000)
     price_in_per_mtok: float = Field(default=1.0, ge=0.0, le=1000.0)
     price_out_per_mtok: float = Field(default=5.0, ge=0.0, le=1000.0)
+
+    # --- Options Strategist (deliberation plane) ----------------------------
+    strategist_model: str = "claude-sonnet-5"
+    strategist_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    strategist_max_output_tokens: int = Field(default=2400, ge=512, le=16384)
+    strategist_max_rounds: int = Field(default=6, ge=2, le=12)
+    strategist_deadline_margin_seconds: float = Field(default=4.0, ge=0.5, le=20.0)
+    strategist_tool_output_chars: int = Field(default=16000, ge=2000, le=80000)
+    proposal_rationale_max_chars: int = Field(default=700, ge=200, le=2000)
+    strategist_price_in_per_mtok: float = Field(default=3.0, ge=0.0, le=1000.0)
+    strategist_price_out_per_mtok: float = Field(default=15.0, ge=0.0, le=1000.0)
+
+    # --- Playbook -----------------------------------------------------------
+    playbook_delta_min: float = Field(default=0.35, gt=0.0, lt=1.0)
+    playbook_delta_max: float = Field(default=0.60, gt=0.0, le=1.0)
+    playbook_max_spread_pct: float = Field(default=1.5, gt=0.0, le=25.0)
+    playbook_min_open_interest: int = Field(default=50_000, ge=0)
+    playbook_iv_floor: float = Field(default=8.0, ge=0.0, le=200.0)
+    playbook_iv_ceiling: float = Field(default=35.0, ge=0.0, le=500.0)
+    playbook_max_lots: int = Field(default=2, ge=1, le=20)
+    playbook_min_days_to_expiry: int = Field(default=1, ge=0, le=60)
+    playbook_max_days_to_expiry: int = Field(default=10, ge=1, le=120)
+    playbook_theta_budget_rupees: float = Field(default=1500.0, gt=0.0, le=1_000_000.0)
+    playbook_time_stop: str = "15:00"
+
+    # --- Risk Officer (control plane) ---------------------------------------
+    risk_daily_loss_cap_pct: float = Field(default=2.0, gt=0.0, le=100.0)
+    risk_per_trade_loss_cap_pct: float = Field(default=0.5, gt=0.0, le=100.0)
+    risk_deployed_capital_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_per_index_exposure_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_max_concurrent_positions: int = Field(default=1, ge=1, le=10)
+    risk_max_lots: int = Field(default=2, ge=1, le=20)
+    risk_max_trades_per_day: int = Field(default=3, ge=1, le=50)
+    risk_capital_floor: float = Field(default=50_000.0, ge=0.0, le=100_000_000.0)
 
     # --- MCP toolbox --------------------------------------------------------
     mcp_python: Path = Path("/opt/openalgo/.venv/bin/python")
@@ -115,6 +155,53 @@ class Settings(BaseSettings):
         time.fromisoformat(value)
         return value
 
+    @field_validator("directional_regimes")
+    @classmethod
+    def _validate_directional(cls, value: str) -> str:
+        from .grounding import TRADEABLE_LABELS
+
+        labels = {piece.strip() for piece in value.split(",") if piece.strip()}
+        if not labels:
+            raise ValueError("directional_regimes must name at least one regime")
+        unknown = sorted(labels - set(TRADEABLE_LABELS))
+        if unknown:
+            raise ValueError(f"not tradeable regimes: {', '.join(unknown)}")
+        return value
+
+    @field_validator("playbook_time_stop")
+    @classmethod
+    def _validate_time_stop(cls, value: str) -> str:
+        time.fromisoformat(value)
+        return value
+
+    @model_validator(mode="after")
+    def _budgets_fit(self) -> Settings:
+        """A tick must be able to hold both specialists, or every good read ends in a
+        tick-timeout that looks like an infrastructure problem and is not."""
+        if self.playbook_delta_min >= self.playbook_delta_max:
+            raise ValueError("playbook_delta_min must be below playbook_delta_max")
+        if self.playbook_iv_floor >= self.playbook_iv_ceiling:
+            raise ValueError("playbook_iv_floor must be below playbook_iv_ceiling")
+        if self.playbook_min_days_to_expiry > self.playbook_max_days_to_expiry:
+            raise ValueError("playbook_min_days_to_expiry must not exceed the maximum")
+        needed = self.specialist_timeout_seconds + self.strategist_timeout_seconds
+        if needed >= self.tick_budget_seconds:
+            raise ValueError(
+                f"specialist timeouts total {needed:.0f}s, which does not fit inside the "
+                f"{self.tick_budget_seconds:.0f}s tick budget"
+            )
+        if self.risk_per_trade_loss_cap_pct > self.risk_daily_loss_cap_pct:
+            raise ValueError(
+                "risk_per_trade_loss_cap_pct must not exceed risk_daily_loss_cap_pct, or one "
+                "trade can end the session"
+            )
+        if self.risk_max_lots > self.playbook_max_lots:
+            raise ValueError(
+                f"risk_max_lots {self.risk_max_lots} is looser than playbook_max_lots "
+                f"{self.playbook_max_lots}; the hard limit must bind at or before the playbook"
+            )
+        return self
+
     @field_validator("environment")
     @classmethod
     def _validate_environment(cls, value: str) -> str:
@@ -131,9 +218,20 @@ class Settings(BaseSettings):
         return time.fromisoformat(self.expiry_cutoff)
 
     @property
+    def directional_regime_set(self) -> frozenset[str]:
+        return frozenset(
+            piece.strip() for piece in self.directional_regimes.split(",") if piece.strip()
+        )
+
+    @property
     def analyst_deadline_seconds(self) -> float:
         """The analyst's own budget, always under the registry's timeout."""
         return max(1.0, self.specialist_timeout_seconds - self.regime_deadline_margin_seconds)
+
+    @property
+    def strategist_deadline_seconds(self) -> float:
+        """The strategist's own budget, always under the registry's timeout."""
+        return max(1.0, self.strategist_timeout_seconds - self.strategist_deadline_margin_seconds)
 
     @property
     def db_path(self) -> Path:

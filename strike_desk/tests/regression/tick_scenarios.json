@@ -1,5 +1,5 @@
 {
-  "pass_bar": "every scenario must match exactly; no scenario may yield 'enter'",
+  "pass_bar": "every scenario must match exactly; enter is only reachable via risk-cleared",
   "min_regime_confidence": 0.55,
   "scenarios": [
     {
@@ -71,13 +71,13 @@
     },
     {
       "id": "REG-09",
-      "note": "tradeable and confident still needs a contract proposal",
+      "note": "tradeable but not directional — no naked-long entry",
       "state": {
         "book": {"open_positions": []},
         "regime_label": "range-bound",
         "regime_confidence": 0.88
       },
-      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+      "expect": {"outcome": "decline", "reason_code": "no-viable-contract"}
     },
     {
       "id": "REG-10",
@@ -102,6 +102,117 @@
         }
       },
       "expect": {"outcome": "decline", "reason_code": "regime-ungrounded"}
+    },
+    {
+      "id": "REG-12",
+      "note": "an unadjudicated proposal is never an intent",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "proposed",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE", "entry_price_high": 192.0}
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-13",
+      "note": "an ungrounded proposal is a defect",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "ungrounded",
+        "proposal_detail": "proposed strike 99999.0 was never observed"
+      },
+      "expect": {"outcome": "decline", "reason_code": "proposal-ungrounded"}
+    },
+    {
+      "id": "REG-14",
+      "note": "a playbook failure is a defect, not a reprice",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "invalid",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE"},
+        "proposal_violations": ["breakeven 24812.35 does not equal 24992.00"]
+      },
+      "expect": {"outcome": "decline", "reason_code": "proposal-invalid"}
+    },
+    {
+      "id": "REG-15",
+      "note": "a latched session stop declines before specialists",
+      "state": {
+        "book": {"open_positions": []},
+        "session_stop": {"configured": 12000.0, "observed": 18400.0}
+      },
+      "expect": {"outcome": "decline", "reason_code": "risk-session-stopped"}
+    },
+    {
+      "id": "REG-16",
+      "note": "an unreadable limit holds the proposal",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "proposed",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE", "entry_price_high": 192.0},
+        "risk": {
+          "verdict": "hold",
+          "tripped": {"limit": "capital-base", "configured": 0, "observed": 0, "unit": "INR"},
+          "detail": "available cash was not numeric"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "risk-input-unavailable"}
+    },
+    {
+      "id": "REG-17",
+      "note": "a hard limit veto is arithmetic",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "proposed",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE", "entry_price_high": 192.0},
+        "risk": {
+          "verdict": "veto",
+          "tripped": {
+            "limit": "per-trade-loss-cap",
+            "configured": 2500,
+            "observed": 6000,
+            "unit": "INR"
+          },
+          "lots_requested": 2,
+          "lots_cleared": 0,
+          "detail": "even one lot breaches"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "risk-veto"}
+    },
+    {
+      "id": "REG-18",
+      "note": "a cleared verdict is an intent, not an order",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "proposed",
+        "proposal": {
+          "symbol": "NIFTY02SEP2624800CE",
+          "entry_price_high": 192.0,
+          "stop_price": 152.0
+        },
+        "risk": {
+          "verdict": "pass",
+          "tripped": null,
+          "lots_requested": 2,
+          "lots_cleared": 2,
+          "max_loss_at_stop": 6000,
+          "capital_base": 1500000
+        }
+      },
+      "expect": {"outcome": "enter", "reason_code": "risk-cleared"}
     }
   ]
 }

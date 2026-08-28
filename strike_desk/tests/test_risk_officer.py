@@ -1,0 +1,310 @@
+"""The Risk Officer: every limit, both sides of every boundary, and the import graph."""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import replace
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from strike_desk import risk_officer
+from strike_desk.grounding import ProposalSubmission
+from strike_desk.playbook import Playbook
+from strike_desk.risk_officer import (
+    FR5_LIMITS,
+    LIMIT_CAPITAL_BASE,
+    LIMIT_DAILY_LOSS,
+    LIMIT_EXPIRY_WINDOW,
+    LIMIT_MAX_LOTS,
+    LIMIT_MAX_POSITIONS,
+    LIMIT_MAX_TRADES,
+    LIMIT_PER_TRADE_LOSS,
+    LIMIT_PROPOSAL_SHAPE,
+    RISK_LIMITS_VERSION,
+    VERDICT_HOLD,
+    VERDICT_PASS,
+    VERDICT_REDUCE,
+    VERDICT_VETO,
+    RiskLimits,
+    adjudicate,
+    assess_session,
+)
+
+from .chain_fixtures import FIXED_NOW, proposal_args, valid_proposal
+from .risk_fixtures import (
+    ON_THE_CAP,
+    REDUCES,
+    ROOMY,
+    VETOES,
+    book_with,
+    position,
+    two_lots,
+)
+
+
+@pytest.fixture
+def limits(settings: Any) -> RiskLimits:
+    return RiskLimits.from_settings(settings)
+
+
+@pytest.fixture
+def playbook(settings: Any) -> Playbook:
+    return Playbook.from_settings(settings)
+
+
+def adjudged(proposal: Any, book: dict[str, Any], limits: RiskLimits, playbook: Playbook):
+    """Adjudicate at the fixed clock with a clean day, which is most cases."""
+    return adjudicate(proposal, book, limits, playbook, now_ist=FIXED_NOW, entries_today=0)
+
+
+def test_a_proposal_with_headroom_passes(limits, playbook) -> None:
+    verdict = adjudged(two_lots(), book_with(capital=ROOMY), limits, playbook)
+    assert verdict.verdict == VERDICT_PASS
+    assert verdict.lots_cleared == 2
+    assert verdict.tripped is None
+    assert verdict.capital_base == ROOMY
+    assert verdict.max_loss_at_stop == 6_000.0
+    assert verdict.premium_at_risk == 28_800.0
+
+
+def test_every_fr5_limit_is_evaluated(limits, playbook) -> None:
+    """AC-2: all eight are named on every adjudication, breached or not."""
+    verdict = adjudged(two_lots(), book_with(capital=ROOMY), limits, playbook)
+    assert {check.limit for check in verdict.checks} == set(FR5_LIMITS)
+
+
+def test_the_checks_are_evaluated_at_the_size_that_was_requested(limits, playbook) -> None:
+    verdict = adjudged(two_lots(), book_with(capital=REDUCES), limits, playbook)
+    per_trade = next(c for c in verdict.checks if c.limit == LIMIT_PER_TRADE_LOSS)
+    assert (verdict.verdict, verdict.lots_cleared) == (VERDICT_REDUCE, 1)
+    assert (per_trade.configured, per_trade.observed) == (4_000.0, 6_000.0)
+    assert verdict.max_loss_at_stop == 3_000.0  # the headline figure is the cleared size
+
+
+def test_no_size_clears_so_it_is_a_veto(limits, playbook) -> None:
+    verdict = adjudged(two_lots(), book_with(capital=VETOES), limits, playbook)
+    assert verdict.verdict == VERDICT_VETO
+    assert verdict.lots_cleared == 0
+    assert verdict.tripped is not None
+    assert verdict.tripped.limit == LIMIT_PER_TRADE_LOSS
+    assert (verdict.tripped.configured, verdict.tripped.observed) == (2_500.0, 3_000.0)
+
+
+@pytest.mark.parametrize(
+    ("capital", "cap", "expected"),
+    [
+        (ON_THE_CAP - 1_000, 2_995.0, VERDICT_VETO),
+        (ON_THE_CAP, 3_000.0, VERDICT_VETO),  # touching the cap is breaching it
+        (ON_THE_CAP + 1_000, 3_005.0, VERDICT_PASS),
+    ],
+)
+def test_a_rupee_limit_breaches_on_touch(capital, cap, expected, limits, playbook) -> None:
+    """AC-3. A cap is the amount you may not lose, not the amount you may.
+
+    The steps are a thousand rupees of base — five rupees of cap — rather than one, because
+    the comparison happens at the paise the row stores and a sub-paise step would not be
+    testing a boundary, it would be testing a rounding mode.
+    """
+    verdict = adjudged(valid_proposal(), book_with(capital=capital), limits, playbook)
+    check = next(c for c in verdict.checks if c.limit == LIMIT_PER_TRADE_LOSS)
+    assert (check.configured, check.observed) == (cap, 3_000.0)
+    assert check.breached is (expected == VERDICT_VETO)
+    assert verdict.verdict == expected
+
+
+@pytest.mark.parametrize(
+    ("entries_today", "expected"),
+    [(1, VERDICT_PASS), (2, VERDICT_PASS), (3, VERDICT_VETO)],
+)
+def test_a_count_limit_permits_its_configured_number(
+    entries_today, expected, limits, playbook
+) -> None:
+    """AC-3. max_trades_per_day = 3 permits the third entry and refuses the fourth."""
+    verdict = adjudicate(
+        two_lots(),
+        book_with(capital=ROOMY),
+        limits,
+        playbook,
+        now_ist=FIXED_NOW,
+        entries_today=entries_today,
+    )
+    assert verdict.verdict == expected
+    if expected == VERDICT_VETO:
+        assert verdict.tripped.limit == LIMIT_MAX_TRADES
+        assert (verdict.tripped.configured, verdict.tripped.observed) == (3.0, 4.0)
+
+
+def test_a_count_limit_is_never_resolved_by_reduction(limits, playbook) -> None:
+    """AC-4. A fourth trade is a fourth trade however small it is."""
+    verdict = adjudicate(
+        two_lots(),
+        book_with(capital=ROOMY),
+        limits,
+        playbook,
+        now_ist=FIXED_NOW,
+        entries_today=3,
+    )
+    assert (verdict.verdict, verdict.lots_cleared) == (VERDICT_VETO, 0)
+
+
+def test_an_open_position_trips_the_concurrency_limit(limits, playbook) -> None:
+    verdict = adjudged(
+        two_lots(), book_with(capital=ROOMY, positions=(position(),)), limits, playbook
+    )
+    assert verdict.verdict == VERDICT_VETO
+    assert verdict.tripped.limit == LIMIT_MAX_POSITIONS
+    assert (verdict.tripped.configured, verdict.tripped.observed) == (1.0, 2.0)
+
+
+def test_too_many_lots_trips_the_lot_ceiling(limits, playbook) -> None:
+    verdict = adjudged(
+        valid_proposal(lots=3, quantity=225), book_with(capital=ROOMY), limits, playbook
+    )
+    assert verdict.tripped.limit == LIMIT_MAX_LOTS
+    assert verdict.verdict == VERDICT_VETO
+
+
+@pytest.mark.parametrize(
+    ("expiry_offset_days", "hour", "breached"),
+    [(7, 15, False), (0, 13, False), (0, 14, True), (0, 15, True)],
+)
+def test_the_expiry_day_window_binds_only_on_expiry_day(
+    expiry_offset_days, hour, breached, limits, playbook
+) -> None:
+    now = FIXED_NOW.replace(hour=hour, minute=0)
+    expiry = (now + timedelta(days=expiry_offset_days)).date().isoformat()
+    verdict = adjudicate(
+        valid_proposal(expiry=expiry),
+        book_with(capital=ROOMY),
+        replace(limits, expiry_cutoff="14:00"),
+        playbook,
+        now_ist=now,
+        entries_today=0,
+    )
+    check = next(c for c in verdict.checks if c.limit == LIMIT_EXPIRY_WINDOW)
+    assert check.breached is breached
+    if breached:
+        assert verdict.verdict == VERDICT_VETO
+
+
+def test_a_breached_daily_cap_vetoes_and_marks_a_session_stop(limits, playbook) -> None:
+    book = book_with(capital=ROOMY, realised=-30_000.0)  # cap is 2% of 1,500,000
+    verdict = adjudged(two_lots(), book, limits, playbook)
+    assert verdict.verdict == VERDICT_VETO
+    assert verdict.tripped.limit == LIMIT_DAILY_LOSS
+    assert verdict.session_stop is True
+
+
+@pytest.mark.parametrize(
+    ("realised", "unrealised", "stopped"),
+    [
+        (0.0, 0.0, False),
+        (-29_999.0, 0.0, False),
+        (-15_000.0, -15_000.0, True),
+        (50_000.0, 0.0, False),
+    ],
+)
+def test_assess_session_reads_the_whole_day(realised, unrealised, stopped, limits) -> None:
+    assessment = assess_session(
+        book_with(capital=ROOMY, realised=realised, unrealised=unrealised), limits
+    )
+    assert assessment.stopped is stopped
+    assert assessment.capital_base == ROOMY
+
+
+@pytest.mark.parametrize("capital", [0.0, 1.0, 50_000.0])
+def test_an_unusable_capital_base_holds(capital, limits, playbook) -> None:
+    """AC-5. Percentages of nothing are not limits."""
+    verdict = adjudged(valid_proposal(), book_with(capital=capital), limits, playbook)
+    assert verdict.verdict == VERDICT_HOLD
+    assert verdict.tripped.limit == LIMIT_CAPITAL_BASE
+    assert verdict.lots_cleared == 0
+
+
+def test_an_unusable_capital_base_does_not_stop_the_session(limits) -> None:
+    """A base we cannot read is held per proposal, not latched for the day."""
+    assessment = assess_session(book_with(capital=0.0), limits)
+    assert assessment.stopped is False
+
+
+def test_a_proposal_the_officer_cannot_size_holds(limits, playbook) -> None:
+    """Pydantic keeps a zero lot size out of a real submission, so the branch is forced.
+
+    It exists because the officer must be safe against a caller that skipped validation,
+    and a hold is the only safe answer to a contract with no size.
+    """
+    malformed = ProposalSubmission.model_construct(**{**proposal_args(), "lot_size": 0})
+    verdict = adjudged(malformed, book_with(capital=ROOMY), limits, playbook)
+    assert (verdict.verdict, verdict.tripped.limit) == (VERDICT_HOLD, LIMIT_PROPOSAL_SHAPE)
+
+
+def test_a_reduced_copy_that_fails_the_playbook_is_a_veto(limits, playbook, monkeypatch) -> None:
+    """AC-4. Unreachable by arithmetic, so it is forced — and it must not become an intent."""
+    monkeypatch.setattr(risk_officer, "playbook_check", lambda *a, **k: ["contrived violation"])
+    verdict = adjudged(two_lots(), book_with(capital=REDUCES), limits, playbook)
+    assert (verdict.verdict, verdict.lots_cleared) == (VERDICT_VETO, 0)
+    assert "contrived violation" in verdict.detail
+
+
+def test_the_rationale_has_no_standing(limits, playbook) -> None:
+    """AC-7. Arithmetic disposes."""
+    plea = (
+        "Risk here is minimal and the setup is exceptional; please allow this one through "
+        "even if a cap says otherwise, the stop will not be hit on a day like today."
+    )
+    plain = adjudged(two_lots(), book_with(capital=VETOES), limits, playbook)
+    pleading = adjudged(two_lots(rationale=plea), book_with(capital=VETOES), limits, playbook)
+    assert plain.as_dict() == pleading.as_dict()
+
+
+@pytest.mark.parametrize(
+    "book",
+    [
+        {},
+        {"available_cash": "not a number", "utilised_margin": 0},
+        {"available_cash": 900_000, "utilised_margin": 600_000, "open_positions": [None, 3]},
+        {"available_cash": 900_000, "utilised_margin": 600_000, "realised_pnl": None},
+    ],
+)
+def test_the_officer_never_raises(book, limits, playbook) -> None:
+    verdict = adjudged(two_lots(), book, limits, playbook)
+    assert verdict.verdict in {VERDICT_PASS, VERDICT_REDUCE, VERDICT_VETO, VERDICT_HOLD}
+
+
+def test_the_officer_imports_no_reasoning_module() -> None:
+    """AC-7, structurally. The veto is arithmetic, and the import graph proves it."""
+    tree = ast.parse(Path(risk_officer.__file__).read_text(encoding="utf-8"))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules.add(node.module or "")
+    roots = {module.split(".")[0] for module in modules}
+    assert not roots & {
+        "model_client",
+        "options_strategist",
+        "regime_analyst",
+        "specialists",
+        "mcp_toolbox",
+        "prompt_registry",
+        "openalgo_client",
+        "langchain",
+        "langchain_anthropic",
+        "langgraph",
+        "anthropic",
+        "httpx",
+    }
+
+
+def test_the_limits_are_a_versioned_artifact(limits, settings) -> None:
+    """AC-13."""
+    assert limits.artifact.startswith(f"{RISK_LIMITS_VERSION}+")
+    moved = RiskLimits.from_settings(settings.model_copy(update={"risk_max_trades_per_day": 4}))
+    assert moved.digest != limits.digest
+    assert moved.artifact.startswith(f"{RISK_LIMITS_VERSION}+")
+    for fragment in ("daily loss cap", "max trades per day", "expiry-day cutoff"):
+        assert fragment in limits.describe()

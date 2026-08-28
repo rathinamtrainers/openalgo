@@ -55,9 +55,7 @@ def read_case(case, settings, prompts):
 @pytest.fixture(scope="module")
 def outcomes(live_settings, live_prompts):
     """Run every case once, and share the answers across the assertions below."""
-    return {
-        case["id"]: (case, read_case(case, live_settings, live_prompts)) for case in CASES
-    }
+    return {case["id"]: (case, read_case(case, live_settings, live_prompts)) for case in CASES}
 
 
 def test_label_agreement_clears_the_floor(outcomes):
@@ -94,9 +92,7 @@ def test_every_answer_is_shaped_correctly(outcomes):
 
 
 def test_only_whitelisted_tools_are_ever_called(outcomes):
-    called = {
-        call["tool"] for _case, payload in outcomes.values() for call in payload["calls"]
-    }
+    called = {call["tool"] for _case, payload in outcomes.values() for call in payload["calls"]}
     assert called <= set(REGIME_TOOLS), called - set(REGIME_TOOLS)
 
 

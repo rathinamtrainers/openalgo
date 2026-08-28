@@ -1,0 +1,267 @@
+{
+  "pass_bar": "every rendered sentence must match exactly; changing the wording means editing this file",
+  "max_chars": 400,
+  "cases": [
+    {
+      "id": "GD-01",
+      "code": "position-open",
+      "variant": "default",
+      "fields": {
+        "count": 1,
+        "index": "NIFTY",
+        "symbols": "NIFTY28JUL2624500CE"
+      },
+      "expect": "Held: 1 open NIFTY position(s) (NIFTY28JUL2624500CE). This tick manages the book; it does not add to it."
+    },
+    {
+      "id": "GD-02",
+      "code": "data-quality",
+      "variant": "book",
+      "fields": {
+        "detail": "positionbook: HTTP 503"
+      },
+      "expect": "Declined: the book could not be read from OpenAlgo (positionbook: HTTP 503). An unreadable book is never assumed flat."
+    },
+    {
+      "id": "GD-03",
+      "code": "data-quality",
+      "variant": "regime",
+      "fields": {
+        "detail": "every tool call failed"
+      },
+      "expect": "Declined: the regime could not be read from live data (every tool call failed). The desk does not classify a market it could not see."
+    },
+    {
+      "id": "GD-04",
+      "code": "data-quality",
+      "variant": "default",
+      "fields": {
+        "detail": "the feed was stale"
+      },
+      "expect": "Declined: live data could not be read (the feed was stale). The desk does not act on a market it could not see."
+    },
+    {
+      "id": "GD-05",
+      "code": "specialist-unavailable",
+      "variant": "default",
+      "fields": {
+        "role": "regime",
+        "detail": "no specialist registered for this role"
+      },
+      "expect": "Declined: no usable 'regime' specialist (no specialist registered for this role)."
+    },
+    {
+      "id": "GD-06",
+      "code": "specialist-unavailable",
+      "variant": "no_strategist",
+      "fields": {
+        "role": "strategist",
+        "label": "trending",
+        "confidence": "0.80"
+      },
+      "expect": "Declined: regime 'trending' is tradeable at 0.80 confidence, but no 'strategist' specialist is registered to propose a contract. A regime read alone is never an entry."
+    },
+    {
+      "id": "GD-07",
+      "code": "specialist-timeout",
+      "variant": "default",
+      "fields": {
+        "role": "regime",
+        "detail": "exceeded 25.0s"
+      },
+      "expect": "Declined: the 'regime' specialist did not answer within its timeout (exceeded 25.0s)."
+    },
+    {
+      "id": "GD-08",
+      "code": "regime-not-tradeable",
+      "variant": "default",
+      "fields": {
+        "label": "event-driven"
+      },
+      "expect": "Declined: regime read as 'event-driven', which this playbook does not trade."
+    },
+    {
+      "id": "GD-09",
+      "code": "regime-low-confidence",
+      "variant": "default",
+      "fields": {
+        "label": "trending",
+        "confidence": "0.40",
+        "floor": "0.55"
+      },
+      "expect": "Declined: regime 'trending' is tradeable but confidence 0.40 is below the 0.55 floor."
+    },
+    {
+      "id": "GD-10",
+      "code": "regime-ungrounded",
+      "variant": "default",
+      "fields": {
+        "detail": "the rationale cites 24810, which no tool returned"
+      },
+      "expect": "Declined: the regime read cited data it did not fetch (the rationale cites 24810, which no tool returned). An ungrounded read is a defect, not an opinion."
+    },
+    {
+      "id": "GD-11",
+      "code": "tick-timeout",
+      "variant": "default",
+      "fields": {
+        "budget": "40"
+      },
+      "expect": "Declined: the tick exceeded its 40s budget before a decision could be assembled."
+    },
+    {
+      "id": "GD-12",
+      "code": "internal-error",
+      "variant": "default",
+      "fields": {
+        "error": "RuntimeError"
+      },
+      "expect": "Declined: the tick raised RuntimeError before assembling a decision. The desk stays out when it cannot reason."
+    },
+    {
+      "id": "GD-13",
+      "code": "data-quality",
+      "variant": "chain",
+      "fields": {
+        "detail": "every tool call failed or none was made"
+      },
+      "expect": "Declined: the option chain could not be read (every tool call failed or none was made). The desk does not price a contract it could not see."
+    },
+    {
+      "id": "GD-14",
+      "code": "specialist-unavailable",
+      "variant": "no_risk",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "role": "risk"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE at 192.00 was proposed and passed the playbook, but no 'risk' specialist is registered to adjudicate it. A proposal alone is never an entry."
+    },
+    {
+      "id": "GD-15",
+      "code": "no-viable-contract",
+      "variant": "default",
+      "fields": {
+        "index": "NIFTY",
+        "expiry": "2026-09-02",
+        "detail": "open interest under the floor"
+      },
+      "expect": "Declined: no contract in the NIFTY 2026-09-02 chain met the playbook (open interest under the floor). A tradeable session is not a tradeable contract."
+    },
+    {
+      "id": "GD-16",
+      "code": "no-viable-contract",
+      "variant": "non_directional",
+      "fields": {
+        "label": "range-bound"
+      },
+      "expect": "Declined: regime 'range-bound' is tradeable but not directional, and this playbook has no non-directional entry. A long that pays theta to wait is the trade this desk exists to refuse."
+    },
+    {
+      "id": "GD-17",
+      "code": "proposal-ungrounded",
+      "variant": "default",
+      "fields": {
+        "detail": "proposed strike 99999.0 was never observed in a tool output"
+      },
+      "expect": "Declined: the proposal cited data it did not fetch (proposed strike 99999.0 was never observed in a tool output). An ungrounded proposal is a defect, not a trade idea."
+    },
+    {
+      "id": "GD-18",
+      "code": "proposal-invalid",
+      "variant": "default",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "count": 1,
+        "detail": "breakeven 24812.35 does not equal 24992.00 for a CE"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE failed 1 playbook check(s) (breakeven 24812.35 does not equal 24992.00 for a CE). A contract the desk cannot verify is never bought."
+    },
+    {
+      "id": "GD-19",
+      "code": "risk-session-stopped",
+      "variant": "default",
+      "fields": {
+        "configured": "Rs 12,000",
+        "observed": "Rs 18,400"
+      },
+      "expect": "Declined: the day is down Rs 18,400 against a Rs 12,000 daily loss cap. The desk stops proposing entries for the rest of the session."
+    },
+    {
+      "id": "GD-20",
+      "code": "risk-input-unavailable",
+      "variant": "default",
+      "fields": {
+        "limit": "capital-base",
+        "detail": "available cash was not numeric"
+      },
+      "expect": "Declined: the capital-base limit could not be evaluated (available cash was not numeric). A proposal is held, never assumed safe."
+    },
+    {
+      "id": "GD-21",
+      "code": "risk-veto",
+      "variant": "default",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 2,500",
+        "observed": "Rs 6,000"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE trips the per-trade-loss-cap limit - configured Rs 2,500, observed Rs 6,000. The veto is arithmetic and is not negotiated."
+    },
+    {
+      "id": "GD-22",
+      "code": "risk-veto",
+      "variant": "sized_out",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 2,500",
+        "observed": "Rs 3,000"
+      },
+      "expect": "Declined: even one lot of NIFTY02SEP2624800CE trips the per-trade-loss-cap limit - configured Rs 2,500, observed Rs 3,000. There is no size this desk may take."
+    },
+    {
+      "id": "GD-23",
+      "code": "risk-veto",
+      "variant": "playbook_disagreed",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "detail": "delta 0.22 is below 0.35"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE reduced to fit per-trade-loss-cap no longer passes the playbook (delta 0.22 is below 0.35). A contract two checks disagree about is never bought."
+    },
+    {
+      "id": "GD-24",
+      "code": "risk-cleared",
+      "variant": "default",
+      "fields": {
+        "lots": 2,
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "risk": "Rs 6,000",
+        "stop": "152.00",
+        "base": "Rs 1,500,000"
+      },
+      "expect": "Intent: buy 2 lot(s) of NIFTY02SEP2624800CE at up to 192.00, risking Rs 6,000 to the 152.00 stop against a Rs 1,500,000 capital base. This is an intent, not an order."
+    },
+    {
+      "id": "GD-25",
+      "code": "risk-cleared",
+      "variant": "reduced",
+      "fields": {
+        "lots": 1,
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "requested": 2,
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 4,000",
+        "risk": "Rs 3,000",
+        "stop": "152.00"
+      },
+      "expect": "Intent: buy 1 lot(s) of NIFTY02SEP2624800CE at up to 192.00, cut from 2 lot(s) to fit the per-trade-loss-cap limit of Rs 4,000. Risking Rs 3,000 to the 152.00 stop. This is an intent, not an order."
+    }
+  ]
+}

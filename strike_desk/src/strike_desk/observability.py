@@ -118,9 +118,7 @@ class JournalSpanProcessor(SpanProcessor):
 def configure_logging(settings: Settings, redactor: Redactor) -> None:
     """Root logging to stderr (journald captures it), with redaction on every record."""
     handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     handler.addFilter(RedactingFilter(redactor))
     root = logging.getLogger()
     root.handlers.clear()

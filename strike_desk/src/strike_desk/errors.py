@@ -63,3 +63,11 @@ class ModelCallFailed(StrikeDeskError):
 
 class EventCalendarInvalid(StrikeDeskError):
     """The event calendar exists but cannot be parsed; the desk must not guess."""
+
+
+class PlaybookViolation(StrikeDeskError):
+    """A proposal failed one or more of the playbook's numeric constraints."""
+
+
+class RiskInputUnavailable(StrikeDeskError):
+    """A limit could not be evaluated because an input it needs was unusable."""

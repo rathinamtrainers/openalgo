@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from opentelemetry.trace import Status, StatusCode
 
 from .config import IST
+from .decline_taxonomy import describe, render
 from .errors import JournalWriteError
 from .graph import OUTCOME_DECLINE, REASON_INTERNAL_ERROR, TickDeps, build_tick_graph
 from .journal import SCHEMA_VERSION
@@ -123,6 +124,8 @@ class TickRunner:
         started: float,
         exc: BaseException,
     ) -> None:
+        """The second write path into ``decisions`` — classified exactly like the first."""
+        entry = describe(REASON_INTERNAL_ERROR)
         self._deps.journal.record_decision(
             tick_id=tick_id,
             trace_id=trace_id,
@@ -132,10 +135,13 @@ class TickRunner:
             trigger=trigger,
             outcome=OUTCOME_DECLINE,
             reason_code=REASON_INTERNAL_ERROR,
-            reason_text=(
-                f"Declined: the tick raised {type(exc).__name__} before assembling a decision. "
-                "The desk stays out when it cannot reason."
+            reason_text=render(
+                REASON_INTERNAL_ERROR,
+                max_chars=self._deps.settings.reason_text_max_chars,
+                error=type(exc).__name__,
             ),
+            reason_category=entry.category,
+            reason_disposition=entry.disposition,
             regime_label=None,
             regime_confidence=None,
             book_state_json=json.dumps(None),
