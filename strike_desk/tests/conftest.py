@@ -547,6 +547,8 @@ def tick_harness(runner, deps, journal, today, openalgo):
             return {str(call.request.url.path) for call in self.openalgo.calls}
 
         def run_tick(self):
+            from freezegun import freeze_time
+
             if self._journal_fails:
 
                 def explode(**_fields):
@@ -555,7 +557,11 @@ def tick_harness(runner, deps, journal, today, openalgo):
                 self.deps.journal.record_proposal = explode  # type: ignore[method-assign]
             self.analyst_calls = 0
             self.strategist_calls = 0
-            self.runner.run_tick("schedule")
+            # Adjudication re-checks a reduced proposal against the playbook clock.
+            # Freeze to the session's morning so a 14:45 time-stop stays in the future.
+            frozen = datetime.now(tz=IST).replace(hour=11, minute=30, second=0, microsecond=0)
+            with freeze_time(frozen):
+                self.runner.run_tick("schedule")
             rows = self.journal.list_decisions(self.today)
             return rows[0] if rows else None
 
