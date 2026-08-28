@@ -266,13 +266,20 @@ class LimitCheck:
 
 
 def _rupee_check(limit: str, configured: float, observed: float, detail: str) -> LimitCheck:
-    """A money limit. Touching the cap is breaching it."""
+    """A money limit. Touching the cap is breaching it.
+
+    Both values are rounded to paise *before* they are compared, so the verdict a row
+    records is the verdict its own two numbers imply. A stored ``3000.00`` beside a stored
+    ``3000.00`` and ``breached: false`` is an audit row nobody can check.
+    """
+    cap = round(configured, 2)
+    seen = round(observed, 2)
     return LimitCheck(
         limit=limit,
         unit=UNIT_RUPEES,
-        configured=round(configured, 2),
-        observed=round(observed, 2),
-        breached=observed >= configured,
+        configured=cap,
+        observed=seen,
+        breached=seen >= cap,
         detail=detail,
     )
 
@@ -1581,8 +1588,7 @@ def _add_risk_parser(subparsers: Any) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
 
 
-def cmd_risk(args: Any) -> int:
-    settings = get_settings()
+def _cmd_risk(settings: Settings, args: Any) -> int:
     try:
         days = _resolve_days(args, settings)
     except ValueError as exc:
@@ -1614,11 +1620,29 @@ def cmd_risk(args: Any) -> int:
     return 0
 ```
 
-Import the view under names that do not collide with `proposal_view`'s:
+Import the view under names that do not collide with `proposal_view`'s, and register the
+command in both places `proposals` is registered — the parser and the dispatch map — because a
+command argparse never sees is a command that exits 2 on a typo it did not make:
 
 ```python
 from .risk_view import as_dict as risk_as_dict
 from .risk_view import render as risk_render
+```
+
+Inside `main`, beside the other `add_parser` calls and in the `handlers` map that dispatches
+them — `_cmd_risk` takes `(settings, args)` like every other handler, so `main` stays the one
+place `get_settings()` is called:
+
+```python
+    _add_risk_parser(subparsers)
+```
+
+```python
+    handlers = {
+        ...
+        "proposals": _cmd_proposals,
+        "risk": _cmd_risk,
+    }
 ```
 
 And `status` prints the limits beside the taxonomy and the playbook, so one command still

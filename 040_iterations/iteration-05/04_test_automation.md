@@ -29,8 +29,9 @@ The suite adds five files and extends three:
 | `tests/test_risk_view.py` | Text and JSON are one object. |
 
 Plus additions to `tests/test_decline_taxonomy.py` (the fourth outcome and the additive
-guarantee), `tests/test_journal_migration.py` (the new table) and `tests/conftest.py` (three
-methods on the existing `tick_harness`).
+guarantee), `tests/test_journal_migration.py` (the new table) and `tests/conftest.py` (four
+methods on the existing `tick_harness`) — and two deletions from `tests/test_tick_proposals.py`,
+covered in §7, which are the only tests this slice makes obsolete.
 
 ## 2. The book fixtures
 
@@ -261,16 +262,24 @@ def test_no_size_clears_so_it_is_a_veto(limits, playbook) -> None:
 
 
 @pytest.mark.parametrize(
-    ("capital", "expected"),
+    ("capital", "cap", "expected"),
     [
-        (ON_THE_CAP - 1, VERDICT_VETO),
-        (ON_THE_CAP, VERDICT_VETO),  # touching the cap is breaching it
-        (ON_THE_CAP + 1, VERDICT_PASS),
+        (ON_THE_CAP - 1_000, 2_995.0, VERDICT_VETO),
+        (ON_THE_CAP, 3_000.0, VERDICT_VETO),  # touching the cap is breaching it
+        (ON_THE_CAP + 1_000, 3_005.0, VERDICT_PASS),
     ],
 )
-def test_a_rupee_limit_breaches_on_touch(capital, expected, limits, playbook) -> None:
-    """AC-3. A cap is the amount you may not lose, not the amount you may."""
+def test_a_rupee_limit_breaches_on_touch(capital, cap, expected, limits, playbook) -> None:
+    """AC-3. A cap is the amount you may not lose, not the amount you may.
+
+    The steps are a thousand rupees of base — five rupees of cap — rather than one, because
+    the comparison happens at the paise the row stores and a sub-paise step would not be
+    testing a boundary, it would be testing a rounding mode.
+    """
     verdict = adjudged(valid_proposal(), book_with(capital=capital), limits, playbook)
+    check = next(c for c in verdict.checks if c.limit == LIMIT_PER_TRADE_LOSS)
+    assert (check.configured, check.observed) == (cap, 3_000.0)
+    assert check.breached is (expected == VERDICT_VETO)
     assert verdict.verdict == expected
 
 
@@ -919,6 +928,22 @@ def test_an_empty_window_says_so(journal) -> None:
 ```
 
 ## 7. Extending the existing files
+
+**`tests/test_tick_proposals.py`** — two tests are **deleted**, not edited, and the deletion
+belongs in this commit rather than in a follow-up. `test_a_passing_proposal_still_declines`
+and `test_enter_is_unreachable` both assert the property this slice exists to remove: after
+the `adjudicate` node exists, a passing proposal on a healthy book becomes an intent.
+`test_a_cleared_proposal_becomes_an_intent` and `test_enter_requires_a_cleared_verdict`
+supersede them one for one. Neither is in the CI structural gate, so nothing catches them
+until a full `pytest tests/` run — which is exactly when the intern would otherwise conclude
+the new code is broken.
+
+Everything else in that file stays, and one row in it is worth reading twice before you touch
+it. `test_each_status_classifies` still asserts that `STATUS_PROPOSED` maps to
+`specialist-unavailable` / `specialist` / `degraded`, and it still passes: it calls
+`_decide_outcome` on a state that carries no `risk` key at all, which is the fail-closed
+branch. That is correct behaviour and a correct test — an unadjudicated proposal is never an
+intent — so leave it exactly as it is.
 
 **`tests/test_decline_taxonomy.py`** — the parity test already reflects over `graph.py`'s
 `REASON_*` constants and picks up the four new codes with no edit. `DT1_CLASSES` grows into
