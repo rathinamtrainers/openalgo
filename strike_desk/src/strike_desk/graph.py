@@ -11,11 +11,13 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from opentelemetry.trace import Status, StatusCode
+from pydantic import ValidationError
 
 from .book_state import read_book_state
-from .config import Settings
+from .config import IST, Settings
 from .decline_taxonomy import describe, render
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
+from .grounding import ProposalSubmission
 from .journal import SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
@@ -34,12 +36,29 @@ from .options_strategist import (
 from .options_strategist import (
     build_proposal_row,
 )
+from .playbook import Playbook
 from .prompt_registry import PromptRegistry
 from .regime_analyst import (
     STATUS_DEGRADED,
     STATUS_OK,
     STATUS_UNGROUNDED,
     build_regime_read_row,
+)
+from .risk_officer import (
+    LIMIT_PROPOSAL_SHAPE,
+    SIZEABLE_LIMITS,
+    UNIT_RUPEES,
+    VERDICT_HOLD,
+    VERDICT_REDUCE,
+    VERDICT_VETO,
+    RiskLimits,
+    SessionAssessment,
+    assess_session,
+    build_verdict_row,
+    held,
+)
+from .risk_officer import (
+    adjudicate as adjudicate_proposal,
 )
 from .specialists import (
     ROLE_REGIME,
@@ -68,6 +87,10 @@ REASON_INTERNAL_ERROR = "internal-error"
 REASON_NO_VIABLE_CONTRACT = "no-viable-contract"
 REASON_PROPOSAL_UNGROUNDED = "proposal-ungrounded"
 REASON_PROPOSAL_INVALID = "proposal-invalid"
+REASON_RISK_SESSION_STOPPED = "risk-session-stopped"
+REASON_RISK_INPUT_UNAVAILABLE = "risk-input-unavailable"
+REASON_RISK_VETO = "risk-veto"
+REASON_RISK_CLEARED = "risk-cleared"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -96,6 +119,9 @@ class TickState(TypedDict, total=False):
     proposal_status: str | None
     proposal_detail: str | None
     proposal_violations: list[str] | None
+    proposal_id: str | None
+    session_stop: dict[str, Any] | None
+    risk: dict[str, Any] | None
 
 
 @dataclass
@@ -154,6 +180,19 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 count=len(positions),
                 index=settings.index_symbol,
                 symbols=", ".join(str(position.get("symbol", "?")) for position in positions),
+            ),
+        )
+
+    stop = state.get("session_stop")
+    if stop:
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_SESSION_STOPPED,
+            render(
+                REASON_RISK_SESSION_STOPPED,
+                max_chars=cap,
+                configured=f"Rs {float(stop.get('configured') or 0.0):,.0f}",
+                observed=f"Rs {float(stop.get('observed') or 0.0):,.0f}",
             ),
         )
 
@@ -298,16 +337,77 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
 
     # A proposal that passed every check. There is still no risk officer to adjudicate it,
     # and a proposal alone is never an entry — AC-11.
-    return (
-        OUTCOME_DECLINE,
-        REASON_SPECIALIST_UNAVAILABLE,
-        render(
+    risk = state.get("risk")
+    if risk is None:
+        return (
+            OUTCOME_DECLINE,
             REASON_SPECIALIST_UNAVAILABLE,
+            render(
+                REASON_SPECIALIST_UNAVAILABLE,
+                max_chars=cap,
+                variant="no_risk",
+                symbol=str(proposal.get("symbol", "a contract")),
+                entry=f"{float(proposal.get('entry_price_high') or 0.0):.2f}",
+                role=ROLE_RISK,
+            ),
+        )
+
+    tripped = risk.get("tripped") or {}
+    limit = str(tripped.get("limit", "a limit"))
+    configured = _money(tripped.get("configured"), tripped.get("unit"))
+    observed = _money(tripped.get("observed"), tripped.get("unit"))
+    symbol = str(proposal.get("symbol", "the contract"))
+
+    if risk["verdict"] == VERDICT_HOLD:
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_INPUT_UNAVAILABLE,
+            render(
+                REASON_RISK_INPUT_UNAVAILABLE,
+                max_chars=cap,
+                limit=limit,
+                detail=str(risk.get("detail", "")),
+            ),
+        )
+    if risk["verdict"] == VERDICT_VETO:
+        variant = "default"
+        if risk.get("lots_requested") and risk.get("lots_cleared") == 0:
+            variant = "sized_out" if limit in SIZEABLE_LIMITS else "default"
+        if "no longer passes the playbook" in str(risk.get("detail", "")):
+            variant = "playbook_disagreed"
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_VETO,
+            render(
+                REASON_RISK_VETO,
+                max_chars=cap,
+                variant=variant,
+                symbol=symbol,
+                limit=limit,
+                configured=configured,
+                observed=observed,
+                lots=risk.get("lots_cleared", 0),
+                detail=str(risk.get("detail", "")),
+            ),
+        )
+
+    reduced = risk["verdict"] == VERDICT_REDUCE
+    return (
+        OUTCOME_ENTER,
+        REASON_RISK_CLEARED,
+        render(
+            REASON_RISK_CLEARED,
             max_chars=cap,
-            variant="no_risk",
-            symbol=str(proposal.get("symbol", "a contract")),
+            variant="reduced" if reduced else "default",
+            symbol=symbol,
+            lots=risk.get("lots_cleared", 0),
+            requested=risk.get("lots_requested", 0),
             entry=f"{float(proposal.get('entry_price_high') or 0.0):.2f}",
-            role=ROLE_RISK,
+            stop=f"{float(proposal.get('stop_price') or 0.0):.2f}",
+            risk=f"Rs {float(risk.get('max_loss_at_stop') or 0.0):,.0f}",
+            base=f"Rs {float(risk.get('capital_base') or 0.0):,.0f}",
+            limit=limit,
+            configured=configured,
         ),
     )
 
@@ -383,7 +483,7 @@ def _wants_a_contract(state: TickState, settings: Settings) -> bool:
 def _record_proposal(deps: TickDeps, state: TickState, result: SpecialistResult) -> dict[str, Any]:
     """Append the proposal, then translate its status into tick state."""
     payload = dict(result.payload)
-    deps.journal.record_proposal(
+    proposal_id = deps.journal.record_proposal(
         **build_proposal_row(
             payload,
             settings=deps.settings,
@@ -407,7 +507,52 @@ def _record_proposal(deps: TickDeps, state: TickState, result: SpecialistResult)
         "proposal_status": str(payload.get("status", STRATEGY_DEGRADED)),
         "proposal_detail": str(payload.get("defect") or payload.get("rationale") or ""),
         "proposal_violations": list(payload.get("violations") or []),
+        "proposal_id": proposal_id,
     }
+
+
+def _latch_session_stop(
+    deps: TickDeps, state: TickState, assessment: SessionAssessment, limits: RiskLimits
+) -> None:
+    """Write exactly one session-stop verdict for the day. The latch is a row, not a flag."""
+    verdict = held(
+        assessment.check.limit,
+        assessment.detail,
+        base=assessment.capital_base,
+    )
+    row = build_verdict_row(
+        verdict,
+        limits=limits,
+        tick_id=state["tick_id"],
+        trace_id=state["trace_id"],
+        trading_day=state["trading_day"],
+        index_symbol=deps.settings.index_symbol,
+        proposal_id=None,
+        symbol=None,
+        latency_us=0,
+    )
+    row.update(
+        {
+            "created_at_utc": datetime.now(tz=UTC),
+            "verdict": VERDICT_VETO,
+            "session_stop": True,
+            "tripped_limit": assessment.check.limit,
+            "configured_value": assessment.check.configured,
+            "observed_value": assessment.check.observed,
+            "limit_unit": assessment.check.unit,
+            "checks_json": json.dumps([assessment.check.as_dict()], sort_keys=True),
+        }
+    )
+    deps.journal.record_risk_verdict(**row)
+
+
+def _money(value: Any, unit: Any) -> str:
+    """Format a limit's value the way its unit wants to be read."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unspecified"
+    return f"Rs {number:,.0f}" if unit == UNIT_RUPEES else f"{number:g}"
 
 
 def build_tick_graph(deps: TickDeps) -> Any:
@@ -439,13 +584,37 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("book.open_positions", len(book.open_positions))
             span.set_attribute("book.decisions_today", book.decisions_today)
             span.set_attribute("book.available_cash", book.available_cash)
-            return {"book": book.as_dict()}
+            snapshot = book.as_dict()
+            limits = RiskLimits.from_settings(deps.settings)
+            with tracer.start_as_current_span("risk.session") as risk_span:
+                assessment = assess_session(snapshot, limits)
+                risk_span.set_attribute("risk.limits_artifact", limits.artifact)
+                risk_span.set_attribute("risk.capital_base", assessment.capital_base)
+                risk_span.set_attribute("risk.daily_loss_configured", assessment.check.configured)
+                risk_span.set_attribute("risk.daily_loss_observed", assessment.check.observed)
+                latched = deps.journal.session_stopped(state["trading_day"])
+                risk_span.set_attribute("risk.session_latched", latched)
+                risk_span.set_attribute("risk.session_stopped", assessment.stopped or latched)
+                if not (assessment.stopped or latched):
+                    return {"book": snapshot}
+                if assessment.stopped and not latched:
+                    _latch_session_stop(deps, state, assessment, limits)
+            return {
+                "book": snapshot,
+                "session_stop": {
+                    "configured": assessment.check.configured,
+                    "observed": assessment.check.observed,
+                    "detail": assessment.detail,
+                },
+            }
 
     def route_after_plan(state: TickState) -> str:
         if state.get("budget_exceeded") or state.get("book_error"):
             return "decide"
         book = state.get("book") or {}
-        return "decide" if book.get("open_positions") else "consult"
+        if book.get("open_positions"):
+            return "decide"
+        return "decide" if state.get("session_stop") else "consult"
 
     def consult(state: TickState) -> dict[str, Any]:
         with tracer.start_as_current_span("tick.consult") as span:
@@ -552,6 +721,63 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("strategy.token_cost_micros", int(result.token_cost_micros))
             return update
 
+    def route_after_propose(state: TickState) -> str:
+        return "adjudicate" if state.get("proposal_status") == "proposed" else "decide"
+
+    def adjudicate(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.adjudicate") as span:
+            limits = RiskLimits.from_settings(deps.settings)
+            span.set_attribute("risk.limits_artifact", limits.artifact)
+            payload = state.get("proposal") or {}
+            started = time.perf_counter()
+            try:
+                proposal = ProposalSubmission.model_validate(payload)
+            except ValidationError as exc:
+                verdict = held(
+                    LIMIT_PROPOSAL_SHAPE,
+                    f"the proposal could not be read as a submission: {exc.error_count()} field(s)",
+                )
+            else:
+                verdict = adjudicate_proposal(
+                    proposal,
+                    state.get("book") or {},
+                    limits,
+                    Playbook.from_settings(deps.settings),
+                    now_ist=datetime.now(tz=IST),
+                    entries_today=deps.journal.count_entries(state["trading_day"]),
+                )
+            latency_us = int((time.perf_counter() - started) * 1_000_000)
+
+            row = build_verdict_row(
+                verdict,
+                limits=limits,
+                tick_id=state["tick_id"],
+                trace_id=state["trace_id"],
+                trading_day=state["trading_day"],
+                index_symbol=deps.settings.index_symbol,
+                proposal_id=state.get("proposal_id"),
+                symbol=str(payload.get("symbol") or "") or None,
+                latency_us=latency_us,
+            )
+            row["created_at_utc"] = datetime.now(tz=UTC)
+            deps.journal.record_risk_verdict(**row)
+
+            span.set_attribute("risk.verdict", verdict.verdict)
+            span.set_attribute("risk.limit", verdict.tripped.limit if verdict.tripped else "none")
+            span.set_attribute(
+                "risk.configured", verdict.tripped.configured if verdict.tripped else 0.0
+            )
+            span.set_attribute(
+                "risk.observed", verdict.tripped.observed if verdict.tripped else 0.0
+            )
+            span.set_attribute("risk.capital_base", verdict.capital_base)
+            span.set_attribute("risk.lots_requested", verdict.lots_requested)
+            span.set_attribute("risk.lots_cleared", verdict.lots_cleared)
+            span.set_attribute("risk.latency_us", latency_us)
+            if verdict.verdict == VERDICT_HOLD:
+                span.set_status(Status(StatusCode.ERROR, "risk input unavailable"))
+            return {"risk": verdict.as_dict()}
+
     def decide(state: TickState) -> dict[str, Any]:
         with tracer.start_as_current_span("tick.decide") as span:
             if _over_budget(state) and not state.get("budget_exceeded"):
@@ -614,6 +840,7 @@ def build_tick_graph(deps: TickDeps) -> Any:
     builder.add_node("plan", plan)
     builder.add_node("consult", consult)
     builder.add_node("propose", propose)
+    builder.add_node("adjudicate", adjudicate)
     builder.add_node("decide", decide)
     builder.add_node("persist", persist)
     builder.add_edge(START, "plan")
@@ -623,7 +850,10 @@ def build_tick_graph(deps: TickDeps) -> Any:
     builder.add_conditional_edges(
         "consult", route_after_consult, {"propose": "propose", "decide": "decide"}
     )
-    builder.add_edge("propose", "decide")
+    builder.add_conditional_edges(
+        "propose", route_after_propose, {"adjudicate": "adjudicate", "decide": "decide"}
+    )
+    builder.add_edge("adjudicate", "decide")
     builder.add_edge("decide", "persist")
     builder.add_edge("persist", END)
     return builder.compile(checkpointer=deps.checkpointer)

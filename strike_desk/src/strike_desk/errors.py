@@ -67,3 +67,7 @@ class EventCalendarInvalid(StrikeDeskError):
 
 class PlaybookViolation(StrikeDeskError):
     """A proposal failed one or more of the playbook's numeric constraints."""
+
+
+class RiskInputUnavailable(StrikeDeskError):
+    """A limit could not be evaluated because an input it needs was unusable."""

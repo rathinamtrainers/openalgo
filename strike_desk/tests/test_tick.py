@@ -40,6 +40,7 @@ def test_flat_book_with_no_specialists_declines(runner, journal, today):
         "tick.consult",
         "tick.decide",
         "tick.persist",
+        "risk.session",
     }
 
 

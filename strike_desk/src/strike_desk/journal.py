@@ -1,4 +1,5 @@
-"""Append-only SQLite journal: ``decisions``, ``traces``, ``regime_reads`` and ``proposals``."""
+"""Append-only SQLite journal: ``decisions``, ``traces``, ``regime_reads``,
+``proposals`` and ``risk_verdicts``."""
 
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from .errors import JournalWriteError
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Base(DeclarativeBase):
@@ -179,8 +180,46 @@ class Proposal(Base):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
 
 
+class RiskVerdictRow(Base):
+    """One row per adjudication. Never updated, never deleted."""
+
+    __tablename__ = "risk_verdicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    verdict_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    tick_id: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    index_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    tripped_limit: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    configured_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_unit: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    capital_base: Mapped[float] = mapped_column(Float, nullable=False)
+    lots_requested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lots_cleared: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    premium_at_risk: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_loss_at_stop: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    session_stop: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    checks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    limits_artifact: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    latency_us: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+
 # Append-only enforcement lives in the database, not in application discipline.
-for _table in (Decision.__table__, TraceSpan.__table__, RegimeRead.__table__, Proposal.__table__):
+for _table in (
+    Decision.__table__,
+    TraceSpan.__table__,
+    RegimeRead.__table__,
+    Proposal.__table__,
+    RiskVerdictRow.__table__,
+):
     for _operation in ("UPDATE", "DELETE"):
         event.listen(
             _table,
@@ -243,9 +282,7 @@ class Journal:
                 present = {str(row[1]) for row in rows}
                 if not present or column in present:
                     continue
-                connection.exec_driver_sql(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
-                )
+                connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
                 logger.info("journal migration: added %s.%s", table, column)
 
     @contextmanager
@@ -295,10 +332,64 @@ class Journal:
             with self.session_scope() as session:
                 session.add(Proposal(**fields))
         except SQLAlchemyError as exc:
-            raise JournalWriteError(
-                f"could not append proposal: {exc.__class__.__name__}"
-            ) from exc
+            raise JournalWriteError(f"could not append proposal: {exc.__class__.__name__}") from exc
         return str(fields["proposal_id"])
+
+    def record_risk_verdict(self, **fields: Any) -> str:
+        """Append one verdict. Raises JournalWriteError so the tick fails closed."""
+        try:
+            with self.session_scope() as session:
+                session.add(RiskVerdictRow(**fields))
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(
+                f"could not append risk verdict: {exc.__class__.__name__}"
+            ) from exc
+        return str(fields["verdict_id"])
+
+    def list_risk_verdicts(self, trading_day: str, limit: int = 200) -> Sequence[RiskVerdictRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow)
+                .where(RiskVerdictRow.trading_day == trading_day)
+                .order_by(RiskVerdictRow.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def recent_risk_days(self, days: int) -> list[str]:
+        """The most recent trading days holding at least one verdict, oldest first."""
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow.trading_day)
+                .distinct()
+                .order_by(RiskVerdictRow.trading_day.desc())
+                .limit(days)
+            )
+            found = [str(row) for row in session.execute(statement).scalars()]
+        return sorted(found)
+
+    def session_stopped(self, trading_day: str) -> bool:
+        """True once a session-stop verdict has been latched for the day."""
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow.id)
+                .where(
+                    RiskVerdictRow.trading_day == trading_day,
+                    RiskVerdictRow.session_stop.is_(True),
+                )
+                .limit(1)
+            )
+            return session.execute(statement).first() is not None
+
+    def count_entries(self, trading_day: str) -> int:
+        """Entries journalled today — the observed value behind max-trades-per-day."""
+        with self.session_scope() as session:
+            statement = (
+                select(func.count())
+                .select_from(Decision)
+                .where(Decision.trading_day == trading_day, Decision.outcome == "enter")
+            )
+            return int(session.execute(statement).scalar_one())
 
     def list_proposals(self, trading_day: str, limit: int = 200) -> Sequence[Proposal]:
         with self.session_scope() as session:
@@ -324,8 +415,10 @@ class Journal:
 
     def count_decisions(self, trading_day: str) -> int:
         with self.session_scope() as session:
-            statement = select(func.count()).select_from(Decision).where(
-                Decision.trading_day == trading_day
+            statement = (
+                select(func.count())
+                .select_from(Decision)
+                .where(Decision.trading_day == trading_day)
             )
             return int(session.execute(statement).scalar_one())
 

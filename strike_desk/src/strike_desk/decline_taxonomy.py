@@ -14,12 +14,13 @@ from .errors import StrikeDeskError
 
 logger = logging.getLogger(__name__)
 
-TAXONOMY_VERSION = "dt-2"
+TAXONOMY_VERSION = "dt-3"
 
 CATEGORY_BOOK = "book"
 CATEGORY_CONTRACT = "contract"
 CATEGORY_DATA = "data"
 CATEGORY_REGIME = "regime"
+CATEGORY_RISK = "risk"
 CATEGORY_SPECIALIST = "specialist"
 CATEGORY_SYSTEM = "system"
 CATEGORY_UNKNOWN = "unknown"
@@ -29,6 +30,7 @@ CATEGORIES = frozenset(
         CATEGORY_CONTRACT,
         CATEGORY_DATA,
         CATEGORY_REGIME,
+        CATEGORY_RISK,
         CATEGORY_SPECIALIST,
         CATEGORY_SYSTEM,
     }
@@ -39,7 +41,7 @@ DISPOSITION_DEGRADED = "degraded"
 DISPOSITION_DEFECT = "defect"
 DISPOSITIONS = frozenset({DISPOSITION_ROUTINE, DISPOSITION_DEGRADED, DISPOSITION_DEFECT})
 
-OUTCOMES = frozenset({"decline", "hold"})
+OUTCOMES = frozenset({"decline", "hold", "enter"})
 
 RATIONALE_PREFIX = " Analyst: "
 TRUNCATION_MARK = "..."
@@ -225,8 +227,7 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
         disposition=DISPOSITION_DEGRADED,
         summary="the tick ran out of its budget",
         default=(
-            "Declined: the tick exceeded its {budget}s budget "
-            "before a decision could be assembled."
+            "Declined: the tick exceeded its {budget}s budget before a decision could be assembled."
         ),
     ),
     _entry(
@@ -240,6 +241,63 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
             "The desk stays out when it cannot reason."
         ),
     ),
+    _entry(
+        "risk-session-stopped",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the day's loss cap has stopped the session",
+        default=(
+            "Declined: the day is down {observed} against a {configured} daily loss cap. "
+            "The desk stops proposing entries for the rest of the session."
+        ),
+    ),
+    _entry(
+        "risk-input-unavailable",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_DEGRADED,
+        summary="a hard limit could not be evaluated",
+        default=(
+            "Declined: the {limit} limit could not be evaluated ({detail}). "
+            "A proposal is held, never assumed safe."
+        ),
+    ),
+    _entry(
+        "risk-veto",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="a hard limit vetoed the proposal",
+        default=(
+            "Declined: {symbol} trips the {limit} limit - configured {configured}, "
+            "observed {observed}. The veto is arithmetic and is not negotiated."
+        ),
+        sized_out=(
+            "Declined: even one lot of {symbol} trips the {limit} limit - configured "
+            "{configured}, observed {observed}. There is no size this desk may take."
+        ),
+        playbook_disagreed=(
+            "Declined: {symbol} reduced to fit {limit} no longer passes the playbook "
+            "({detail}). A contract two checks disagree about is never bought."
+        ),
+    ),
+    _entry(
+        "risk-cleared",
+        outcome="enter",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the contract cleared every hard limit",
+        default=(
+            "Intent: buy {lots} lot(s) of {symbol} at up to {entry}, risking {risk} to the "
+            "{stop} stop against a {base} capital base. This is an intent, not an order."
+        ),
+        reduced=(
+            "Intent: buy {lots} lot(s) of {symbol} at up to {entry}, cut from {requested} "
+            "lot(s) to fit the {limit} limit of {configured}. Risking {risk} to the {stop} "
+            "stop. This is an intent, not an order."
+        ),
+    ),
 )
 
 
@@ -250,7 +308,7 @@ def _validate(entries: tuple[ReasonEntry, ...]) -> Mapping[str, ReasonEntry]:
         if item.code in registry:
             raise ValueError(f"duplicate reason code {item.code!r}")
         if item.outcome not in OUTCOMES:
-            raise ValueError(f"{item.code!r}: outcome {item.outcome!r} is not a no-trade outcome")
+            raise ValueError(f"{item.code!r}: outcome {item.outcome!r} is not a tick outcome")
         if item.category not in CATEGORIES:
             raise ValueError(f"{item.code!r}: category {item.category!r} is not a known category")
         if item.disposition not in DISPOSITIONS:

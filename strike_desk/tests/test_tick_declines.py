@@ -57,9 +57,7 @@ def test_an_unreadable_book_is_degraded_data(runner, journal, openalgo, today):
     assert "never assumed flat" in row.reason_text
 
 
-def test_a_regime_decline_is_routine_and_keeps_the_analyst_sentence(
-    runner, deps, journal, today
-):
+def test_a_regime_decline_is_routine_and_keeps_the_analyst_sentence(runner, deps, journal, today):
     deps.registry.register(
         StubSpecialist(
             payload={

@@ -115,9 +115,7 @@ class EvidenceLedger:
 
     def text(self) -> str:
         """Every successful tool output concatenated, for non-numeric grounding checks."""
-        return "\n".join(
-            observation.output for observation in self._observations if observation.ok
-        )
+        return "\n".join(observation.output for observation in self._observations if observation.ok)
 
     @property
     def observations(self) -> tuple[ToolObservation, ...]:
@@ -259,8 +257,7 @@ def validate_proposal(
     """Return a defect description, or ``None`` when the proposal is grounded."""
     if len(proposal.rationale) > max_rationale_chars:
         return (
-            f"rationale is {len(proposal.rationale)} characters, "
-            f"over the {max_rationale_chars} cap"
+            f"rationale is {len(proposal.rationale)} characters, over the {max_rationale_chars} cap"
         )
 
     unknown_tools = sorted(

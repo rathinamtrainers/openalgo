@@ -152,7 +152,7 @@ def test_a_v3_journal_gains_the_table_in_place(tmp_path) -> None:
             connection.execute(
                 sql_text(
                     "INSERT INTO decisions (tick_id, trace_id, created_at_utc, trading_day, "
-                    "index_symbol, \"trigger\", outcome, reason_code, reason_text, "
+                    'index_symbol, "trigger", outcome, reason_code, reason_text, '
                     "reason_category, reason_disposition, book_state_json, prompt_set_version, "
                     "model_version, token_cost_micros, latency_ms, trace_complete, schema_version) "
                     "VALUES (:tick_id, :trace_id, :created_at, :trading_day, 'NIFTY', "
@@ -194,3 +194,73 @@ def test_new_rows_land_classified_in_the_widened_table(legacy):
     assert report.total == 4
     assert report.unstamped == 3
     assert report.defects == 1
+
+
+def _pragma_user_columns(path, table: str) -> list[str]:
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as sql_text
+
+    engine = create_engine(f"sqlite:///{path}", future=True)
+    try:
+        with engine.begin() as connection:
+            rows = connection.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
+        return [str(row[1]) for row in rows]
+    finally:
+        engine.dispose()
+
+
+def _pragma_user_columns_v4() -> list[str]:
+    from strike_desk.journal import Proposal
+
+    return [column.name for column in Proposal.__table__.columns]
+
+
+@pytest.fixture
+def v4_journal_bytes(tmp_path):
+    """A journal written at schema 4: proposals exist, risk_verdicts does not."""
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as sql_text
+
+    from tests.chain_fixtures import seed_proposal
+    from tests.journal_fixtures import seed_decision as seed
+
+    path = tmp_path / "v4-source.db"
+    journal = Journal(path)
+    try:
+        journal.create_schema()
+        seed(journal, "2026-08-27", "regime-not-tradeable")
+        seed_proposal(journal, trading_day="2026-08-27")
+    finally:
+        journal.close()
+
+    engine = create_engine(f"sqlite:///{path}", future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(sql_text("DROP TABLE IF EXISTS risk_verdicts"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS risk_verdicts_no_update"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS risk_verdicts_no_delete"))
+    finally:
+        engine.dispose()
+    return path.read_bytes()
+
+
+def test_a_v4_journal_gains_the_table_in_place(tmp_path, v4_journal_bytes) -> None:
+    path = tmp_path / "strike_desk.db"
+    path.write_bytes(v4_journal_bytes)
+    before = _table_names(path), _row_count(path, "decisions"), _row_count(path, "proposals")
+
+    journal = Journal(path)
+    try:
+        journal.create_schema()
+        journal.create_schema()  # idempotent
+    finally:
+        journal.close()
+
+    after = _table_names(path), _row_count(path, "decisions"), _row_count(path, "proposals")
+    assert "risk_verdicts" not in before[0] and "risk_verdicts" in after[0]
+    assert before[1:] == after[1:]  # not one row read or rewritten
+    assert _triggers_for(path, "risk_verdicts") == {
+        "risk_verdicts_no_update",
+        "risk_verdicts_no_delete",
+    }
+    assert _pragma_user_columns(path, "proposals") == _pragma_user_columns_v4()

@@ -195,7 +195,7 @@ def proposal_args(**overrides: Any) -> dict[str, Any]:
         "theta_per_day": -18.4,
         "implied_volatility": 12.8,
         "open_interest": 2_841_250,
-        "breakeven": 24992.0,          # strike 24800 + entry_price_high 192.0
+        "breakeven": 24992.0,  # strike 24800 + entry_price_high 192.0
         "stop_price": 152.0,
         "target_price": 268.0,
         "time_stop_ist": "14:45",

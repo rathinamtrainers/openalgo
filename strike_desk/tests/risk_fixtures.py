@@ -1,0 +1,102 @@
+"""Book snapshots and sized proposals for the Risk Officer's tests.
+
+The recorded contract from ``chain_fixtures`` risks Rs 3,000 a lot (192.00 entry, 152.00
+stop, 75 units) and deploys Rs 14,400 of premium a lot. Every capital base below is chosen
+from those two numbers so that exactly one limit is the interesting one.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from strike_desk.grounding import ProposalSubmission
+from strike_desk.journal import SCHEMA_VERSION
+
+from .chain_fixtures import INDEX, LOT_SIZE, SYMBOL, valid_proposal
+
+#: The recorded contract, per lot.
+RISK_PER_LOT = 3_000.0
+PREMIUM_PER_LOT = 14_400.0
+
+#: Capital bases, each named for the limit it makes interesting at the default percentages.
+ROOMY = 1_500_000.0  # per-trade cap 7,500 — two lots (6,000) clear
+REDUCES = 800_000.0  # per-trade cap 4,000 — two lots breach, one lot (3,000) clears
+VETOES = 500_000.0  # per-trade cap 2,500 — even one lot breaches
+ON_THE_CAP = 600_000.0  # per-trade cap 3,000 — exactly one lot's risk, so it breaches
+
+
+def position(
+    *, quantity: int = LOT_SIZE, average_price: float = 192.0, symbol: str = SYMBOL
+) -> dict[str, Any]:
+    """One open position, in the shape ``BookState.as_dict`` emits."""
+    return {
+        "symbol": symbol,
+        "exchange": "NFO",
+        "product": "MIS",
+        "quantity": quantity,
+        "average_price": average_price,
+        "ltp": average_price,
+        "pnl": 0.0,
+    }
+
+
+def book_with(
+    *,
+    capital: float = ROOMY,
+    realised: float = 0.0,
+    unrealised: float = 0.0,
+    positions: tuple[dict[str, Any], ...] = (),
+    decisions_today: int = 0,
+) -> dict[str, Any]:
+    """A book snapshot at a chosen capital base, in the shape tick state holds it."""
+    cash = round(capital * 0.8, 2)
+    return {
+        "captured_at_utc": datetime.now(tz=UTC).isoformat(),
+        "flat": not positions,
+        "open_positions": list(positions),
+        "available_cash": cash,
+        "utilised_margin": round(capital - cash, 2),
+        "realised_pnl": realised,
+        "unrealised_pnl": unrealised,
+        "decisions_today": decisions_today,
+    }
+
+
+def two_lots(**overrides: Any) -> ProposalSubmission:
+    """The recorded proposal at two lots, with quantity kept consistent."""
+    return valid_proposal(lots=2, quantity=2 * LOT_SIZE, **overrides)
+
+
+def seed_verdict(journal: Any, *, trading_day: str, verdict: str = "pass", **fields: Any) -> str:
+    """Append one risk_verdicts row directly, for view and report tests."""
+    row: dict[str, Any] = {
+        "verdict_id": str(uuid.uuid4()),
+        "tick_id": str(uuid.uuid4()),
+        "trace_id": "0" * 32,
+        "proposal_id": str(uuid.uuid4()),
+        "created_at_utc": datetime.now(tz=UTC),
+        "trading_day": trading_day,
+        "index_symbol": INDEX,
+        "symbol": SYMBOL,
+        "verdict": verdict,
+        "tripped_limit": None,
+        "configured_value": None,
+        "observed_value": None,
+        "limit_unit": None,
+        "capital_base": ROOMY,
+        "lots_requested": 2,
+        "lots_cleared": 2,
+        "premium_at_risk": 2 * PREMIUM_PER_LOT,
+        "max_loss_at_stop": 2 * RISK_PER_LOT,
+        "session_stop": False,
+        "checks_json": json.dumps([]),
+        "limits_artifact": "rl-1+testdigest",
+        "detail": "cleared 2 lot(s)",
+        "latency_us": 214,
+        "schema_version": SCHEMA_VERSION,
+    }
+    row.update(fields)
+    return journal.record_risk_verdict(**row)

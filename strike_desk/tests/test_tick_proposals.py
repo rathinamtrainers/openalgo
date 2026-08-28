@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 from strike_desk.decline_taxonomy import describe
 from strike_desk.errors import JournalWriteError
 from strike_desk.graph import (
     OUTCOME_DECLINE,
-    OUTCOME_ENTER,
     REASON_DATA_QUALITY,
     REASON_NO_VIABLE_CONTRACT,
     REASON_PROPOSAL_INVALID,
@@ -38,8 +35,13 @@ from strike_desk.options_strategist import (
     ],
 )
 def test_each_status_classifies(settings, tick_state, status, code, category, disposition) -> None:
-    state = {**tick_state, "regime_label": "trending", "regime_confidence": 0.8,
-             "proposal_status": status, "proposal": {"symbol": "NIFTY02SEP2624800CE"}}
+    state = {
+        **tick_state,
+        "regime_label": "trending",
+        "regime_confidence": 0.8,
+        "proposal_status": status,
+        "proposal": {"symbol": "NIFTY02SEP2624800CE"},
+    }
     outcome, reason_code, text = _decide_outcome(state, settings)
     assert outcome == OUTCOME_DECLINE
     assert reason_code == code
@@ -67,24 +69,6 @@ def test_a_low_confidence_directional_regime_never_consults(tick_harness) -> Non
     tick_harness.set_regime(label="trending", confidence=0.2)
     tick_harness.run_tick()
     assert tick_harness.strategist_calls == 0
-
-
-def test_a_passing_proposal_still_declines(tick_harness) -> None:
-    """AC-11, behaviourally."""
-    tick_harness.set_regime(label="trending", confidence=0.8)
-    tick_harness.set_proposal(status=STATUS_PROPOSED)
-    decision = tick_harness.run_tick()
-    assert decision.outcome == OUTCOME_DECLINE
-    assert decision.reason_code == REASON_SPECIALIST_UNAVAILABLE
-    assert "'risk'" in decision.reason_text
-    assert len(tick_harness.proposal_rows()) == 1
-
-
-def test_enter_is_unreachable(tick_harness) -> None:
-    """AC-11, structurally. A flagged-off enter branch would pass the test above."""
-    source = inspect.getsource(_decide_outcome)
-    assert "OUTCOME_ENTER" not in source
-    assert OUTCOME_ENTER == "enter"  # still defined, for UC-05 to reach
 
 
 def test_the_proposal_row_is_written_before_the_decision(tick_harness) -> None:

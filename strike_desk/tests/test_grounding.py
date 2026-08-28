@@ -132,7 +132,5 @@ def test_an_invented_structured_field_is_ungrounded():
 def test_an_invented_symbol_is_ungrounded():
     from tests.chain_fixtures import grounded_ledger, valid_proposal
 
-    defect = validate_proposal(
-        valid_proposal(symbol="NIFTY02SEP2699999CE"), grounded_ledger(), 700
-    )
+    defect = validate_proposal(valid_proposal(symbol="NIFTY02SEP2699999CE"), grounded_ledger(), 700)
     assert defect is not None and "symbol" in defect

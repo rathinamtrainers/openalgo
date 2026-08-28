@@ -79,8 +79,7 @@ class Playbook:
                 f"{self.max_days_to_expiry} calendar days away.",
                 f"- Total theta cost per day (|theta| x quantity) must be at most "
                 f"Rs {self.theta_budget_rupees:,.0f}.",
-                f"- The time-stop must be later than now and no later than "
-                f"{self.time_stop} IST.",
+                f"- The time-stop must be later than now and no later than {self.time_stop} IST.",
                 "- Breakeven must equal strike + entry_price_high for a CE, "
                 "strike - entry_price_high for a PE.",
                 "- entry_price_low <= ask <= entry_price_high, "
@@ -113,8 +112,7 @@ def check(
     expected_type = "CE" if proposal.direction == "bullish" else "PE"
     if proposal.option_type != expected_type:
         violations.append(
-            f"direction {proposal.direction!r} requires {expected_type}, "
-            f"got {proposal.option_type}"
+            f"direction {proposal.direction!r} requires {expected_type}, got {proposal.option_type}"
         )
 
     magnitude = abs(proposal.delta)
@@ -170,8 +168,7 @@ def check(
 
     if proposal.entry_price_low > proposal.entry_price_high:
         violations.append(
-            f"entry band {proposal.entry_price_low:.2f}-{proposal.entry_price_high:.2f} "
-            "is inverted"
+            f"entry band {proposal.entry_price_low:.2f}-{proposal.entry_price_high:.2f} is inverted"
         )
     elif not proposal.entry_price_low <= proposal.ask <= proposal.entry_price_high:
         violations.append(
@@ -202,9 +199,7 @@ def check(
             )
 
     if proposal.theta_per_day > 0:
-        violations.append(
-            f"theta {proposal.theta_per_day:.2f} is positive; a long option decays"
-        )
+        violations.append(f"theta {proposal.theta_per_day:.2f} is positive; a long option decays")
     theta_cost = abs(proposal.theta_per_day) * proposal.quantity
     if theta_cost > playbook.theta_budget_rupees:
         violations.append(

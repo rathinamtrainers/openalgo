@@ -241,8 +241,12 @@ def ai_message(
 ) -> AIMessage:
     """One scripted assistant turn, shaped the way ChatAnthropic returns them."""
     calls = [
-        {"name": call["name"], "args": call["args"], "id": call.get("id", f"call-{index}"),
-         "type": "tool_call"}
+        {
+            "name": call["name"],
+            "args": call["args"],
+            "id": call.get("id", f"call-{index}"),
+            "type": "tool_call",
+        }
         for index, call in enumerate(tool_calls or [])
     ]
     return AIMessage(
@@ -407,14 +411,17 @@ def tick_state() -> dict[str, Any]:
 
 
 @pytest.fixture
-def tick_harness(runner, deps, journal, today):
+def tick_harness(runner, deps, journal, today, openalgo):
     """A real graph with stubbed regime and strategist specialists."""
     import uuid
 
+    import httpx
+
     from strike_desk.errors import JournalWriteError
     from strike_desk.options_strategist import STATUS_PROPOSED
-    from strike_desk.specialists import ROLE_STRATEGIST, SpecialistResult
-    from tests.chain_fixtures import RATIONALE, SYMBOL
+    from strike_desk.specialists import ROLE_REGIME, ROLE_STRATEGIST, SpecialistResult
+    from tests.chain_fixtures import LOT_SIZE, RATIONALE, proposal_args
+    from tests.risk_fixtures import book_with
 
     class Harness:
         def __init__(self) -> None:
@@ -422,6 +429,8 @@ def tick_harness(runner, deps, journal, today):
             self.deps = deps
             self.journal = journal
             self.today = today
+            self.openalgo = openalgo
+            self.analyst_calls = 0
             self.strategist_calls = 0
             self._regime = {
                 "label": "trending",
@@ -429,11 +438,7 @@ def tick_harness(runner, deps, journal, today):
                 "rationale": "ADX at 27.4 confirms the move.",
             }
             self._proposal_status = STATUS_PROPOSED
-            self._proposal = {
-                "symbol": SYMBOL,
-                "entry_price_high": 192.0,
-                "expiry": "2026-09-02",
-            }
+            self._proposal = proposal_args()
             self._journal_fails = False
             self._register()
 
@@ -445,23 +450,54 @@ def tick_harness(runner, deps, journal, today):
             }
             self._register()
 
-        def set_proposal(self, status: str, journal_fails: bool = False) -> None:
+        def set_proposal(
+            self, status: str, journal_fails: bool = False, lots: int | None = None
+        ) -> None:
             self._proposal_status = status
             self._journal_fails = journal_fails
+            args = proposal_args()
+            if lots is not None:
+                args["lots"] = lots
+                args["quantity"] = lots * LOT_SIZE
+            self._proposal = args
             self._register()
 
-        def _register(self) -> None:
-            self.deps.registry.register(
-                StubSpecialist(
-                    payload={
-                        "label": self._regime["label"],
-                        "confidence": self._regime["confidence"],
-                        "rationale": self._regime["rationale"],
-                    },
-                    model_version="stub-haiku",
+        def set_book(self, **kwargs: Any) -> None:
+            snapshot = book_with(**kwargs)
+            funds = {
+                "availablecash": str(snapshot["available_cash"]),
+                "collateral": "0.00",
+                "m2munrealized": str(snapshot["unrealised_pnl"]),
+                "m2mrealized": str(snapshot["realised_pnl"]),
+                "utiliseddebits": str(snapshot["utilised_margin"]),
+            }
+            self.openalgo.post("/api/v1/funds").mock(
+                return_value=httpx.Response(200, json={"status": "success", "data": funds})
+            )
+            self.openalgo.post("/api/v1/positionbook").mock(
+                return_value=httpx.Response(
+                    200, json={"status": "success", "data": snapshot["open_positions"]}
                 )
             )
+
+        def _register(self) -> None:
             harness = self
+
+            class CountingAnalyst:
+                role = ROLE_REGIME
+
+                def run(self, request):
+                    harness.analyst_calls += 1
+                    return StubSpecialist(
+                        payload={
+                            "label": harness._regime["label"],
+                            "confidence": harness._regime["confidence"],
+                            "rationale": harness._regime["rationale"],
+                        },
+                        model_version="stub-haiku",
+                    ).run(request)
+
+            self.deps.registry.register(CountingAnalyst())
 
             class CountingStrategist:
                 role = ROLE_STRATEGIST
@@ -504,12 +540,21 @@ def tick_harness(runner, deps, journal, today):
         def decision_rows(self):
             return self.journal.list_decisions(self.today)
 
+        def verdict_rows(self):
+            return self.journal.list_risk_verdicts(self.today)
+
+        def requested_paths(self) -> set[str]:
+            return {str(call.request.url.path) for call in self.openalgo.calls}
+
         def run_tick(self):
             if self._journal_fails:
+
                 def explode(**_fields):
                     raise JournalWriteError("disk is read-only")
 
                 self.deps.journal.record_proposal = explode  # type: ignore[method-assign]
+            self.analyst_calls = 0
+            self.strategist_calls = 0
             self.runner.run_tick("schedule")
             rows = self.journal.list_decisions(self.today)
             return rows[0] if rows else None

@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     playbook_theta_budget_rupees: float = Field(default=1500.0, gt=0.0, le=1_000_000.0)
     playbook_time_stop: str = "15:00"
 
+    # --- Risk Officer (control plane) ---------------------------------------
+    risk_daily_loss_cap_pct: float = Field(default=2.0, gt=0.0, le=100.0)
+    risk_per_trade_loss_cap_pct: float = Field(default=0.5, gt=0.0, le=100.0)
+    risk_deployed_capital_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_per_index_exposure_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_max_concurrent_positions: int = Field(default=1, ge=1, le=10)
+    risk_max_lots: int = Field(default=2, ge=1, le=20)
+    risk_max_trades_per_day: int = Field(default=3, ge=1, le=50)
+    risk_capital_floor: float = Field(default=50_000.0, ge=0.0, le=100_000_000.0)
+
     # --- MCP toolbox --------------------------------------------------------
     mcp_python: Path = Path("/opt/openalgo/.venv/bin/python")
     mcp_server_script: Path = Path("/opt/openalgo/mcp/mcpserver.py")
@@ -180,6 +190,16 @@ class Settings(BaseSettings):
                 f"specialist timeouts total {needed:.0f}s, which does not fit inside the "
                 f"{self.tick_budget_seconds:.0f}s tick budget"
             )
+        if self.risk_per_trade_loss_cap_pct > self.risk_daily_loss_cap_pct:
+            raise ValueError(
+                "risk_per_trade_loss_cap_pct must not exceed risk_daily_loss_cap_pct, or one "
+                "trade can end the session"
+            )
+        if self.risk_max_lots > self.playbook_max_lots:
+            raise ValueError(
+                f"risk_max_lots {self.risk_max_lots} is looser than playbook_max_lots "
+                f"{self.playbook_max_lots}; the hard limit must bind at or before the playbook"
+            )
         return self
 
     @field_validator("environment")
@@ -211,9 +231,7 @@ class Settings(BaseSettings):
     @property
     def strategist_deadline_seconds(self) -> float:
         """The strategist's own budget, always under the registry's timeout."""
-        return max(
-            1.0, self.strategist_timeout_seconds - self.strategist_deadline_margin_seconds
-        )
+        return max(1.0, self.strategist_timeout_seconds - self.strategist_deadline_margin_seconds)
 
     @property
     def db_path(self) -> Path:

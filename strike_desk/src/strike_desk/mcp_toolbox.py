@@ -71,9 +71,7 @@ FORBIDDEN_PREFIXES: tuple[str, ...] = (
 
 def _assert_read_only(names: tuple[str, ...]) -> None:
     """Import-time guardrail: a mutating tool cannot reach a whitelist by accident."""
-    offenders = sorted(
-        name for name in names if name.startswith(FORBIDDEN_PREFIXES)
-    )
+    offenders = sorted(name for name in names if name.startswith(FORBIDDEN_PREFIXES))
     if offenders:
         raise ValueError(
             f"whitelisted tools must be read-only; these are not: {', '.join(offenders)}"

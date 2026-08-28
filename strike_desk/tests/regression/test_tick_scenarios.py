@@ -21,9 +21,10 @@ def test_frozen_scenario(settings, scenario):
     assert reason_text.strip(), "every verdict must carry a human-readable sentence"
 
 
-def test_no_scenario_permits_an_entry(settings):
+def test_enter_is_only_reachable_via_risk_cleared(settings):
     for scenario in SUITE["scenarios"]:
-        assert scenario["expect"]["outcome"] != "enter"
+        if scenario["expect"]["outcome"] == "enter":
+            assert scenario["expect"]["reason_code"] == "risk-cleared"
 
 
 def test_every_reason_code_is_covered_by_the_suite():

@@ -30,6 +30,9 @@ from .prompt_registry import PromptRegistry
 from .proposal_view import as_dict
 from .proposal_view import render as render_proposals
 from .regime_analyst import build_regime_analyst, build_regime_read_row
+from .risk_officer import RiskLimits
+from .risk_view import as_dict as risk_as_dict
+from .risk_view import render as risk_render
 from .service import StrikeDeskService
 from .specialists import SpecialistRequest
 
@@ -122,6 +125,9 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"prompt set       : {PromptRegistry.load(settings.prompts_dir).set_version}")
         print(f"taxonomy         : {TAXONOMY_ARTIFACT}")
         print(f"playbook         : {Playbook.from_settings(settings).artifact}")
+        limits = RiskLimits.from_settings(settings)
+        print(f"risk limits      : {limits.artifact}")
+        print(limits.describe())
         print(f"strategist model : {settings.strategist_model}")
         print(f"directional      : {settings.directional_regimes}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
@@ -247,8 +253,10 @@ def _cmd_regime(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"label      : {payload.get('label')}")
         print(f"confidence : {payload.get('confidence')}")
         print(f"rationale  : {payload.get('rationale')}")
-        print(f"tool calls : {payload.get('tool_call_count')} "
-              f"({payload.get('tool_error_count')} failed)")
+        print(
+            f"tool calls : {payload.get('tool_call_count')} "
+            f"({payload.get('tool_error_count')} failed)"
+        )
         print(f"cost       : ${result.token_cost_micros / 1_000_000:.4f}")
         print(f"trace      : {trace_id}")
         if payload.get("defect"):
@@ -321,6 +329,41 @@ def _cmd_proposals(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_risk(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        days = _resolve_days(args, settings)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        if days is None:
+            n = getattr(args, "since", None)
+            if n in (None, -1, 0):
+                n = settings.report_default_days
+            days = journal.recent_risk_days(int(n))
+        rows = [row for day in days for row in journal.list_risk_verdicts(day)]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "limits": RiskLimits.from_settings(settings).artifact,
+                        "days": days,
+                        "verdicts": [risk_as_dict(row) for row in rows],
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            print(risk_render(rows, days=days))
+    finally:
+        journal.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -355,9 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true", help="print the same numbers as a JSON document"
     )
 
-    proposals_parser = subparsers.add_parser(
-        "proposals", help="list what the strategist proposed"
-    )
+    proposals_parser = subparsers.add_parser("proposals", help="list what the strategist proposed")
     proposals_group = proposals_parser.add_mutually_exclusive_group()
     proposals_group.add_argument("--day", type=_trading_day, help="one IST trading day, YYYY-MM-DD")
     proposals_group.add_argument(
@@ -365,10 +406,21 @@ def main(argv: list[str] | None = None) -> int:
         type=_positive_int,
         nargs="?",
         const=0,
-        help="the most recent N journalled days; bare --since uses "
-        "STRIKE_DESK_REPORT_DEFAULT_DAYS",
+        help="the most recent N journalled days; bare --since uses STRIKE_DESK_REPORT_DEFAULT_DAYS",
     )
     proposals_parser.add_argument("--json", action="store_true", help="print JSON instead of text")
+
+    risk_parser = subparsers.add_parser("risk", help="list every risk adjudication")
+    risk_group = risk_parser.add_mutually_exclusive_group()
+    risk_group.add_argument("--day", type=_trading_day, help="one IST trading day, YYYY-MM-DD")
+    risk_group.add_argument(
+        "--since",
+        type=_positive_int,
+        nargs="?",
+        const=0,
+        help="the most recent N journalled days; bare --since uses STRIKE_DESK_REPORT_DEFAULT_DAYS",
+    )
+    risk_parser.add_argument("--json", action="store_true", help="print JSON instead of text")
 
     args = parser.parse_args(argv)
     if getattr(args, "since", None) is not None and getattr(args, "day", None) is not None:
@@ -384,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
         "journal": _cmd_journal,
         "declines": _cmd_declines,
         "proposals": _cmd_proposals,
+        "risk": _cmd_risk,
     }
     return handlers[args.command](settings, args)
 

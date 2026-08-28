@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from strike_desk.journal import SCHEMA_VERSION
 from strike_desk.mcp_toolbox import (
     FORBIDDEN_PREFIXES,
     REGIME_TOOLS,
@@ -235,13 +236,30 @@ def test_the_row_carries_every_field_ac1_requires(strategist_harness, settings, 
         regime_confidence=0.78,
     )
     for field in (
-        "index_symbol", "expiry", "strike", "option_type", "symbol", "lots", "lot_size",
-        "quantity", "entry_price_low", "entry_price_high", "breakeven", "stop_price",
-        "target_price", "time_stop_ist", "theta_per_day", "rationale", "evidence_json",
-        "playbook_artifact", "playbook_verdict", "violations_json", "token_cost_micros",
+        "index_symbol",
+        "expiry",
+        "strike",
+        "option_type",
+        "symbol",
+        "lots",
+        "lot_size",
+        "quantity",
+        "entry_price_low",
+        "entry_price_high",
+        "breakeven",
+        "stop_price",
+        "target_price",
+        "time_stop_ist",
+        "theta_per_day",
+        "rationale",
+        "evidence_json",
+        "playbook_artifact",
+        "playbook_verdict",
+        "violations_json",
+        "token_cost_micros",
     ):
         assert row[field] is not None, field
-    assert row["schema_version"] == 4
+    assert row["schema_version"] == SCHEMA_VERSION
 
 
 def test_the_spans_carry_what_ac9_requires(strategist_harness, journal) -> None:
@@ -251,13 +269,19 @@ def test_the_spans_carry_what_ac9_requires(strategist_harness, journal) -> None:
     names = {span.name for span in journal.spans_for_trace(strategist_harness.trace_id)}
     assert {"strategy.propose", "strategy.model_call", "strategy.tool_call"} <= names
 
-    root = next(s for s in journal.spans_for_trace(strategist_harness.trace_id)
-                if s.name == "strategy.propose")
+    root = next(
+        s
+        for s in journal.spans_for_trace(strategist_harness.trace_id)
+        if s.name == "strategy.propose"
+    )
     attributes = json.loads(root.attributes_json)
     for key in (
-        "strategy.status", "strategy.symbol", "strategy.playbook_verdict",
-        "strategy.tool_calls", "strategy.rejected_tools", "strategy.token_cost_micros",
+        "strategy.status",
+        "strategy.symbol",
+        "strategy.playbook_verdict",
+        "strategy.tool_calls",
+        "strategy.rejected_tools",
+        "strategy.token_cost_micros",
         "playbook.artifact",
     ):
         assert key in attributes, key
-

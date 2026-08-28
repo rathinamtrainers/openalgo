@@ -324,20 +324,20 @@ def render_window(window: WindowReport) -> str:
         f"  ({window.index_symbol}, {len(window.days)} day(s))",
         "",
         "per day",
-        f"  {'day':<12}{'total':>6}{'declines':>10}{'holds':>7}{'defects':>9}{'cost':>10}",
+        f"  {'day':<12}{'total':>6}{'declines':>10}{'holds':>7}{'entries':>9}"
+        f"{'defects':>9}{'cost':>10}",
     ]
     for day in window.days:
         lines.append(
             f"  {day.trading_day:<12}{day.total:>6}{day.declines:>10}{day.holds:>7}"
-            f"{day.defects:>9}{day.token_cost_micros / 1_000_000:>10.4f}"
+            f"{day.entries:>9}{day.defects:>9}{day.token_cost_micros / 1_000_000:>10.4f}"
         )
     lines.append("")
     lines += _block("by disposition", window.by_disposition, window.total)
     lines += _block("by category", window.by_category, window.total)
     lines += _block("by reason", window.by_reason, window.total)
     lines += [
-        f"window total     : {window.total} decisions,"
-        f" ${window.token_cost_micros / 1_000_000:.4f}",
+        f"window total     : {window.total} decisions, ${window.token_cost_micros / 1_000_000:.4f}",
         f"taxonomy         : {TAXONOMY_ARTIFACT}",
         f"unknown codes    : {', '.join(window.unknown_codes) or 'none'}",
     ]

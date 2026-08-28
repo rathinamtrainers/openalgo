@@ -177,6 +177,91 @@
         "detail": "breakeven 24812.35 does not equal 24992.00 for a CE"
       },
       "expect": "Declined: NIFTY02SEP2624800CE failed 1 playbook check(s) (breakeven 24812.35 does not equal 24992.00 for a CE). A contract the desk cannot verify is never bought."
+    },
+    {
+      "id": "GD-19",
+      "code": "risk-session-stopped",
+      "variant": "default",
+      "fields": {
+        "configured": "Rs 12,000",
+        "observed": "Rs 18,400"
+      },
+      "expect": "Declined: the day is down Rs 18,400 against a Rs 12,000 daily loss cap. The desk stops proposing entries for the rest of the session."
+    },
+    {
+      "id": "GD-20",
+      "code": "risk-input-unavailable",
+      "variant": "default",
+      "fields": {
+        "limit": "capital-base",
+        "detail": "available cash was not numeric"
+      },
+      "expect": "Declined: the capital-base limit could not be evaluated (available cash was not numeric). A proposal is held, never assumed safe."
+    },
+    {
+      "id": "GD-21",
+      "code": "risk-veto",
+      "variant": "default",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 2,500",
+        "observed": "Rs 6,000"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE trips the per-trade-loss-cap limit - configured Rs 2,500, observed Rs 6,000. The veto is arithmetic and is not negotiated."
+    },
+    {
+      "id": "GD-22",
+      "code": "risk-veto",
+      "variant": "sized_out",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 2,500",
+        "observed": "Rs 3,000"
+      },
+      "expect": "Declined: even one lot of NIFTY02SEP2624800CE trips the per-trade-loss-cap limit - configured Rs 2,500, observed Rs 3,000. There is no size this desk may take."
+    },
+    {
+      "id": "GD-23",
+      "code": "risk-veto",
+      "variant": "playbook_disagreed",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "limit": "per-trade-loss-cap",
+        "detail": "delta 0.22 is below 0.35"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE reduced to fit per-trade-loss-cap no longer passes the playbook (delta 0.22 is below 0.35). A contract two checks disagree about is never bought."
+    },
+    {
+      "id": "GD-24",
+      "code": "risk-cleared",
+      "variant": "default",
+      "fields": {
+        "lots": 2,
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "risk": "Rs 6,000",
+        "stop": "152.00",
+        "base": "Rs 1,500,000"
+      },
+      "expect": "Intent: buy 2 lot(s) of NIFTY02SEP2624800CE at up to 192.00, risking Rs 6,000 to the 152.00 stop against a Rs 1,500,000 capital base. This is an intent, not an order."
+    },
+    {
+      "id": "GD-25",
+      "code": "risk-cleared",
+      "variant": "reduced",
+      "fields": {
+        "lots": 1,
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "requested": 2,
+        "limit": "per-trade-loss-cap",
+        "configured": "Rs 4,000",
+        "risk": "Rs 3,000",
+        "stop": "152.00"
+      },
+      "expect": "Intent: buy 1 lot(s) of NIFTY02SEP2624800CE at up to 192.00, cut from 2 lot(s) to fit the per-trade-loss-cap limit of Rs 4,000. Risking Rs 3,000 to the 152.00 stop. This is an intent, not an order."
     }
   ]
 }
