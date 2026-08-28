@@ -31,6 +31,19 @@ GOLDEN = json.loads(
     (Path(__file__).parent / "golden" / "reason_text.json").read_text(encoding="utf-8")
 )
 
+#: Every code dt-1 shipped, with the class it shipped with. These may never change.
+DT1_CLASSES = {
+    "position-open": ("book", "routine"),
+    "data-quality": ("data", "degraded"),
+    "specialist-unavailable": ("specialist", "degraded"),
+    "specialist-timeout": ("specialist", "degraded"),
+    "regime-not-tradeable": ("regime", "routine"),
+    "regime-low-confidence": ("regime", "routine"),
+    "regime-ungrounded": ("regime", "defect"),
+    "tick-timeout": ("system", "degraded"),
+    "internal-error": ("system", "defect"),
+}
+
 
 def emitted_codes() -> set[str]:
     """Every reason code the decision table can write, read off the module itself."""
@@ -117,3 +130,19 @@ def test_the_artifact_moves_when_the_taxonomy_moves():
     assert TAXONOMY_ARTIFACT == f"{TAXONOMY_VERSION}+{TAXONOMY_DIGEST}"
     assert len(TAXONOMY_DIGEST) == 12
     assert compute_digest(ENTRIES[1:]) != TAXONOMY_DIGEST
+    assert TAXONOMY_VERSION == "dt-2"
+
+
+@pytest.mark.parametrize(("code", "expected"), sorted(DT1_CLASSES.items()))
+def test_the_taxonomy_is_additive(code: str, expected: tuple[str, str]) -> None:
+    """A dt-1 row must never become taxonomy drift because we shipped dt-2."""
+    found = describe(code)
+    assert (found.category, found.disposition) == expected
+
+
+def test_dt1_default_sentences_are_unchanged() -> None:
+    """Adding a variant may not alter the sentence an existing row already reads as."""
+    for case in GOLDEN["cases"]:
+        if case["code"] not in DT1_CLASSES or case["variant"] != "default":
+            continue
+        assert render(case["code"], max_chars=400, **case["fields"]) == case["expect"]

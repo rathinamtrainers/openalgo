@@ -1,6 +1,6 @@
 [project]
 name = "strike-desk"
-version = "0.3.0"
+version = "0.4.0"
 description = "Agentic options-buying desk on OpenAlgo - tick, regime analyst and decline record."
 requires-python = ">=3.12"
 dependencies = [

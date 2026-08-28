@@ -117,6 +117,66 @@
         "error": "RuntimeError"
       },
       "expect": "Declined: the tick raised RuntimeError before assembling a decision. The desk stays out when it cannot reason."
+    },
+    {
+      "id": "GD-13",
+      "code": "data-quality",
+      "variant": "chain",
+      "fields": {
+        "detail": "every tool call failed or none was made"
+      },
+      "expect": "Declined: the option chain could not be read (every tool call failed or none was made). The desk does not price a contract it could not see."
+    },
+    {
+      "id": "GD-14",
+      "code": "specialist-unavailable",
+      "variant": "no_risk",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "entry": "192.00",
+        "role": "risk"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE at 192.00 was proposed and passed the playbook, but no 'risk' specialist is registered to adjudicate it. A proposal alone is never an entry."
+    },
+    {
+      "id": "GD-15",
+      "code": "no-viable-contract",
+      "variant": "default",
+      "fields": {
+        "index": "NIFTY",
+        "expiry": "2026-09-02",
+        "detail": "open interest under the floor"
+      },
+      "expect": "Declined: no contract in the NIFTY 2026-09-02 chain met the playbook (open interest under the floor). A tradeable session is not a tradeable contract."
+    },
+    {
+      "id": "GD-16",
+      "code": "no-viable-contract",
+      "variant": "non_directional",
+      "fields": {
+        "label": "range-bound"
+      },
+      "expect": "Declined: regime 'range-bound' is tradeable but not directional, and this playbook has no non-directional entry. A long that pays theta to wait is the trade this desk exists to refuse."
+    },
+    {
+      "id": "GD-17",
+      "code": "proposal-ungrounded",
+      "variant": "default",
+      "fields": {
+        "detail": "proposed strike 99999.0 was never observed in a tool output"
+      },
+      "expect": "Declined: the proposal cited data it did not fetch (proposed strike 99999.0 was never observed in a tool output). An ungrounded proposal is a defect, not a trade idea."
+    },
+    {
+      "id": "GD-18",
+      "code": "proposal-invalid",
+      "variant": "default",
+      "fields": {
+        "symbol": "NIFTY02SEP2624800CE",
+        "count": 1,
+        "detail": "breakeven 24812.35 does not equal 24992.00 for a CE"
+      },
+      "expect": "Declined: NIFTY02SEP2624800CE failed 1 playbook check(s) (breakeven 24812.35 does not equal 24992.00 for a CE). A contract the desk cannot verify is never bought."
     }
   ]
 }

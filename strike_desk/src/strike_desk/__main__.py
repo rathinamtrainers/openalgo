@@ -25,7 +25,10 @@ from .errors import McpUnavailable, ModelCallFailed, StrikeDeskError
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing, get_tracer
+from .playbook import Playbook
 from .prompt_registry import PromptRegistry
+from .proposal_view import as_dict
+from .proposal_view import render as render_proposals
 from .regime_analyst import build_regime_analyst, build_regime_read_row
 from .service import StrikeDeskService
 from .specialists import SpecialistRequest
@@ -118,6 +121,9 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"model            : {settings.regime_model}")
         print(f"prompt set       : {PromptRegistry.load(settings.prompts_dir).set_version}")
         print(f"taxonomy         : {TAXONOMY_ARTIFACT}")
+        print(f"playbook         : {Playbook.from_settings(settings).artifact}")
+        print(f"strategist model : {settings.strategist_model}")
+        print(f"directional      : {settings.directional_regimes}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
         if killed:
             reason = settings.kill_switch_path.read_text(encoding="utf-8").strip()
@@ -260,6 +266,61 @@ def _cmd_regime(settings: Settings, _args: argparse.Namespace) -> int:
         journal.close()
 
 
+def _resolve_days(args: argparse.Namespace, settings: Settings) -> list[str] | None:
+    """Resolve --day/--since into a list of trading days, or None to ask the journal.
+
+    Raises ValueError before any journal is opened when the arguments are unusable.
+    """
+    day = getattr(args, "day", None)
+    since = getattr(args, "since", None)
+    if day is not None and since is not None:
+        raise ValueError("--day and --since are alternatives; pass one of them")
+    if day:
+        try:
+            return [date.fromisoformat(str(day)).isoformat()]
+        except ValueError as exc:
+            raise ValueError(f"{day!r} is not an IST date as YYYY-MM-DD") from exc
+    if since is not None and since not in (-1, 0) and int(since) < 1:
+        raise ValueError("must be at least 1")
+    return None
+
+
+def _cmd_proposals(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        days = _resolve_days(args, settings)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        if days is None:
+            n = getattr(args, "since", None)
+            if n in (None, -1, 0):
+                n = settings.report_default_days
+            days = journal.recent_proposal_days(int(n))
+        rows = [row for day in days for row in journal.list_proposals(day)]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "taxonomy": TAXONOMY_ARTIFACT,
+                        "playbook": Playbook.from_settings(settings).artifact,
+                        "days": days,
+                        "proposals": [as_dict(row) for row in rows],
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            print(render_proposals(rows, days=days))
+    finally:
+        journal.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -294,6 +355,21 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true", help="print the same numbers as a JSON document"
     )
 
+    proposals_parser = subparsers.add_parser(
+        "proposals", help="list what the strategist proposed"
+    )
+    proposals_group = proposals_parser.add_mutually_exclusive_group()
+    proposals_group.add_argument("--day", type=_trading_day, help="one IST trading day, YYYY-MM-DD")
+    proposals_group.add_argument(
+        "--since",
+        type=_positive_int,
+        nargs="?",
+        const=0,
+        help="the most recent N journalled days; bare --since uses "
+        "STRIKE_DESK_REPORT_DEFAULT_DAYS",
+    )
+    proposals_parser.add_argument("--json", action="store_true", help="print JSON instead of text")
+
     args = parser.parse_args(argv)
     if getattr(args, "since", None) is not None and getattr(args, "day", None) is not None:
         parser.error("--day and --since are alternatives; pass one of them")
@@ -307,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         "regime": _cmd_regime,
         "journal": _cmd_journal,
         "declines": _cmd_declines,
+        "proposals": _cmd_proposals,
     }
     return handlers[args.command](settings, args)
 

@@ -14,16 +14,24 @@ from .errors import StrikeDeskError
 
 logger = logging.getLogger(__name__)
 
-TAXONOMY_VERSION = "dt-1"
+TAXONOMY_VERSION = "dt-2"
 
 CATEGORY_BOOK = "book"
+CATEGORY_CONTRACT = "contract"
 CATEGORY_DATA = "data"
 CATEGORY_REGIME = "regime"
 CATEGORY_SPECIALIST = "specialist"
 CATEGORY_SYSTEM = "system"
 CATEGORY_UNKNOWN = "unknown"
 CATEGORIES = frozenset(
-    {CATEGORY_BOOK, CATEGORY_DATA, CATEGORY_REGIME, CATEGORY_SPECIALIST, CATEGORY_SYSTEM}
+    {
+        CATEGORY_BOOK,
+        CATEGORY_CONTRACT,
+        CATEGORY_DATA,
+        CATEGORY_REGIME,
+        CATEGORY_SPECIALIST,
+        CATEGORY_SYSTEM,
+    }
 )
 
 DISPOSITION_ROUTINE = "routine"
@@ -111,6 +119,10 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
             "Declined: the regime could not be read from live data ({detail}). "
             "The desk does not classify a market it could not see."
         ),
+        chain=(
+            "Declined: the option chain could not be read ({detail}). "
+            "The desk does not price a contract it could not see."
+        ),
     ),
     _entry(
         "specialist-unavailable",
@@ -123,6 +135,11 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
             "Declined: regime '{label}' is tradeable at {confidence} confidence, but no "
             "'{role}' specialist is registered to propose a contract. "
             "A regime read alone is never an entry."
+        ),
+        no_risk=(
+            "Declined: {symbol} at {entry} was proposed and passed the playbook, but no "
+            "'{role}' specialist is registered to adjudicate it. "
+            "A proposal alone is never an entry."
         ),
     ),
     _entry(
@@ -161,6 +178,44 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
         default=(
             "Declined: the regime read cited data it did not fetch ({detail}). "
             "An ungrounded read is a defect, not an opinion."
+        ),
+    ),
+    _entry(
+        "no-viable-contract",
+        outcome="decline",
+        category=CATEGORY_CONTRACT,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the chain held nothing the playbook would buy",
+        default=(
+            "Declined: no contract in the {index} {expiry} chain met the playbook "
+            "({detail}). A tradeable session is not a tradeable contract."
+        ),
+        non_directional=(
+            "Declined: regime '{label}' is tradeable but not directional, and this "
+            "playbook has no non-directional entry. "
+            "A long that pays theta to wait is the trade this desk exists to refuse."
+        ),
+    ),
+    _entry(
+        "proposal-ungrounded",
+        outcome="decline",
+        category=CATEGORY_CONTRACT,
+        disposition=DISPOSITION_DEFECT,
+        summary="the proposal cited data it never fetched",
+        default=(
+            "Declined: the proposal cited data it did not fetch ({detail}). "
+            "An ungrounded proposal is a defect, not a trade idea."
+        ),
+    ),
+    _entry(
+        "proposal-invalid",
+        outcome="decline",
+        category=CATEGORY_CONTRACT,
+        disposition=DISPOSITION_DEFECT,
+        summary="the proposal failed the playbook's own arithmetic",
+        default=(
+            "Declined: {symbol} failed {count} playbook check(s) ({detail}). "
+            "A contract the desk cannot verify is never bought."
         ),
     ),
     _entry(

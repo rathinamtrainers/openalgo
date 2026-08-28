@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 LABELS: tuple[str, ...] = (
     "trending",
@@ -104,6 +104,21 @@ class EvidenceLedger:
         self._tools.add("event-calendar")
         self._numbers |= extract_numbers(f"{name} {detail}")
 
+    def record_playbook(self, described: str) -> None:
+        """The constraints the desk stated in the prompt are facts the agent was given.
+
+        Without this, naming the band you failed — the most useful thing a refusal can do —
+        would itself be an ungrounded citation.
+        """
+        self._tools.add("playbook")
+        self._numbers |= extract_numbers(described)
+
+    def text(self) -> str:
+        """Every successful tool output concatenated, for non-numeric grounding checks."""
+        return "\n".join(
+            observation.output for observation in self._observations if observation.ok
+        )
+
     @property
     def observations(self) -> tuple[ToolObservation, ...]:
         return tuple(self._observations)
@@ -164,4 +179,126 @@ def validate_submission(
                 f"evidence item {item.tool}.{item.field} cites "
                 f"numbers absent from the tool output: {', '.join(floating)}"
             )
+    return None
+
+
+DIRECTIONS: tuple[str, ...] = ("bullish", "bearish")
+OPTION_TYPES: tuple[str, ...] = ("CE", "PE")
+
+#: The submitted fields that are themselves claims about the chain and must be grounded.
+GROUNDED_FIELDS: tuple[str, ...] = (
+    "strike",
+    "bid",
+    "ask",
+    "delta",
+    "implied_volatility",
+    "open_interest",
+    "lot_size",
+)
+
+
+class ProposalSubmission(BaseModel):
+    """The one structured answer a proposal is allowed to end with."""
+
+    direction: Literal["bullish", "bearish"] = Field(
+        description="The directional view this contract expresses."
+    )
+    index_symbol: str = Field(min_length=1, description="The underlying index, e.g. 'NIFTY'.")
+    expiry: str = Field(description="Contract expiry as an ISO date, YYYY-MM-DD.")
+    strike: float = Field(gt=0, description="The strike price.")
+    option_type: Literal["CE", "PE"] = Field(description="CE for a call, PE for a put.")
+    symbol: str = Field(
+        min_length=1, description="The exact tradable OpenAlgo symbol from get_option_symbol."
+    )
+    lot_size: int = Field(gt=0, description="Contract lot size as the broker reports it.")
+    lots: int = Field(gt=0, description="Number of lots to buy.")
+    quantity: int = Field(gt=0, description="lots x lot_size.")
+    bid: float = Field(ge=0, description="Best bid as the chain reported it.")
+    ask: float = Field(ge=0, description="Best ask as the chain reported it.")
+    entry_price_low: float = Field(gt=0, description="Low of the acceptable entry band.")
+    entry_price_high: float = Field(gt=0, description="High of the acceptable entry band.")
+    delta: float = Field(description="Contract delta from get_option_greeks.")
+    theta_per_day: float = Field(description="Theta per day per unit, negative for a long.")
+    implied_volatility: float = Field(ge=0, description="Implied volatility in percent.")
+    open_interest: int = Field(ge=0, description="Open interest as the chain reported it.")
+    breakeven: float = Field(gt=0, description="Underlying level at which this trade breaks even.")
+    stop_price: float = Field(gt=0, description="Premium at which the trade is abandoned.")
+    target_price: float = Field(gt=0, description="Premium at which the trade is taken off.")
+    time_stop_ist: str = Field(description="HH:MM IST after which the trade is abandoned.")
+    rationale: str = Field(
+        min_length=40,
+        description="One paragraph a trader can read back in a month. Cite only fetched numbers.",
+    )
+    evidence: list[EvidenceItem] = Field(
+        min_length=1, description="Every data point the proposal rests on."
+    )
+
+    @model_validator(mode="after")
+    def _direction_matches_type(self) -> ProposalSubmission:
+        expected = "CE" if self.direction == "bullish" else "PE"
+        if self.option_type != expected:
+            raise ValueError(f"direction {self.direction!r} requires {expected}")
+        return self
+
+
+class NoContractSubmission(BaseModel):
+    """The other answer: the chain was read and held nothing worth buying."""
+
+    reason: str = Field(
+        min_length=20,
+        description="Why no contract qualified, naming the constraint that bound.",
+    )
+    evidence: list[EvidenceItem] = Field(
+        min_length=1, description="The readings that support the refusal."
+    )
+
+
+def validate_proposal(
+    proposal: ProposalSubmission, ledger: EvidenceLedger, max_rationale_chars: int
+) -> str | None:
+    """Return a defect description, or ``None`` when the proposal is grounded."""
+    if len(proposal.rationale) > max_rationale_chars:
+        return (
+            f"rationale is {len(proposal.rationale)} characters, "
+            f"over the {max_rationale_chars} cap"
+        )
+
+    unknown_tools = sorted(
+        {item.tool for item in proposal.evidence} - set(ledger._tools)  # noqa: SLF001
+    )
+    if unknown_tools:
+        return f"evidence cites tools that returned nothing this read: {', '.join(unknown_tools)}"
+
+    floating = ledger.ungrounded_numbers(proposal.rationale)
+    if floating:
+        return f"rationale cites numbers absent from the evidence: {', '.join(floating)}"
+
+    for item in proposal.evidence:
+        floating = ledger.ungrounded_numbers(item.value)
+        if floating:
+            return (
+                f"evidence item {item.tool}.{item.field} cites "
+                f"numbers absent from the tool output: {', '.join(floating)}"
+            )
+
+    # The contract itself is a claim about the chain, not only the sentence describing it.
+    for name in GROUNDED_FIELDS:
+        floating = ledger.ungrounded_numbers(str(getattr(proposal, name)))
+        if floating:
+            return f"proposed {name} {getattr(proposal, name)} was never observed in a tool output"
+
+    if proposal.symbol not in ledger.text():
+        return f"proposed symbol {proposal.symbol!r} was never returned by a tool"
+    return None
+
+
+def validate_no_contract(
+    submission: NoContractSubmission, ledger: EvidenceLedger, max_reason_chars: int
+) -> str | None:
+    """A refusal is a claim about the chain, and is grounded by the same rule."""
+    if len(submission.reason) > max_reason_chars:
+        return f"reason is {len(submission.reason)} characters, over the {max_reason_chars} cap"
+    floating = ledger.ungrounded_numbers(submission.reason)
+    if floating:
+        return f"reason cites numbers absent from the evidence: {', '.join(floating)}"
     return None

@@ -65,7 +65,7 @@ def test_unreadable_book_declines_on_data_quality(runner, journal, openalgo, tod
     ("payload", "expected_reason"),
     [
         ({"label": "trending", "confidence": 0.80}, "specialist-unavailable"),
-        ({"label": "range-bound", "confidence": 0.95}, "specialist-unavailable"),
+        ({"label": "range-bound", "confidence": 0.95}, "no-viable-contract"),
         ({"label": "event-driven", "confidence": 0.90}, "regime-not-tradeable"),
         ({"label": "unknown", "confidence": 0.10}, "regime-not-tradeable"),
         ({"label": "high-volatility", "confidence": 0.70}, "regime-not-tradeable"),

@@ -34,6 +34,10 @@ jobs:
           tests/test_guardrails_regime.py
           tests/test_decline_taxonomy.py
           tests/test_journal_migration.py
+          tests/test_playbook.py
+          tests/test_options_strategist.py::test_every_whitelisted_tool_is_a_reader
+          tests/test_options_strategist.py::test_no_whitelist_holds_a_mutating_tool
+          tests/test_tick_proposals.py::test_enter_is_unreachable
           tests/regression
 
       - name: Full suite with coverage

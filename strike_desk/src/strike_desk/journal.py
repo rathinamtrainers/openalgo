@@ -1,4 +1,4 @@
-"""Append-only SQLite journal: ``decisions``, ``traces`` and ``regime_reads``."""
+"""Append-only SQLite journal: ``decisions``, ``traces``, ``regime_reads`` and ``proposals``."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from .errors import JournalWriteError
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Base(DeclarativeBase):
@@ -119,8 +119,68 @@ class RegimeRead(Base):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
 
 
+class Proposal(Base):
+    """One row per contract proposal attempt. Never updated, never deleted."""
+
+    __tablename__ = "proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    proposal_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    tick_id: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    index_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(8), nullable=False)  # tick | cli
+    status: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    regime_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    regime_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # --- the contract, null on every status except `proposed` ------------------
+    direction: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    expiry: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_type: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    lots: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lot_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_price_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_price_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    theta_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
+    implied_volatility: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    breakeven: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    time_stop_ist: Mapped[str | None] = mapped_column(String(5), nullable=True)
+
+    # --- the reasoning, the verdict and the receipts ---------------------------
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    playbook_artifact: Mapped[str] = mapped_column(String(32), nullable=False)
+    playbook_verdict: Mapped[str] = mapped_column(String(16), nullable=False)  # pass | fail | n/a
+    violations_json: Mapped[str] = mapped_column(Text, nullable=False)
+    defect: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tool_error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rejected_tool_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    token_cost_micros: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_set_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+
 # Append-only enforcement lives in the database, not in application discipline.
-for _table in (Decision.__table__, TraceSpan.__table__, RegimeRead.__table__):
+for _table in (Decision.__table__, TraceSpan.__table__, RegimeRead.__table__, Proposal.__table__):
     for _operation in ("UPDATE", "DELETE"):
         event.listen(
             _table,
@@ -228,6 +288,39 @@ class Journal:
                 f"could not append regime read: {exc.__class__.__name__}"
             ) from exc
         return str(fields["read_id"])
+
+    def record_proposal(self, **fields: Any) -> str:
+        """Append one proposal. Raises JournalWriteError so the tick fails closed."""
+        try:
+            with self.session_scope() as session:
+                session.add(Proposal(**fields))
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(
+                f"could not append proposal: {exc.__class__.__name__}"
+            ) from exc
+        return str(fields["proposal_id"])
+
+    def list_proposals(self, trading_day: str, limit: int = 200) -> Sequence[Proposal]:
+        with self.session_scope() as session:
+            statement = (
+                select(Proposal)
+                .where(Proposal.trading_day == trading_day)
+                .order_by(Proposal.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def recent_proposal_days(self, days: int) -> list[str]:
+        """The most recent trading days that hold at least one proposal, oldest first."""
+        with self.session_scope() as session:
+            statement = (
+                select(Proposal.trading_day)
+                .distinct()
+                .order_by(Proposal.trading_day.desc())
+                .limit(days)
+            )
+            found = [str(row) for row in session.execute(statement).scalars()]
+        return sorted(found)
 
     def count_decisions(self, trading_day: str) -> int:
         with self.session_scope() as session:

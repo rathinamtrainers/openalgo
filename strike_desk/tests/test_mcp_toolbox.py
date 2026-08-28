@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from strike_desk.errors import McpUnavailable
-from strike_desk.mcp_toolbox import REGIME_TOOLS, McpToolbox, select_tools
+from strike_desk.mcp_toolbox import REGIME_TOOLS, REQUIRED_TOOLS, McpToolbox, select_tools
+from strike_desk.specialists import ROLE_REGIME
 from tests.conftest import API_KEY, CannedTool
 
 
@@ -25,14 +26,16 @@ def test_whitelist_is_exactly_six_read_only_market_tools():
 
 
 def test_selection_keeps_the_whitelist_and_drops_everything_else():
-    loaded = tools_named(*REGIME_TOOLS, "place_order", "close_all_positions", "send_telegram_alert")
+    loaded = tools_named(
+        *REQUIRED_TOOLS, "place_order", "close_all_positions", "send_telegram_alert"
+    )
     selected = select_tools(loaded)
-    assert [tool.name for tool in selected] == list(REGIME_TOOLS)
+    assert [tool.name for tool in selected] == list(REQUIRED_TOOLS)
 
 
-@pytest.mark.parametrize("missing", REGIME_TOOLS)
+@pytest.mark.parametrize("missing", REQUIRED_TOOLS)
 def test_a_missing_tool_fails_the_session_closed(missing):
-    loaded = tools_named(*[name for name in REGIME_TOOLS if name != missing])
+    loaded = tools_named(*[name for name in REQUIRED_TOOLS if name != missing])
     with pytest.raises(McpUnavailable, match=missing):
         select_tools(loaded)
 
@@ -66,7 +69,7 @@ def test_missing_binaries_raise_before_anything_is_spawned(settings, tmp_path, f
 def test_using_a_stopped_toolbox_raises_rather_than_hanging(settings):
     box = McpToolbox(settings)
     with pytest.raises(McpUnavailable):
-        box.tools()
+        box.tools(ROLE_REGIME)
     with pytest.raises(McpUnavailable):
         box.submit(lambda: None, timeout=1.0)
     box.close()  # idempotent, and safe on a toolbox that never started

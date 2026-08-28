@@ -19,6 +19,21 @@ from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailab
 from .journal import SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
+from .options_strategist import (
+    STATUS_DEGRADED as STRATEGY_DEGRADED,
+)
+from .options_strategist import (
+    STATUS_INVALID as STRATEGY_INVALID,
+)
+from .options_strategist import (
+    STATUS_NO_CONTRACT as STRATEGY_NO_CONTRACT,
+)
+from .options_strategist import (
+    STATUS_UNGROUNDED as STRATEGY_UNGROUNDED,
+)
+from .options_strategist import (
+    build_proposal_row,
+)
 from .prompt_registry import PromptRegistry
 from .regime_analyst import (
     STATUS_DEGRADED,
@@ -28,6 +43,7 @@ from .regime_analyst import (
 )
 from .specialists import (
     ROLE_REGIME,
+    ROLE_RISK,
     ROLE_STRATEGIST,
     SpecialistRegistry,
     SpecialistRequest,
@@ -49,6 +65,9 @@ REASON_REGIME_LOW_CONFIDENCE = "regime-low-confidence"
 REASON_REGIME_UNGROUNDED = "regime-ungrounded"
 REASON_TICK_TIMEOUT = "tick-timeout"
 REASON_INTERNAL_ERROR = "internal-error"
+REASON_NO_VIABLE_CONTRACT = "no-viable-contract"
+REASON_PROPOSAL_UNGROUNDED = "proposal-ungrounded"
+REASON_PROPOSAL_INVALID = "proposal-invalid"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -73,6 +92,10 @@ class TickState(TypedDict, total=False):
     outcome: str
     reason_code: str
     reason_text: str
+    proposal: dict[str, Any] | None
+    proposal_status: str | None
+    proposal_detail: str | None
+    proposal_violations: list[str] | None
 
 
 @dataclass
@@ -203,17 +226,88 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 floor=f"{settings.min_regime_confidence:.2f}",
             ),
         )
+
+    if label not in settings.directional_regime_set:
+        return (
+            OUTCOME_DECLINE,
+            REASON_NO_VIABLE_CONTRACT,
+            render(
+                REASON_NO_VIABLE_CONTRACT,
+                max_chars=cap,
+                variant="non_directional",
+                rationale=_rationale(state),
+                label=label,
+            ),
+        )
+
+    status = state.get("proposal_status")
+    if status is None:
+        return (
+            OUTCOME_DECLINE,
+            REASON_SPECIALIST_UNAVAILABLE,
+            render(
+                REASON_SPECIALIST_UNAVAILABLE,
+                max_chars=cap,
+                variant="no_strategist",
+                rationale=_rationale(state),
+                label=label,
+                confidence=f"{confidence:.2f}",
+                role=ROLE_STRATEGIST,
+            ),
+        )
+
+    proposal = state.get("proposal") or {}
+    detail = state.get("proposal_detail") or ""
+    if status == STRATEGY_UNGROUNDED:
+        return (
+            OUTCOME_DECLINE,
+            REASON_PROPOSAL_UNGROUNDED,
+            render(REASON_PROPOSAL_UNGROUNDED, max_chars=cap, detail=detail),
+        )
+    if status == STRATEGY_INVALID:
+        violations = state.get("proposal_violations") or []
+        return (
+            OUTCOME_DECLINE,
+            REASON_PROPOSAL_INVALID,
+            render(
+                REASON_PROPOSAL_INVALID,
+                max_chars=cap,
+                symbol=str(proposal.get("symbol", "the contract")),
+                count=len(violations),
+                detail="; ".join(violations[:2]),
+            ),
+        )
+    if status == STRATEGY_DEGRADED:
+        return (
+            OUTCOME_DECLINE,
+            REASON_DATA_QUALITY,
+            render(REASON_DATA_QUALITY, max_chars=cap, variant="chain", detail=detail),
+        )
+    if status == STRATEGY_NO_CONTRACT:
+        return (
+            OUTCOME_DECLINE,
+            REASON_NO_VIABLE_CONTRACT,
+            render(
+                REASON_NO_VIABLE_CONTRACT,
+                max_chars=cap,
+                index=settings.index_symbol,
+                expiry=str(proposal.get("expiry", "current")),
+                detail=detail,
+            ),
+        )
+
+    # A proposal that passed every check. There is still no risk officer to adjudicate it,
+    # and a proposal alone is never an entry — AC-11.
     return (
         OUTCOME_DECLINE,
         REASON_SPECIALIST_UNAVAILABLE,
         render(
             REASON_SPECIALIST_UNAVAILABLE,
             max_chars=cap,
-            variant="no_strategist",
-            rationale=_rationale(state),
-            label=label,
-            confidence=f"{confidence:.2f}",
-            role=ROLE_STRATEGIST,
+            variant="no_risk",
+            symbol=str(proposal.get("symbol", "a contract")),
+            entry=f"{float(proposal.get('entry_price_high') or 0.0):.2f}",
+            role=ROLE_RISK,
         ),
     )
 
@@ -269,6 +363,51 @@ def _record_read(deps: TickDeps, state: TickState, result: SpecialistResult) -> 
             },
         }
     return {**spent, "regime_data_error": str(payload.get("defect", "the read was degraded"))}
+
+
+def _wants_a_contract(state: TickState, settings: Settings) -> bool:
+    """AC-6: the strategist is reached only from a clean, tradeable, directional read."""
+    if state.get("budget_exceeded") or state.get("book_error"):
+        return False
+    if state.get("regime_data_error") or state.get("specialist_error"):
+        return False
+    label = state.get("regime_label")
+    confidence = state.get("regime_confidence") or 0.0
+    if label is None or label not in TRADEABLE_REGIMES:
+        return False
+    if confidence < settings.min_regime_confidence:
+        return False
+    return label in settings.directional_regime_set
+
+
+def _record_proposal(deps: TickDeps, state: TickState, result: SpecialistResult) -> dict[str, Any]:
+    """Append the proposal, then translate its status into tick state."""
+    payload = dict(result.payload)
+    deps.journal.record_proposal(
+        **build_proposal_row(
+            payload,
+            settings=deps.settings,
+            prompts=deps.prompts,
+            tick_id=state["tick_id"],
+            trace_id=state["trace_id"],
+            trading_day=state["trading_day"],
+            source="tick",
+            regime_label=state.get("regime_label"),
+            regime_confidence=state.get("regime_confidence"),
+        )
+    )
+    return {
+        "model_versions": [
+            *(state.get("model_versions") or []),
+            *([result.model_version] if result.model_version else []),
+        ],
+        "token_cost_micros": int(state.get("token_cost_micros") or 0)
+        + int(result.token_cost_micros),
+        "proposal": payload.get("proposal"),
+        "proposal_status": str(payload.get("status", STRATEGY_DEGRADED)),
+        "proposal_detail": str(payload.get("defect") or payload.get("rationale") or ""),
+        "proposal_violations": list(payload.get("violations") or []),
+    }
 
 
 def build_tick_graph(deps: TickDeps) -> Any:
@@ -354,6 +493,65 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("regime.token_cost_micros", int(result.token_cost_micros))
             return update
 
+    def route_after_consult(state: TickState) -> str:
+        return "propose" if _wants_a_contract(state, deps.settings) else "decide"
+
+    def propose(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.propose") as span:
+            span.set_attribute("specialist.role", ROLE_STRATEGIST)
+            if _over_budget(state):
+                span.set_attribute("tick.budget_exceeded", True)
+                return {"budget_exceeded": True}
+
+            request = SpecialistRequest(
+                tick_id=state["tick_id"],
+                index_symbol=deps.settings.index_symbol,
+                as_of=datetime.now(tz=UTC),
+                book={
+                    **(state.get("book") or {}),
+                    "regime": {
+                        "label": state.get("regime_label"),
+                        "confidence": state.get("regime_confidence"),
+                        "rationale": state.get("regime_rationale"),
+                    },
+                },
+            )
+            try:
+                result = deps.registry.consult(
+                    ROLE_STRATEGIST, request, deps.settings.strategist_timeout_seconds
+                )
+            except SpecialistTimeout as exc:
+                span.set_attribute("specialist.outcome", "timeout")
+                span.set_status(Status(StatusCode.ERROR, "specialist timeout"))
+                return {
+                    "specialist_error": {
+                        "role": exc.role,
+                        "kind": "timeout",
+                        "detail": exc.detail,
+                    }
+                }
+            except SpecialistUnavailable as exc:
+                span.set_attribute("specialist.outcome", "unavailable")
+                return {
+                    "specialist_error": {
+                        "role": exc.role,
+                        "kind": "unavailable",
+                        "detail": exc.detail,
+                    }
+                }
+
+            update = _record_proposal(deps, state, result)
+            span.set_attribute("specialist.outcome", str(result.payload.get("status", "unknown")))
+            span.set_attribute(
+                "strategy.symbol",
+                str((result.payload.get("proposal") or {}).get("symbol") or "none"),
+            )
+            span.set_attribute(
+                "strategy.playbook_verdict", str(result.payload.get("playbook_verdict"))
+            )
+            span.set_attribute("strategy.token_cost_micros", int(result.token_cost_micros))
+            return update
+
     def decide(state: TickState) -> dict[str, Any]:
         with tracer.start_as_current_span("tick.decide") as span:
             if _over_budget(state) and not state.get("budget_exceeded"):
@@ -415,13 +613,17 @@ def build_tick_graph(deps: TickDeps) -> Any:
     builder = StateGraph(TickState)
     builder.add_node("plan", plan)
     builder.add_node("consult", consult)
+    builder.add_node("propose", propose)
     builder.add_node("decide", decide)
     builder.add_node("persist", persist)
     builder.add_edge(START, "plan")
     builder.add_conditional_edges(
         "plan", route_after_plan, {"consult": "consult", "decide": "decide"}
     )
-    builder.add_edge("consult", "decide")
+    builder.add_conditional_edges(
+        "consult", route_after_consult, {"propose": "propose", "decide": "decide"}
+    )
+    builder.add_edge("propose", "decide")
     builder.add_edge("decide", "persist")
     builder.add_edge("persist", END)
     return builder.compile(checkpointer=deps.checkpointer)
