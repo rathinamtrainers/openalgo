@@ -71,13 +71,13 @@
     },
     {
       "id": "REG-09",
-      "note": "tradeable and confident still needs a contract proposal",
+      "note": "tradeable but not directional — no naked-long entry",
       "state": {
         "book": {"open_positions": []},
         "regime_label": "range-bound",
         "regime_confidence": 0.88
       },
-      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+      "expect": {"outcome": "decline", "reason_code": "no-viable-contract"}
     },
     {
       "id": "REG-10",
@@ -102,6 +102,43 @@
         }
       },
       "expect": {"outcome": "decline", "reason_code": "regime-ungrounded"}
+    },
+    {
+      "id": "REG-12",
+      "note": "a passing proposal is still not an entry — no risk officer",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "proposed",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE", "entry_price_high": 192.0}
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-13",
+      "note": "an ungrounded proposal is a defect",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "ungrounded",
+        "proposal_detail": "proposed strike 99999.0 was never observed"
+      },
+      "expect": {"outcome": "decline", "reason_code": "proposal-ungrounded"}
+    },
+    {
+      "id": "REG-14",
+      "note": "a playbook failure is a defect, not a reprice",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "invalid",
+        "proposal": {"symbol": "NIFTY02SEP2624800CE"},
+        "proposal_violations": ["breakeven 24812.35 does not equal 24992.00"]
+      },
+      "expect": {"outcome": "decline", "reason_code": "proposal-invalid"}
     }
   ]
 }

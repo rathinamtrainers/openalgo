@@ -202,7 +202,7 @@ class RegimeAnalyst:
     # -- the loop -----------------------------------------------------------
 
     async def _agent(self, request: SpecialistRequest, now_ist: datetime) -> ReadOutcome:
-        tools = self._tool_source.tools()
+        tools = self._tool_source.tools(ROLE_REGIME)
         by_name = {tool.name: tool for tool in tools}
         submit = submit_tool()
         ledger = EvidenceLedger()

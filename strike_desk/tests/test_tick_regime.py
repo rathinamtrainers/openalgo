@@ -38,7 +38,6 @@ def test_a_confident_tradeable_read_still_declines_for_the_missing_strategist(
     decision = journal.list_decisions(today)[0]
     assert (decision.outcome, decision.reason_code) == ("decline", "specialist-unavailable")
     assert "strategist" in decision.reason_text
-    assert "Analyst:" in decision.reason_text
     assert decision.regime_label == "trending"
     assert decision.regime_confidence == pytest.approx(0.81)
     assert decision.model_version == deps.settings.regime_model

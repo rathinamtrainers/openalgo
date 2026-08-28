@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 ROLE_REGIME = "regime"
 ROLE_STRATEGIST = "strategist"
+ROLE_RISK = "risk"
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
