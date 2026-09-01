@@ -281,17 +281,23 @@ sudo -u strikedesk sqlite3 /var/lib/strike-desk/strike_desk.db "
    ORDER BY id DESC LIMIT 10;"
 ```
 
-Three log lines are worth an alert, and all three are CRITICAL, so a single grep is the whole
-rule:
+Five log lines are worth an alert, all of them CRITICAL, so a single grep is the whole rule:
 
 ```bash
-sudo journalctl -u strike-desk --since today | grep -E "APPROVAL GATE BYPASSED|APPROVAL EXPIRED|LATE APPROVAL"
+sudo journalctl -u strike-desk --since today | grep -E \
+  "APPROVAL GATE BYPASSED|APPROVAL EXPIRED|LATE APPROVAL|APPROVAL QUEUE UNREADABLE|UNJOURNALLED PENDING ORDER"
 ```
 
 `APPROVAL GATE BYPASSED` means stop everything and read §7's negative check. `APPROVAL EXPIRED`
 means a queued order is still sitting in the Action Center and a human must reject it.
 `LATE APPROVAL` means a click landed after the deadline; in sandbox the desk cancelled the
-order, and in live semi-auto it could not, so read the position book. Routing these to Telegram
+order, and in live semi-auto it could not, so read the position book. `APPROVAL QUEUE
+UNREADABLE` means the desk can no longer see OpenAlgo's database while an intent of its own is
+past its deadline — it is holding, not trading, and §2's permissions are where to look;
+the next tick will also hold with `approval-queue-stale`, so `strike-desk declines` exits 2 and
+a timer notices even if nobody reads the log. `UNJOURNALLED PENDING ORDER` is the rarest and
+the most urgent: an order was queued but its journal row was not written, so nothing is
+watching it — reject it in the Action Center by hand. Routing these to Telegram
 alongside fills and risk events is UC-14's work; until then they are `journalctl` lines and the
 `strike-desk approvals` exit code, which is 2 whenever the window holds a defect:
 
@@ -436,7 +442,7 @@ UC-15, which is a configuration decision made on evidence rather than a rewrite.
 | --- | --- |
 | Package version | `0.6.0` |
 | Journal schema | `SCHEMA_VERSION = 6` — adds `approvals` and `orders` |
-| Taxonomy | `dt-4` — sixteen earlier codes unchanged, two added |
+| Taxonomy | `dt-4` — sixteen earlier codes unchanged, three added |
 | New tables | `approvals`, `orders` — append-only, unique per state |
 | New endpoints | `/api/v1/placeorder`, `/api/v1/orderstatus`, `/api/v1/cancelorder` |
 | New host precondition | API key in **semi-auto** at `/apikey`; group read on `/opt/openalgo/db` |

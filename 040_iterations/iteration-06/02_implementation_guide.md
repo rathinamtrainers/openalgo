@@ -80,7 +80,7 @@ Nine are edited:
 | `errors.py` | Six errors. |
 | `config.py` | Nine execution settings, three validators and one invariant. |
 | `session.py` | `engage_kill_switch`, so the kill switch is written in one place. |
-| `decline_taxonomy.py` | `dt-4`: two codes. Additive. |
+| `decline_taxonomy.py` | `dt-4`: three codes. Additive. |
 | `journal.py` | `approvals` and `orders`, the status vocabulary, eight repository methods, `SCHEMA_VERSION = 6`. |
 | `graph.py` | Two gates in `plan`, two branches in the decision table, three nodes after `persist`, and the verdict id kept in state. |
 | `runner.py` | `resume_approval`, holding the same lock a tick holds. |
@@ -770,6 +770,7 @@ from .config import Settings
 from .errors import (
     AlreadyJournalled,
     InvalidOrderPayload,
+    JournalWriteError,
     MirrorUnavailable,
     OpenAlgoError,
     UnpriceableBand,
@@ -1155,14 +1156,22 @@ class ApprovalGate:
                 symbol=intent.symbol,
             )
 
-        self._record(
-            intent,
-            APPROVAL_PENDING,
-            f"queued as pending order {receipt.pending_order_id} for approval by "
-            f"{self._settings.openalgo_user}",
-            response=receipt.raw,
-            pending_order_id=receipt.pending_order_id,
-        )
+        try:
+            self._record(
+                intent,
+                APPROVAL_PENDING,
+                f"queued as pending order {receipt.pending_order_id} for approval by "
+                f"{self._settings.openalgo_user}",
+                response=receipt.raw,
+                pending_order_id=receipt.pending_order_id,
+            )
+        except JournalWriteError:
+            logger.critical(
+                "UNJOURNALLED PENDING ORDER %s: it was queued but its approval row could not "
+                "be written, so nothing is watching it. Reject it in the Action Center.",
+                receipt.pending_order_id,
+            )
+            raise
         logger.info(
             "queued %d x %s at %.2f as pending order %s (tick %s)",
             intent.quantity,
@@ -1180,6 +1189,23 @@ class ApprovalGate:
             limit_price=intent.limit_price,
             symbol=intent.symbol,
         )
+
+    def record_failure(self, context: TickContext, detail: str) -> SubmitResult:
+        """Best-effort journalling of a submission that raised. Never raises itself.
+
+        Called by the graph's ``submit`` node, which must always return a terminal result:
+        an exception escaping that node would be journalled by the runner under the tick's
+        own id, and the decision row for that id already exists.
+        """
+        try:
+            return self._refuse_before_intent(
+                context, APPROVAL_SUBMIT_FAILED, detail, datetime.now(tz=UTC)
+            )
+        except Exception:  # noqa: BLE001 — the log is the last resort and must not raise
+            logger.exception(
+                "could not journal the failed submission for tick %s", context.tick_id
+            )
+            return SubmitResult(str(uuid.uuid4()), APPROVAL_SUBMIT_FAILED, detail)
 
     def _refuse_before_intent(
         self, context: TickContext, status: str, detail: str, now: datetime
@@ -1585,6 +1611,13 @@ that one is detected within a poll, journalled as a defect, and escalated.
 approval resolves as expired on the next pass. An intent this desk queued is this desk's to
 withdraw, and a kill switch that left it live would not be a kill switch.
 
+**An unreadable queue is never a settlement.** If the mirror cannot be read the watcher settles
+nothing, because a clickable order may still be sitting in the Action Center and releasing the
+hold would let a second intent form against the same book. What it does instead is escalate:
+past the deadline the failure is logged at CRITICAL, and the next tick — which sees the same
+outstanding row past the same deadline — holds with `approval-queue-stale` rather than the
+routine `approval-pending`, so the day's report exits non-zero instead of looking healthy.
+
 ### `strike_desk/src/strike_desk/approval_watcher.py`
 
 ```python
@@ -1678,7 +1711,18 @@ class ApprovalWatcher:
         try:
             pending = self._mirror.pending_order(int(row.pending_order_id))
         except MirrorUnavailable as exc:
-            logger.error("cannot read the approval queue for %s: %s", row.approval_id, exc)
+            # An unreadable queue is not a settlement: a clickable order may still be in it,
+            # and settling blind would release the hold and let a second intent form. Past
+            # the deadline it stops being a transient and becomes something a human must see.
+            if expired:
+                logger.critical(
+                    "APPROVAL QUEUE UNREADABLE: pending order %s passed its deadline and the "
+                    "queue cannot be read (%s). The desk is holding and is not trading.",
+                    row.pending_order_id,
+                    exc,
+                )
+            else:
+                logger.error("cannot read the approval queue for %s: %s", row.approval_id, exc)
             return None
 
         if pending is None:
@@ -1902,15 +1946,22 @@ New constants beside the existing `REASON_*` block, and the new imports:
 
 ```python
 REASON_APPROVAL_PENDING = "approval-pending"
+REASON_APPROVAL_QUEUE_STALE = "approval-queue-stale"
 REASON_APPROVAL_GATE_UNAVAILABLE = "approval-gate-unavailable"
 ```
 
 ```python
-from langgraph.types import Command, interrupt
+import uuid
 
-from .approval_gate import ApprovalGate, Resolution, TickContext, settle_approval
-from .journal import APPROVAL_PENDING
+from langgraph.types import interrupt
+
+from .approval_gate import ApprovalGate, Resolution, SubmitResult, TickContext, settle_approval
+from .config import IST
+from .journal import APPROVAL_PENDING, APPROVAL_SUBMIT_FAILED
 ```
+
+`IST` may already be imported by iteration 05's `adjudicate`; keep one import line rather than
+two.
 
 `TickDeps` gains one optional field, so every existing construction of it keeps working:
 
@@ -1940,7 +1991,12 @@ is the entire reason they live in `plan` rather than in `submit`:
                     outstanding = deps.journal.open_approvals()
                     if outstanding:
                         head = outstanding[0]
+                        deadline = head.deadline_utc
+                        if deadline.tzinfo is None:
+                            deadline = deadline.replace(tzinfo=UTC)
+                        stale = datetime.now(tz=UTC) >= deadline
                         span.set_attribute("approval.outstanding", head.approval_id)
+                        span.set_attribute("approval.stale", stale)
                         return {
                             "book": snapshot,
                             "approval_pending": {
@@ -1948,6 +2004,8 @@ is the entire reason they live in `plan` rather than in `submit`:
                                 "pending_order_id": head.pending_order_id,
                                 "symbol": head.symbol,
                                 "quantity": head.quantity,
+                                "deadline": deadline.astimezone(IST).strftime("%H:%M:%S IST"),
+                                "stale": stale,
                             },
                         }
                     if deps.settings.execution_enabled and deps.gate is not None:
@@ -1982,6 +2040,17 @@ makes every downstream step pointless:
 ```python
     pending = state.get("approval_pending")
     if pending:
+        if pending.get("stale"):
+            return (
+                OUTCOME_HOLD,
+                REASON_APPROVAL_QUEUE_STALE,
+                render(
+                    REASON_APPROVAL_QUEUE_STALE,
+                    max_chars=cap,
+                    pending_order_id=pending.get("pending_order_id", "?"),
+                    deadline=str(pending.get("deadline", "an unrecorded time")),
+                ),
+            )
         return (
             OUTCOME_HOLD,
             REASON_APPROVAL_PENDING,
@@ -2036,7 +2105,13 @@ twice — once when the tick suspends and once when it wakes.
                 proposal_id=state.get("proposal_id"),
                 verdict_id=state.get("verdict_id"),
             )
-            result = deps.gate.submit(context)  # type: ignore[union-attr]
+            try:
+                result = deps.gate.submit(context)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 — see the note below this block
+                detail = f"the submission raised {type(exc).__name__}: {exc}"
+                logger.exception("tick %s could not be submitted", state["tick_id"])
+                span.set_status(Status(StatusCode.ERROR, "submit raised"))
+                result = deps.gate.record_failure(context, detail)  # type: ignore[union-attr]
             span.set_attribute("approval.id", result.approval_id)
             span.set_attribute("approval.status", result.status)
             span.set_attribute("approval.pending_order_id", result.pending_order_id or 0)
@@ -2080,6 +2155,15 @@ twice — once when the tick suspends and once when it wakes.
             span.set_attribute("approval.settled", written)
             return {}
 ```
+
+The blanket `except Exception` around `gate.submit` is not laziness, and it is the one place in
+this slice where catching everything is the careful choice. `submit` is the first node that
+runs after `persist`, so an exception escaping it reaches the runner's own handler, which
+journals an internal-error decision under the *same* `tick_id` — and `Decision.tick_id` is
+unique, so that write raises `IntegrityError`, surfaces as `JournalWriteError`, and the desk
+logs that its journal is unwritable when the journal is fine. Catching here turns a submission
+failure into what it actually is: a terminal `SubmitResult`, a best-effort `submit-failed` row,
+and a tick that ends.
 
 The builder wires them on, and `persist` stops edging straight to `END`:
 
@@ -2145,7 +2229,7 @@ from langgraph.types import Command
 
 ### `strike_desk/src/strike_desk/decline_taxonomy.py` — edits
 
-`dt-4`, two entries, nothing existing touched — so every row written under `dt-1` through
+`dt-4`, three entries, nothing existing touched — so every row written under `dt-1` through
 `dt-3` still reports `taxonomy drift 0`:
 
 ```python
@@ -2175,11 +2259,31 @@ TAXONOMY_VERSION = "dt-4"
             "propose a trade it has no safe way to place."
         ),
     ),
+    _entry(
+        "approval-queue-stale",
+        outcome="hold",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="an intent is past its deadline and has not been settled",
+        default=(
+            "Held: pending order {pending_order_id} passed its approval deadline at "
+            "{deadline} and has still not been settled. The desk is holding on an intent "
+            "nothing is resolving — read the log and clear the queue."
+        ),
+    ),
 ```
 
 `approval-gate-unavailable` is a `defect` rather than `degraded`, and that is a deliberate
 severity call: a desk running against a platform in auto mode is one configuration change away
 from placing orders nobody approved, and the exit code of `strike-desk declines` should say so.
+
+`approval-queue-stale` exists for the failure that is otherwise silent. The outstanding-approval
+hold is a *routine* answer, so a desk that can no longer resolve its own queue — the mirror
+became unreadable, the watcher wedged, the scheduler died — would hold every tick, exit 0 and
+look healthy while it had quietly stopped trading. Being past the deadline and still unsettled
+is the symptom of all of those causes at once, whatever caused it, so the hold stays (a
+clickable order may still be queued and a second intent would be worse) and the disposition
+turns it into something `strike-desk declines` exits 2 on.
 
 ### `strike_desk/src/strike_desk/service.py` — edits
 
@@ -2516,7 +2620,7 @@ suite that holds them, and `05_deployment_guide.md` puts this on the host.
 | --- | --- |
 | Package version | `0.6.0` |
 | Journal schema | `SCHEMA_VERSION = 6` — adds `approvals` and `orders` |
-| Taxonomy | `dt-4` — sixteen earlier codes unchanged, two added |
+| Taxonomy | `dt-4` — sixteen earlier codes unchanged, three added |
 | New endpoints used | `/api/v1/placeorder`, `/api/v1/orderstatus`, `/api/v1/cancelorder` |
 | Execution whitelist | Those three, and nothing else |
 | Read-only whitelist | Unchanged: ping, funds, positionbook, market/timings |

@@ -1066,6 +1066,26 @@ def test_an_unreadable_mirror_settles_nothing(watcher, queued, journal, openalgo
     openalgo_db.unlink()
     assert watcher.poll_once() == 0
     assert [row.status for row in journal.list_approvals(today)] == ["pending"]
+
+
+def test_an_unreadable_queue_past_the_deadline_is_shouted_about(
+    watcher, queued, journal, openalgo_db, execution_settings, today, caplog
+):
+    """AC-13: settling blind would release the hold, so the escalation is the log line."""
+    import logging
+
+    from freezegun import freeze_time
+
+    _, pending_order_id = queued
+    openalgo_db.unlink()
+    later = datetime.now(tz=UTC) + timedelta(
+        seconds=execution_settings.approval_deadline_seconds + 1
+    )
+    with freeze_time(later), caplog.at_level(logging.CRITICAL):
+        assert watcher.poll_once() == 0
+
+    assert f"APPROVAL QUEUE UNREADABLE: pending order {pending_order_id}" in caplog.text
+    assert [row.status for row in journal.list_approvals(today)] == ["pending"]
 ```
 
 ## 7. The tick, end to end
@@ -1181,6 +1201,52 @@ def test_the_graph_settles_its_own_approval(
     # A second poll finds nothing outstanding and settles nothing twice.
     assert watcher.poll_once() == 0
     assert len(journal.list_approvals(today)) == 2
+
+
+def test_a_stale_intent_holds_as_a_defect(entering_desk, journal, execution_settings, today):
+    """AC-13: past its deadline and still unsettled is a defect, not a routine hold."""
+    from datetime import UTC, datetime, timedelta
+
+    from freezegun import freeze_time
+
+    from strike_desk.decline_taxonomy import describe
+    from strike_desk.graph import REASON_APPROVAL_QUEUE_STALE
+
+    runner, _ = entering_desk
+    runner.run_tick("manual")
+
+    later = datetime.now(tz=UTC) + timedelta(
+        seconds=execution_settings.approval_deadline_seconds + 1
+    )
+    with freeze_time(later):
+        runner.run_tick("manual")
+
+    decision = journal.list_decisions(today)[0]
+    assert decision.outcome == OUTCOME_HOLD
+    assert decision.reason_code == REASON_APPROVAL_QUEUE_STALE
+    assert describe(REASON_APPROVAL_QUEUE_STALE).disposition == "defect"
+
+
+def test_a_submission_that_raises_does_not_poison_the_tick(
+    entering_desk, execution_deps, journal, today, monkeypatch
+):
+    """One decision row, one terminal approval row, and no false journal-unwritable alarm."""
+    from strike_desk.errors import JournalWriteError
+    from strike_desk.journal import APPROVAL_SUBMIT_FAILED
+
+    runner, _ = entering_desk
+
+    def _explode(_context):
+        raise JournalWriteError("disk full")
+
+    monkeypatch.setattr(execution_deps.gate, "submit", _explode)
+
+    tick_id = runner.run_tick("manual")
+
+    decisions = journal.list_decisions(today)
+    assert [d.tick_id for d in decisions] == [tick_id]
+    assert decisions[0].outcome == OUTCOME_ENTER
+    assert [row.status for row in journal.list_approvals(today)] == [APPROVAL_SUBMIT_FAILED]
 
 
 def test_auto_mode_declines_before_a_token_is_spent(entering_desk, journal, openalgo_db, today):
@@ -1604,6 +1670,9 @@ in MT-23 and MT-24.
 | `test_guardrails_execution::test_openalgos_database_is_never_written` | AC-13 | MT-06 |
 | `test_openalgo_mirror::test_a_missing_database_is_unhealthy_not_a_crash` | AC-13 | MT-07 |
 | `test_approval_watcher::test_an_unreadable_mirror_settles_nothing` | AC-13 | MT-07 |
+| `test_approval_watcher::test_an_unreadable_queue_past_the_deadline_is_shouted_about` | AC-13 | MT-26 |
+| `test_tick_approval::test_a_stale_intent_holds_as_a_defect` | AC-13 | MT-26 |
+| `test_tick_approval::test_a_submission_that_raises_does_not_poison_the_tick` | AC-1, AC-11 | MT-04 |
 | `test_approval_watcher::test_the_kill_switch_expires_an_outstanding_intent` | AC-14 | MT-20 |
 | `test_tick_approval::test_the_trace_carries_the_submission` | AC-15 | MT-22 |
 | `regression/test_approval_scenarios` | AC-6 to AC-9, AC-14 | MT-12 to MT-20 |
@@ -1620,7 +1689,14 @@ in MT-23 and MT-24.
 3. **The suite cannot prove a click.** Approval, rejection and deletion are simulated by
    writing the row OpenAlgo's own routes write. That is the same row by construction, and it is
    still a simulation — which is why Block B of the manual cases exists.
-4. **Timing is frozen, not waited for.** `freeze_time` moves the clock past a deadline
+4. **Re-registering a respx route assumes replacement.** Several cases mock
+   `/api/v1/orderstatus` twice in one test — `open`, then `complete` — which relies on `respx`
+   updating a route registered with an identical pattern rather than appending a second one.
+   Confirm it once with a throwaway test (`route = router.post(p).mock(a)`, re-register with
+   `b`, assert the second body comes back); if your version appends, capture the route object
+   and call `.mock()` on it instead. The failure mode is loud either way, which is why this is
+   a note rather than a defence in the code.
+5. **Timing is frozen, not waited for.** `freeze_time` moves the clock past a deadline
    instantly, so the suite proves the arithmetic of expiry rather than the scheduler's cadence.
    The five-second poll is observed once, by hand, in MT-12.
 
