@@ -264,3 +264,70 @@ def test_a_v4_journal_gains_the_table_in_place(tmp_path, v4_journal_bytes) -> No
         "risk_verdicts_no_delete",
     }
     assert _pragma_user_columns(path, "proposals") == _pragma_user_columns_v4()
+
+
+V5_TRADING_DAY = "2026-08-28"
+
+
+@pytest.fixture
+def legacy_five_journal(tmp_path):
+    """A journal written at schema 5: risk_verdicts exist, approvals and orders do not."""
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as sql_text
+
+    from tests.journal_fixtures import seed_decision as seed
+
+    path = tmp_path / "v5-source.db"
+    journal = Journal(path)
+    try:
+        journal.create_schema()
+        seed(journal, V5_TRADING_DAY, "risk-cleared")
+    finally:
+        journal.close()
+
+    engine = create_engine(f"sqlite:///{path}", future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(sql_text("DROP TABLE IF EXISTS approvals"))
+            connection.execute(sql_text("DROP TABLE IF EXISTS orders"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS approvals_no_update"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS approvals_no_delete"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS orders_no_update"))
+            connection.execute(sql_text("DROP TRIGGER IF EXISTS orders_no_delete"))
+    finally:
+        engine.dispose()
+
+    opened = Journal(path)
+    yield opened
+    opened.close()
+
+
+def test_schema_six_adds_two_tables_and_touches_no_row(legacy_five_journal):
+    """The iteration-05 database gains two tables and loses nothing."""
+    import sqlite3
+
+    before = legacy_five_journal.count_decisions(V5_TRADING_DAY)
+    journal = Journal(legacy_five_journal.path)
+    try:
+        journal.create_schema()
+        assert journal.count_decisions(V5_TRADING_DAY) == before
+        assert journal.open_approvals() == []
+    finally:
+        journal.close()
+
+    connection = sqlite3.connect(legacy_five_journal.path)
+    try:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"approvals", "orders"} <= tables
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%'"
+            )
+        }
+        assert {"uq_approvals_state", "uq_orders_state"} <= indexes
+    finally:
+        connection.close()

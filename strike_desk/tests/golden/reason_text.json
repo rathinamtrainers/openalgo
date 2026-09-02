@@ -262,6 +262,36 @@
         "stop": "152.00"
       },
       "expect": "Intent: buy 1 lot(s) of NIFTY02SEP2624800CE at up to 192.00, cut from 2 lot(s) to fit the per-trade-loss-cap limit of Rs 4,000. Risking Rs 3,000 to the 152.00 stop. This is an intent, not an order."
+    },
+    {
+      "id": "GD-26",
+      "code": "approval-pending",
+      "variant": "default",
+      "fields": {
+        "quantity": 150,
+        "symbol": "NIFTY02SEP2624800CE",
+        "pending_order_id": 42
+      },
+      "expect": "Held: 150 x NIFTY02SEP2624800CE is queued as pending order 42 and is waiting for your approval. The desk proposes nothing while an intent is open."
+    },
+    {
+      "id": "GD-27",
+      "code": "approval-gate-unavailable",
+      "variant": "default",
+      "fields": {
+        "detail": "OpenAlgo has no api_keys row for user practice"
+      },
+      "expect": "Declined: the approval gate could not be verified (OpenAlgo has no api_keys row for user practice). The desk does not propose a trade it has no safe way to place."
+    },
+    {
+      "id": "GD-28",
+      "code": "approval-queue-stale",
+      "variant": "default",
+      "fields": {
+        "pending_order_id": 42,
+        "deadline": "11:35:00 IST"
+      },
+      "expect": "Held: pending order 42 passed its approval deadline at 11:35:00 IST and has still not been settled. The desk is holding on an intent nothing is resolving — read the log and clear the queue."
     }
   ]
 }

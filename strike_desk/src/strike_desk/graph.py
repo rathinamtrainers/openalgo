@@ -10,15 +10,17 @@ from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
+from .approval_gate import ApprovalGate, Resolution, TickContext, settle_approval
 from .book_state import read_book_state
 from .config import IST, Settings
 from .decline_taxonomy import describe, render
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
 from .grounding import ProposalSubmission
-from .journal import SCHEMA_VERSION, Journal
+from .journal import APPROVAL_PENDING, SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
 from .options_strategist import (
@@ -91,6 +93,9 @@ REASON_RISK_SESSION_STOPPED = "risk-session-stopped"
 REASON_RISK_INPUT_UNAVAILABLE = "risk-input-unavailable"
 REASON_RISK_VETO = "risk-veto"
 REASON_RISK_CLEARED = "risk-cleared"
+REASON_APPROVAL_PENDING = "approval-pending"
+REASON_APPROVAL_QUEUE_STALE = "approval-queue-stale"
+REASON_APPROVAL_GATE_UNAVAILABLE = "approval-gate-unavailable"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -122,6 +127,11 @@ class TickState(TypedDict, total=False):
     proposal_id: str | None
     session_stop: dict[str, Any] | None
     risk: dict[str, Any] | None
+    verdict_id: str | None
+    approval_pending: dict[str, Any] | None
+    gate_unavailable: str | None
+    approval: dict[str, Any] | None
+    resolution: dict[str, Any] | None
 
 
 @dataclass
@@ -133,6 +143,7 @@ class TickDeps:
     prompts: PromptRegistry
     span_processor: JournalSpanProcessor
     checkpointer: Any
+    gate: ApprovalGate | None = None
 
 
 def _rationale(state: TickState) -> str | None:
@@ -181,6 +192,39 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 index=settings.index_symbol,
                 symbols=", ".join(str(position.get("symbol", "?")) for position in positions),
             ),
+        )
+
+    pending = state.get("approval_pending")
+    if pending:
+        if pending.get("stale"):
+            return (
+                OUTCOME_HOLD,
+                REASON_APPROVAL_QUEUE_STALE,
+                render(
+                    REASON_APPROVAL_QUEUE_STALE,
+                    max_chars=cap,
+                    pending_order_id=pending.get("pending_order_id", "?"),
+                    deadline=str(pending.get("deadline", "an unrecorded time")),
+                ),
+            )
+        return (
+            OUTCOME_HOLD,
+            REASON_APPROVAL_PENDING,
+            render(
+                REASON_APPROVAL_PENDING,
+                max_chars=cap,
+                symbol=str(pending.get("symbol", "a contract")),
+                quantity=pending.get("quantity", 0),
+                pending_order_id=pending.get("pending_order_id", "?"),
+            ),
+        )
+
+    gate_detail = state.get("gate_unavailable")
+    if gate_detail:
+        return (
+            OUTCOME_DECLINE,
+            REASON_APPROVAL_GATE_UNAVAILABLE,
+            render(REASON_APPROVAL_GATE_UNAVAILABLE, max_chars=cap, detail=str(gate_detail)),
         )
 
     stop = state.get("session_stop")
@@ -596,6 +640,31 @@ def build_tick_graph(deps: TickDeps) -> Any:
                 risk_span.set_attribute("risk.session_latched", latched)
                 risk_span.set_attribute("risk.session_stopped", assessment.stopped or latched)
                 if not (assessment.stopped or latched):
+                    outstanding = deps.journal.open_approvals()
+                    if outstanding:
+                        head = outstanding[0]
+                        deadline = head.deadline_utc
+                        if deadline.tzinfo is None:
+                            deadline = deadline.replace(tzinfo=UTC)
+                        stale = datetime.now(tz=UTC) >= deadline
+                        span.set_attribute("approval.outstanding", head.approval_id)
+                        span.set_attribute("approval.stale", stale)
+                        return {
+                            "book": snapshot,
+                            "approval_pending": {
+                                "approval_id": head.approval_id,
+                                "pending_order_id": head.pending_order_id,
+                                "symbol": head.symbol,
+                                "quantity": head.quantity,
+                                "deadline": deadline.astimezone(IST).strftime("%H:%M:%S IST"),
+                                "stale": stale,
+                            },
+                        }
+                    if deps.settings.execution_enabled and deps.gate is not None:
+                        health = deps.gate.health()
+                        span.set_attribute("approval.gate_ok", health.ok)
+                        if not health.ok:
+                            return {"book": snapshot, "gate_unavailable": health.detail}
                     return {"book": snapshot}
                 if assessment.stopped and not latched:
                     _latch_session_stop(deps, state, assessment, limits)
@@ -613,6 +682,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
             return "decide"
         book = state.get("book") or {}
         if book.get("open_positions"):
+            return "decide"
+        if state.get("approval_pending") or state.get("gate_unavailable"):
             return "decide"
         return "decide" if state.get("session_stop") else "consult"
 
@@ -776,7 +847,7 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("risk.latency_us", latency_us)
             if verdict.verdict == VERDICT_HOLD:
                 span.set_status(Status(StatusCode.ERROR, "risk input unavailable"))
-            return {"risk": verdict.as_dict()}
+            return {"risk": verdict.as_dict(), "verdict_id": row["verdict_id"]}
 
     def decide(state: TickState) -> dict[str, Any]:
         with tracer.start_as_current_span("tick.decide") as span:
@@ -836,6 +907,72 @@ def build_tick_graph(deps: TickDeps) -> Any:
             )
             return {}
 
+    def route_after_persist(state: TickState) -> str:
+        if state.get("outcome") != OUTCOME_ENTER:
+            return "end"
+        return "submit" if deps.settings.execution_enabled and deps.gate else "end"
+
+    def submit(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.submit") as span:
+            context = TickContext(
+                tick_id=state["tick_id"],
+                trace_id=state["trace_id"],
+                trading_day=state["trading_day"],
+                proposal=dict(state.get("proposal") or {}),
+                risk=dict(state.get("risk") or {}),
+                proposal_id=state.get("proposal_id"),
+                verdict_id=state.get("verdict_id"),
+            )
+            try:
+                result = deps.gate.submit(context)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 — see the note below this block
+                detail = f"the submission raised {type(exc).__name__}: {exc}"
+                logger.exception("tick %s could not be submitted", state["tick_id"])
+                span.set_status(Status(StatusCode.ERROR, "submit raised"))
+                result = deps.gate.record_failure(context, detail)  # type: ignore[union-attr]
+            span.set_attribute("approval.id", result.approval_id)
+            span.set_attribute("approval.status", result.status)
+            span.set_attribute("approval.pending_order_id", result.pending_order_id or 0)
+            span.set_attribute("approval.quantity", result.quantity)
+            span.set_attribute("approval.limit_price", result.limit_price)
+            span.set_attribute("approval.symbol", result.symbol)
+            if result.status != APPROVAL_PENDING:
+                span.set_status(Status(StatusCode.ERROR, result.status))
+                logger.warning(
+                    "tick %s did not reach the approval queue: %s (%s)",
+                    state["tick_id"],
+                    result.status,
+                    result.detail,
+                )
+            return {"approval": result.as_dict()}
+
+    def route_after_submit(state: TickState) -> str:
+        approval = state.get("approval") or {}
+        return "await" if approval.get("status") == APPROVAL_PENDING else "end"
+
+    def await_approval(state: TickState) -> dict[str, Any]:
+        # Nothing may precede this call: a resume re-runs the node from its first line.
+        approval = state.get("approval") or {}
+        resolution = interrupt(
+            {
+                "approval_id": approval.get("approval_id"),
+                "pending_order_id": approval.get("pending_order_id"),
+                "deadline_seconds": deps.settings.approval_deadline_seconds,
+            }
+        )
+        return {"resolution": dict(resolution or {})}
+
+    def settle(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.settle") as span:
+            resolution = Resolution.from_dict(dict(state.get("resolution") or {}))
+            trace_id = format(span.get_span_context().trace_id, "032x")
+            span.set_attribute("approval.id", resolution.approval_id)
+            span.set_attribute("approval.status", resolution.status)
+            span.set_attribute("strike_desk.tick_trace_id", state["trace_id"])
+            written = settle_approval(deps.journal, resolution, trace_id)
+            span.set_attribute("approval.settled", written)
+            return {}
+
     builder = StateGraph(TickState)
     builder.add_node("plan", plan)
     builder.add_node("consult", consult)
@@ -843,6 +980,9 @@ def build_tick_graph(deps: TickDeps) -> Any:
     builder.add_node("adjudicate", adjudicate)
     builder.add_node("decide", decide)
     builder.add_node("persist", persist)
+    builder.add_node("submit", submit)
+    builder.add_node("await_approval", await_approval)
+    builder.add_node("settle", settle)
     builder.add_edge(START, "plan")
     builder.add_conditional_edges(
         "plan", route_after_plan, {"consult": "consult", "decide": "decide"}
@@ -855,5 +995,12 @@ def build_tick_graph(deps: TickDeps) -> Any:
     )
     builder.add_edge("adjudicate", "decide")
     builder.add_edge("decide", "persist")
-    builder.add_edge("persist", END)
+    builder.add_conditional_edges(
+        "persist", route_after_persist, {"submit": "submit", "end": END}
+    )
+    builder.add_conditional_edges(
+        "submit", route_after_submit, {"await": "await_approval", "end": END}
+    )
+    builder.add_edge("await_approval", "settle")
+    builder.add_edge("settle", END)
     return builder.compile(checkpointer=deps.checkpointer)

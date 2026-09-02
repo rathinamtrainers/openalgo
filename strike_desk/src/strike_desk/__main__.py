@@ -8,8 +8,10 @@ import os
 import signal
 import sys
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
+from . import approval_view
 from .config import IST, Settings, get_settings
 from .decline_report import (
     DayReport,
@@ -25,6 +27,7 @@ from .errors import McpUnavailable, ModelCallFailed, StrikeDeskError
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing, get_tracer
+from .openalgo_mirror import OpenAlgoMirror
 from .playbook import Playbook
 from .prompt_registry import PromptRegistry
 from .proposal_view import as_dict
@@ -128,6 +131,15 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         limits = RiskLimits.from_settings(settings)
         print(f"risk limits      : {limits.artifact}")
         print(limits.describe())
+        print(f"execution        : {'ENABLED' if settings.execution_enabled else 'disabled'}")
+        if settings.execution_enabled:
+            mirror = OpenAlgoMirror(settings)
+            try:
+                health = mirror.health()
+            finally:
+                mirror.close()
+            print(f"approval gate    : {'ok' if health.ok else 'UNUSABLE'} — {health.detail}")
+            print(f"outstanding      : {len(journal.open_approvals())}")
         print(f"strategist model : {settings.strategist_model}")
         print(f"directional      : {settings.directional_regimes}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
@@ -364,6 +376,43 @@ def _cmd_risk(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_approvals(settings: Settings, args: argparse.Namespace) -> int:
+    if args.day and args.since:
+        print("--day and --since are mutually exclusive", file=sys.stderr)
+        return 1
+    if args.since is not None and args.since < 1:
+        print("--since must be at least 1", file=sys.stderr)
+        return 1
+
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        if args.since:
+            today = datetime.now(tz=IST).date()
+            days = [
+                (today - timedelta(days=offset)).isoformat()
+                for offset in range(args.since - 1, -1, -1)
+            ]
+        else:
+            days = [args.day or _today()]
+
+        collected: list[tuple[Any, list[Any]]] = []
+        for day in days:
+            for row in journal.list_approvals(day, limit=args.limit):
+                collected.append((row, list(journal.orders_for_approval(row.approval_id))))
+
+        if args.json:
+            print(approval_view.to_json(collected))
+        elif not collected:
+            print(f"no approvals for {', '.join(days)}")
+        else:
+            for row, orders in collected:
+                print(approval_view.render(row, orders, journal))
+        return 2 if any(row.defect for row, _ in collected) else 0
+    finally:
+        journal.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -422,6 +471,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     risk_parser.add_argument("--json", action="store_true", help="print JSON instead of text")
 
+    approvals_parser = subparsers.add_parser("approvals", help="print approvals and their orders")
+    approvals_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
+    approvals_parser.add_argument("--since", type=int, help="the last N days, ending today")
+    approvals_parser.add_argument("--limit", type=int, default=100)
+    approvals_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     if getattr(args, "since", None) is not None and getattr(args, "day", None) is not None:
         parser.error("--day and --since are alternatives; pass one of them")
@@ -437,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
         "declines": _cmd_declines,
         "proposals": _cmd_proposals,
         "risk": _cmd_risk,
+        "approvals": _cmd_approvals,
     }
     return handlers[args.command](settings, args)
 

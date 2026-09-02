@@ -14,7 +14,7 @@ from .errors import StrikeDeskError
 
 logger = logging.getLogger(__name__)
 
-TAXONOMY_VERSION = "dt-3"
+TAXONOMY_VERSION = "dt-4"
 
 CATEGORY_BOOK = "book"
 CATEGORY_CONTRACT = "contract"
@@ -296,6 +296,40 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
             "Intent: buy {lots} lot(s) of {symbol} at up to {entry}, cut from {requested} "
             "lot(s) to fit the {limit} limit of {configured}. Risking {risk} to the {stop} "
             "stop. This is an intent, not an order."
+        ),
+    ),
+    _entry(
+        "approval-pending",
+        outcome="hold",
+        category=CATEGORY_BOOK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="an intent is already waiting for the trader",
+        default=(
+            "Held: {quantity} x {symbol} is queued as pending order {pending_order_id} and is "
+            "waiting for your approval. The desk proposes nothing while an intent is open."
+        ),
+    ),
+    _entry(
+        "approval-gate-unavailable",
+        outcome="decline",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="the human approval gate could not be verified",
+        default=(
+            "Declined: the approval gate could not be verified ({detail}). The desk does not "
+            "propose a trade it has no safe way to place."
+        ),
+    ),
+    _entry(
+        "approval-queue-stale",
+        outcome="hold",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="an intent is past its deadline and has not been settled",
+        default=(
+            "Held: pending order {pending_order_id} passed its approval deadline at "
+            "{deadline} and has still not been settled. The desk is holding on an intent "
+            "nothing is resolving — read the log and clear the queue."
         ),
     ),
 )

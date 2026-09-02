@@ -41,6 +41,11 @@ jobs:
             tests/test_tick_adjudication.py::test_no_write_path_is_ever_touched \
             -q
 
+      - name: Guardrail and regression gate
+        run: |
+          uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py \
+                        tests/test_guardrails_execution.py tests/regression -q
+
       - name: Full suite with coverage
         run: uv run pytest --cov=strike_desk --cov-report=term-missing --cov-fail-under=80
 

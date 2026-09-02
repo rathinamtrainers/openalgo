@@ -8,7 +8,9 @@ import threading
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+from langgraph.types import Command
 from opentelemetry.trace import Status, StatusCode
 
 from .config import IST
@@ -110,8 +112,9 @@ class TickRunner:
                 self._journal_internal_error(tick_id, trace_id, trigger, trading_day, started, exc)
                 return tick_id
 
-            root.set_attribute("decision.outcome", final["outcome"])
-            root.set_attribute("decision.reason_code", final["reason_code"])
+            root.set_attribute("decision.outcome", str(final.get("outcome", "suspended")))
+            root.set_attribute("decision.reason_code", str(final.get("reason_code", "none")))
+            root.set_attribute("tick.suspended", "__interrupt__" in final)
             self._deps.span_processor.forget(trace_id)
             return tick_id
 
@@ -152,3 +155,18 @@ class TickRunner:
             trace_complete=not self._deps.span_processor.had_failure(trace_id),
             schema_version=SCHEMA_VERSION,
         )
+
+    def resume_approval(self, tick_id: str, resolution: dict[str, Any]) -> bool:
+        """Wake a suspended tick so it settles its own approval. False when it could not."""
+        if not self._lock.acquire(timeout=2.0):
+            logger.info("approval resume for tick %s deferred: a tick is in flight", tick_id)
+            return False
+        try:
+            config = {"configurable": {"thread_id": tick_id}, "recursion_limit": 12}
+            self._graph.invoke(Command(resume=resolution), config)
+            return True
+        except Exception:  # noqa: BLE001 — the watcher falls back to settling directly
+            logger.exception("could not resume tick %s to settle its approval", tick_id)
+            return False
+        finally:
+            self._lock.release()

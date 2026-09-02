@@ -1,0 +1,64 @@
+[
+  {
+    "name": "approved-promptly",
+    "pending_status": "approved",
+    "approved_by": "amit",
+    "broker_order_id": "24090100000041",
+    "order_status": "open",
+    "seconds_elapsed": 20,
+    "kill_switch": false,
+    "expect_status": "approved",
+    "expect_withdrawal": "not-attempted",
+    "expect_defect": false,
+    "expect_order_rows": 1
+  },
+  {
+    "name": "rejected-with-a-reason",
+    "pending_status": "rejected",
+    "rejected_reason": "strike too far OTM",
+    "seconds_elapsed": 45,
+    "kill_switch": false,
+    "expect_status": "rejected",
+    "expect_withdrawal": "not-queued",
+    "expect_defect": false,
+    "expect_order_rows": 0
+  },
+  {
+    "name": "still-waiting",
+    "pending_status": "pending",
+    "seconds_elapsed": 30,
+    "kill_switch": false,
+    "expect_status": null,
+    "expect_order_rows": 0
+  },
+  {
+    "name": "expired-unanswered",
+    "pending_status": "pending",
+    "seconds_elapsed": 301,
+    "kill_switch": false,
+    "expect_status": "expired",
+    "expect_withdrawal": "not-queued",
+    "expect_defect": false,
+    "expect_order_rows": 0
+  },
+  {
+    "name": "killed-while-waiting",
+    "pending_status": "pending",
+    "seconds_elapsed": 30,
+    "kill_switch": true,
+    "expect_status": "expired",
+    "expect_withdrawal": "not-queued",
+    "expect_defect": false,
+    "expect_order_rows": 0
+  },
+  {
+    "name": "deleted-by-the-trader",
+    "pending_status": "deleted",
+    "seconds_elapsed": 30,
+    "kill_switch": false,
+    "expect_status": "withdrawn",
+    "expect_withdrawal": "not-queued",
+    "expect_defect": false,
+    "expect_order_rows": 0
+  }
+]
