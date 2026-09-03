@@ -39,10 +39,30 @@ logger = logging.getLogger(__name__)
 #: The resume signature: (tick_id, resolution payload) -> was the graph resumed?
 ResumeCallback = Callable[[str, dict[str, Any]], bool]
 
+#: OpenAlgo commits ``status=approved`` first and writes ``broker_order_id`` after the
+#: place. Wait this many polls for the second commit before shouting.
+BROKER_ID_IN_FLIGHT_POLLS = 6
+
 
 def _as_utc(moment: datetime) -> datetime:
     """Timestamps read back from SQLite are naive; treat them as the UTC they were written in."""
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+def _click_was_late(pending: Any, deadline_utc: datetime, now: datetime) -> bool:
+    """Whether the Action Center click itself landed after the approval deadline.
+
+    ``now`` is only the fallback when OpenAlgo left ``approved_at_ist`` blank; a timely
+    click that the watcher first sees after the deadline is still a normal approval.
+    """
+    stamp = (pending.approved_at_ist or "").replace(" IST", "").strip()
+    if stamp:
+        try:
+            clicked = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+            return clicked.astimezone(UTC) >= _as_utc(deadline_utc)
+        except ValueError:
+            pass
+    return now >= _as_utc(deadline_utc)
 
 
 class ApprovalWatcher:
@@ -62,6 +82,7 @@ class ApprovalWatcher:
         self._client = client
         self._resume = resume
         self._tracer = get_tracer()
+        self._awaiting_broker_id: dict[str, int] = {}
 
     def poll_once(self) -> int:
         """One pass. Returns the number of approvals settled, for tests and logging."""
@@ -113,7 +134,10 @@ class ApprovalWatcher:
             )
 
         if pending.status == APPROVED:
-            return self._approved_resolution(row, pending, waited, late=False)
+            if self._broker_id_still_in_flight(row, pending):
+                return None
+            late = _click_was_late(pending, row.deadline_utc, now)
+            return self._approved_resolution(row, pending, waited, late=late)
 
         if pending.status == REJECTED:
             reason = (pending.rejected_reason or "no reason given").strip()
@@ -154,6 +178,29 @@ class ApprovalWatcher:
             )
         return None
 
+    def _broker_id_still_in_flight(self, row: Any, pending: Any) -> bool:
+        """True while OpenAlgo has approved but not yet written the broker order id.
+
+        Settling in that window records ``approved`` with ``order unknown``, writes no
+        ``orders`` row, and stops watching — so a fill is never tracked.
+        """
+        broker_order_id = (pending.broker_order_id or "").strip() or None
+        broker_status = (pending.broker_status or "").strip() or None
+        if broker_order_id is not None or broker_status is not None:
+            self._awaiting_broker_id.pop(row.approval_id, None)
+            return False
+        count = self._awaiting_broker_id.get(row.approval_id, 0) + 1
+        self._awaiting_broker_id[row.approval_id] = count
+        if count >= BROKER_ID_IN_FLIGHT_POLLS:
+            logger.critical(
+                "APPROVED ORDER WITHOUT BROKER ID: pending order %s has been approved but "
+                "OpenAlgo has not written a broker_order_id after %d polls. The desk is "
+                "holding and will keep watching; a fill cannot be tracked until the id appears.",
+                row.pending_order_id,
+                count,
+            )
+        return True
+
     def _approved_resolution(
         self, row: Any, pending: Any, waited: float, *, late: bool
     ) -> Resolution:
@@ -174,16 +221,26 @@ class ApprovalWatcher:
                 logger.error("could not read order %s back: %s", broker_order_id, exc)
 
         withdrawal = WITHDRAWAL_NOT_ATTEMPTED
-        if late and broker_order_id and order_status not in ORDER_TERMINAL:
-            permitted, detail = self._client.cancel_order(broker_order_id, tag)
-            withdrawal = WITHDRAWAL_PERMITTED if permitted else WITHDRAWAL_REFUSED
-            logger.critical(
-                "LATE APPROVAL: pending order %s was approved after its deadline; "
-                "withdrawal %s (%s)",
-                row.pending_order_id,
-                withdrawal,
-                detail,
-            )
+        if late:
+            if broker_order_id and order_status not in ORDER_TERMINAL:
+                permitted, detail = self._client.cancel_order(broker_order_id, tag)
+                withdrawal = WITHDRAWAL_PERMITTED if permitted else WITHDRAWAL_REFUSED
+                logger.critical(
+                    "LATE APPROVAL: pending order %s was approved after its deadline; "
+                    "withdrawal %s (%s). Close any remaining position by hand.",
+                    row.pending_order_id,
+                    withdrawal,
+                    detail,
+                )
+            else:
+                logger.critical(
+                    "LATE APPROVAL: pending order %s was approved after its deadline; "
+                    "order %s is %s. Close the position by hand — the desk will not "
+                    "cancel a filled order.",
+                    row.pending_order_id,
+                    broker_order_id or "unknown",
+                    order_status,
+                )
 
         approver = pending.approved_by or "the trader"
         return Resolution(
@@ -236,9 +293,9 @@ class ApprovalWatcher:
                 continue
             if pending is None or pending.status != APPROVED:
                 continue
-            waited = (
-                datetime.now(tz=UTC) - _as_utc(row.created_at_utc)
-            ).total_seconds()
+            if self._broker_id_still_in_flight(row, pending):
+                continue
+            waited = (datetime.now(tz=UTC) - _as_utc(row.created_at_utc)).total_seconds()
             resolution = self._approved_resolution(row, pending, waited, late=True)
             with self._tracer.start_as_current_span("strike_desk.approval") as span:
                 trace_id = format(span.get_span_context().trace_id, "032x")
@@ -266,15 +323,22 @@ class ApprovalWatcher:
             age = (now - _as_utc(order.created_at_utc)).total_seconds()
             if status not in ORDER_TERMINAL and age >= self._settings.fill_deadline_seconds:
                 permitted, detail = self._client.cancel_order(order.broker_order_id, tag)
-                logger.warning(
-                    "order %s had not filled after %.0fs; cancel %s (%s)",
-                    order.broker_order_id,
-                    age,
-                    "permitted" if permitted else "refused",
-                    detail,
-                )
                 if permitted:
-                    status = "cancelled"
+                    logger.warning(
+                        "order %s had not filled after %.0fs; cancel permitted (%s). "
+                        "The next poll will read the order's real status.",
+                        order.broker_order_id,
+                        age,
+                        detail,
+                    )
+                else:
+                    logger.critical(
+                        "order %s had not filled after %.0fs; cancel refused (%s). "
+                        "The desk cannot withdraw it in live semi-auto — close it by hand.",
+                        order.broker_order_id,
+                        age,
+                        detail,
+                    )
 
             if status == order.order_status:
                 continue

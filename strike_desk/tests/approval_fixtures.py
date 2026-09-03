@@ -89,7 +89,7 @@ def approve_pending(
     *,
     by: str = USER,
     broker_order_id: str | None = "24090100000041",
-    broker_status: str = "open",
+    broker_status: str | None = "open",
 ) -> None:
     engine, maker = _writer(path)
     with maker() as session:

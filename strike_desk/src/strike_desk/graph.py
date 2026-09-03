@@ -995,9 +995,7 @@ def build_tick_graph(deps: TickDeps) -> Any:
     )
     builder.add_edge("adjudicate", "decide")
     builder.add_edge("decide", "persist")
-    builder.add_conditional_edges(
-        "persist", route_after_persist, {"submit": "submit", "end": END}
-    )
+    builder.add_conditional_edges("persist", route_after_persist, {"submit": "submit", "end": END})
     builder.add_conditional_edges(
         "submit", route_after_submit, {"await": "await_approval", "end": END}
     )

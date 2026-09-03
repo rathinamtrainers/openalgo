@@ -73,9 +73,7 @@ def align_price(band_low: float, band_high: float, tick: float) -> float:
     raised = (low / grid).to_integral_value(rounding=ROUND_CEILING) * grid
     if raised <= high and raised > 0:
         return float(raised)
-    raise UnpriceableBand(
-        f"no multiple of {tick} lies between {band_low} and {band_high}"
-    )
+    raise UnpriceableBand(f"no multiple of {tick} lies between {band_low} and {band_high}")
 
 
 def strategy_tag(settings: Settings, tick_id: str) -> str:
@@ -392,6 +390,16 @@ class ApprovalGate:
                 intent.tick_id,
                 detail,
             )
+            if receipt.broker_order_id:
+                permitted, cancel_detail = self._client.cancel_order(
+                    receipt.broker_order_id, intent.strategy
+                )
+                logger.critical(
+                    "APPROVAL GATE BYPASSED: cancel of order %s %s (%s)",
+                    receipt.broker_order_id,
+                    "permitted" if permitted else "refused",
+                    cancel_detail,
+                )
             engage_kill_switch(
                 self._settings, f"approval gate bypassed on tick {intent.tick_id}: {detail}"
             )
@@ -450,9 +458,7 @@ class ApprovalGate:
                 context, APPROVAL_SUBMIT_FAILED, detail, datetime.now(tz=UTC)
             )
         except Exception:  # noqa: BLE001 — the log is the last resort and must not raise
-            logger.exception(
-                "could not journal the failed submission for tick %s", context.tick_id
-            )
+            logger.exception("could not journal the failed submission for tick %s", context.tick_id)
             return SubmitResult(str(uuid.uuid4()), APPROVAL_SUBMIT_FAILED, detail)
 
     def _refuse_before_intent(

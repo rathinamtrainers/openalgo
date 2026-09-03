@@ -118,6 +118,11 @@ def test_a_bypassed_gate_engages_the_kill_switch(
 ):
     """AC-3: an order that reached a broker without a click stops the desk."""
     _queue_route(openalgo, {"status": "success", "orderid": "24090100000041"})
+    cancel = openalgo.post("/api/v1/cancelorder").mock(
+        return_value=httpx.Response(
+            403, json={"status": "error", "message": "not allowed in Semi-Auto mode"}
+        )
+    )
 
     result = gate.submit(cleared_context())
 
@@ -127,6 +132,7 @@ def test_a_bypassed_gate_engages_the_kill_switch(
     row = journal.list_approvals(today)[0]
     assert row.status == APPROVAL_GATE_BYPASSED and row.defect is True
     assert row.broker_order_id == "24090100000041"
+    assert cancel.call_count == 1
 
 
 def test_a_failed_submission_is_journalled_not_retried(gate, journal, openalgo, today):
@@ -139,9 +145,9 @@ def test_a_failed_submission_is_journalled_not_retried(gate, journal, openalgo, 
 
 def test_an_unpriceable_band_never_reaches_the_wire(gate, journal, openalgo, today):
     route = _queue_route(openalgo)
-    result = gate.submit(cleared_context(proposal=cleared_proposal(
-        entry_price_low=192.01, entry_price_high=192.04
-    )))
+    result = gate.submit(
+        cleared_context(proposal=cleared_proposal(entry_price_low=192.01, entry_price_high=192.04))
+    )
     assert route.call_count == 0
     assert result.status == APPROVAL_UNPRICEABLE
     assert journal.list_approvals(today)[0].defect is True
@@ -171,11 +177,14 @@ def test_settlement_is_idempotent(gate, journal, openalgo, today):
 
 
 def test_settling_an_unknown_approval_is_a_no_op(journal):
-    assert settle_approval(
-        journal,
-        Resolution(approval_id="nope", tick_id="t", status=APPROVAL_APPROVED),
-        "1" * 32,
-    ) is False
+    assert (
+        settle_approval(
+            journal,
+            Resolution(approval_id="nope", tick_id="t", status=APPROVAL_APPROVED),
+            "1" * 32,
+        )
+        is False
+    )
 
 
 def test_a_rejection_writes_no_order_row(gate, journal, openalgo, today):
