@@ -2604,6 +2604,10 @@ uv run strike-desk journal        # the enter decision
 uv run strike-desk approvals      # the queued intent and the case behind it
 ```
 
+(On Windows there is no `SIGUSR1` and `tick-now` is unsupported; wait one scheduled cadence for
+the tick instead. Note too that the fixture's recorded contract will have expired — queue with a
+live weekly, as `03_manual_test_cases.md` shows, or the approve click has nothing to place.)
+
 Open `http://127.0.0.1:5000/orders/action-center`, and the order is there with your strategy
 tag on it. Approve it, wait five seconds, and run `strike-desk approvals` again: the same
 approval now shows `approved`, who approved it, how long you took, and the order that came out

@@ -375,8 +375,12 @@ if __name__ == "__main__":  # pragma: no cover - the manual harness of 03_manual
     from strike_desk.journal import Journal
     from strike_desk.openalgo_mirror import OpenAlgoMirror
 
-    if sys.argv[1:2] != ["queue"]:
-        raise SystemExit("usage: python -m tests.approval_fixtures queue")
+    if sys.argv[1:2] != ["queue"] or len(sys.argv) not in (2, 4):
+        raise SystemExit("usage: python -m tests.approval_fixtures queue [SYMBOL LOT_SIZE]")
+    # The recorded contract expires; pass a live weekly and its lot size for Block B.
+    overrides: dict[str, Any] = {}
+    if len(sys.argv) == 4:
+        overrides = {"symbol": sys.argv[2], "lot_size": int(sys.argv[3])}
     live_settings = get_settings()
     live_journal = Journal(live_settings.db_path)
     live_journal.create_schema()
@@ -384,7 +388,10 @@ if __name__ == "__main__":  # pragma: no cover - the manual harness of 03_manual
     live_client = ExecutionClient(live_settings)
     try:
         result = ApprovalGate(live_settings, live_journal, live_mirror, live_client).submit(
-            cleared_context(tick_id=f"manual-{datetime.now(tz=UTC):%H%M%S}")
+            cleared_context(
+                tick_id=f"manual-{datetime.now(tz=UTC):%H%M%S}",
+                proposal=cleared_proposal(**overrides),
+            )
         )
         print(f"{result.status}: {result.detail}")
     finally:
