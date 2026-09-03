@@ -54,7 +54,14 @@ reasoning that produced the contract is canned:
 
 ```bash
 uv run python -m tests.approval_fixtures queue    # queues one intent and prints its status
+uv run python -m tests.approval_fixtures queue NIFTY22SEP2624800CE 65   # a live weekly, lot 65
 ```
+
+The recorded contract in the fixtures is a weekly that has long since expired. OpenAlgo will
+queue it — the semi-auto branch runs before any symbol lookup — but the approve click then has
+no contract to place and comes back with no broker order id, which fails MT-12 and MT-16 for a
+reason that has nothing to do with the desk. For every case from MT-09 onwards pass a live weekly
+NIFTY option and its current lot size as the two extra arguments; check the expiry on the day.
 
 That path deliberately writes no `decisions` row, because no tick ran — it starts at the
 submission. The full chain from an `enter` decision through to a settled approval is proved by
@@ -63,6 +70,11 @@ for real on the host in MT-24.
 
 Leave the service running in another terminal (`uv run strike-desk run`) while you work through
 Block B: the watcher lives in it, and nothing settles without it.
+
+Two of the cases below force a tick with `SIGUSR1`. Windows has no such signal and `tick-now`
+is unsupported there, so on a Windows machine skip the `kill` and wait one scheduled cadence
+(`STRIKE_DESK_TICK_INTERVAL_SECONDS`, 60 seconds in the local setup) for the next tick to run.
+The expected result is the same; only the wait is longer.
 
 ## Block A — off-host
 
@@ -83,19 +95,19 @@ Block B: the watcher lives in it, and nothing settles without it.
 | --- | --- | --- | --- | --- | --- |
 | **MT-09** | An intent reaches the queue | Semi-auto on, analyze mode on, execution enabled | Run `python -m tests.approval_fixtures queue`, then `strike-desk approvals` and open `/orders/action-center` | One `pending` approval naming a `pending_order_id`, with the quantity and limit price the fixture's verdict cleared; the same order visible in the Action Center with strategy tag `strike-desk:<8 chars>` | AC-1, AC-4 |
 | **MT-10** | The case is readable before the click | MT-09's approval outstanding | `strike-desk approvals` | The block shows the contract, lots and limit price and the deadline in IST. The verdict and regime lines are blank here because the fixture's ids point at no rows — MT-24 is where the full case is read | AC-15 |
-| **MT-11** | The desk proposes nothing while it waits | MT-09's approval outstanding | Force a tick with `kill -USR1 $(cat $STRIKE_DESK_STATE_DIR/strike-desk.pid)`, then `strike-desk journal` | The tick is `hold / approval-pending` naming the pending order id; no regime read and no proposal row was written for it, and `strike-desk status` shows no new token cost and `outstanding : 1` | AC-10 |
-| **MT-12** | Approval settles into a chain | MT-09's approval outstanding | Approve in the Action Center; wait 10 seconds; `strike-desk approvals --json` | An `approved` row with your username in `approved_by`, an IST `resolved_at_ist`, a `wait_seconds` matching the clock, and one order entry with a `broker_order_id` and a status; a second poll adds nothing | AC-6, AC-12 |
-| **MT-13** | Rejection keeps the reason | A freshly queued intent | Reject in the Action Center with the reason `strike too far OTM`; wait 10 seconds; `strike-desk approvals` | A `rejected` row whose detail contains `strike too far OTM` verbatim, and no order rows for that approval | AC-7 |
+| **MT-11** | The desk proposes nothing while it waits | MT-09's approval outstanding | Force a tick with `kill -USR1 $(cat $STRIKE_DESK_STATE_DIR/strike-desk.pid)` (on Windows, wait one cadence instead), then `strike-desk journal` | The tick is `hold / approval-pending` naming the pending order id; no regime read and no proposal row was written for it, and `strike-desk status` shows no new token cost and `outstanding : 1` | AC-10 |
+| **MT-12** | Approval settles into a chain | MT-09's approval outstanding, queued on a live weekly contract | Approve in the Action Center; wait 10 seconds; `strike-desk approvals --json` | An `approved` row with your username in `approved_by`, an IST `resolved_at_ist`, a `wait_seconds` matching the clock, and one order entry with a `broker_order_id` and a status; a second poll adds nothing | AC-6, AC-12 |
+| **MT-13** | Rejection keeps the reason | A freshly queued intent | Reject in the Action Center; wait 10 seconds; `strike-desk approvals`. OpenAlgo's React Action Center has no reason box — its reject button always sends the fixed string `Rejected by user` (`frontend/src/pages/ActionCenter.tsx`). To check that a custom reason survives, reject through the web route instead from a logged-in browser session: `POST /action-center/reject/<pending_order_id>` with body `{"reason": "strike too far OTM"}` | A `rejected` row whose detail contains the reason OpenAlgo stored verbatim — `Rejected by user` from the button, `strike too far OTM` from the route — and no order rows for that approval | AC-7 |
 | **MT-14** | An unanswered intent expires | A freshly queued intent, `STRIKE_DESK_APPROVAL_DEADLINE_SECONDS=60` | Do nothing for 70 seconds; read the log and `strike-desk approvals` | An `expired` row with `withdrawal: not-queued`, and one CRITICAL log line naming the pending order id to reject by hand | AC-8 |
 | **MT-15** | A late click is caught and cancelled | MT-14's pending order still queued in the Action Center | Approve it now; wait 10 seconds | A second terminal row at `late-approval` marked `defect`, `withdrawal: permitted` (analyze mode allows the cancel), a CRITICAL log line, and an order row showing the cancellation | AC-9, AC-11 |
 | **MT-16** | The order is followed to its end | A freshly queued intent, approved promptly | Wait for the sandbox to fill it, then `strike-desk approvals --json` | Two order entries for the approval — `open` then `complete` with an `average_price` — and no duplicate at either status | AC-6, AC-11 |
 | **MT-17** | An unfilled order is withdrawn | An intent queued with a limit price away from the market, `STRIKE_DESK_FILL_DEADLINE_SECONDS=60` | Approve it and wait 70 seconds | A WARNING naming the age, a cancel attempt, and a final order row at `cancelled` | AC-6 |
-| **MT-18** | The gate is refused in auto mode | Switch the API key to **auto** at `/apikey` | Force a tick | The tick declines at `plan` with `approval-gate-unavailable`; no regime read, no proposal, no `placeorder` call in OpenAlgo's traffic log; `strike-desk declines` exits 2 | AC-2 |
-| **MT-19** | A bypass stops the desk | Copy the OpenAlgo database (`sqlite3 db/openalgo.db ".backup '/tmp/stale.db'"`), point `STRIKE_DESK_OPENALGO_DB_PATH` at the copy, then switch the live key at `/apikey` to **auto**. The preflight now reads a stale `semi_auto` while the real placement goes straight through | Queue one intent | A `gate-bypassed` approval row marked `defect`, the kill switch file written, a CRITICAL log line naming the tick, and every subsequent tick skipped by the session gate. Delete the order in OpenAlgo, `strike-desk resume`, and put the path back | AC-3 |
+| **MT-18** | The gate is refused in auto mode | The book is flat (close any sandbox position MT-16 left, or the tick holds `position-open` before it reaches the gate check); switch the API key to **auto** at `/apikey` | Force a tick | The tick declines at `plan` with `approval-gate-unavailable`; no regime read, no proposal, no `placeorder` call in OpenAlgo's traffic log; `strike-desk declines` exits 2 | AC-2 |
+| **MT-19** | A bypass stops the desk | Copy the OpenAlgo database (`sqlite3 db/openalgo.db ".backup '/tmp/stale.db'"`), point `STRIKE_DESK_OPENALGO_DB_PATH` at the copy, then switch the live key at `/apikey` to **auto**. The preflight now reads a stale `semi_auto` while the real placement goes straight through | Queue one intent | A `gate-bypassed` approval row marked `defect`, the kill switch file written, a CRITICAL log line naming the tick, and every subsequent tick skipped by the session gate. With analyze mode on, the response that trips this carries `mode = analyze` and an `orderid`, not `mode = auto` — the bypass check keys on the missing `pending_order_id`, so the mode string is incidental. Delete the order in OpenAlgo, `strike-desk resume`, and put the path back | AC-3 |
 | **MT-26** | A stale queue is loud, not quiet | An approval outstanding, `STRIKE_DESK_APPROVAL_DEADLINE_SECONDS=60`; make the queue unreadable with `chmod 000` on the copy the mirror reads | Wait 70 seconds, then read the log, force a tick, and run `strike-desk declines` | A CRITICAL `APPROVAL QUEUE UNREADABLE` line every poll; the tick holds with `approval-queue-stale`, not `approval-pending`; `strike-desk declines` exits 2. Restore the permissions and the next poll settles it normally | AC-13 |
 | **MT-20** | The kill switch reaches the queue | A freshly queued intent outstanding | `strike-desk kill --reason "manual test"`; wait 10 seconds | The approval settles `expired` with the detail naming the kill switch, within one poll | AC-14 |
 | **MT-21** | A restart settles what it left | A freshly queued intent outstanding | Stop the service; approve in the Action Center; start the service; wait 10 seconds | One `approved` row and one order row — settled exactly once, with no duplicate and no error in the log | AC-14 |
-| **MT-22** | The trace carries the hop | MT-12 done | `sqlite3 $STRIKE_DESK_STATE_DIR/strike_desk.db "SELECT name, attributes_json FROM traces WHERE name IN ('tick.submit','strike_desk.approval','tick.settle');"` | `tick.submit` carries the approval id, pending order id, quantity and limit price; `strike_desk.approval` carries the status and wait; `tick.settle` carries `strike_desk.tick_trace_id` | AC-15 |
+| **MT-22** | The trace carries the hop | MT-12 done | `sqlite3 $STRIKE_DESK_STATE_DIR/strike_desk.db "SELECT name, attributes_json FROM traces WHERE name IN ('tick.submit','strike_desk.approval','tick.settle');"` | `tick.submit` carries the approval id, pending order id, quantity and limit price; `strike_desk.approval` carries the status and wait; `tick.settle` carries `strike_desk.tick_trace_id`. A local desk with no Anthropic key reaches this through the fixture's canned contract, so the specialist spans are stubs; the gate, the queue and the graph resume are real, and MT-24 on the host is where the whole chain runs with real specialists | AC-15 |
 
 ## Block C — on the trading host
 
