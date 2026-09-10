@@ -1,0 +1,9 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+import uuid
+
+from langgraph.types import interrupt
+
+from .approval_gate import ApprovalGate, Resolution, SubmitResult, TickContext, settle_approval
+from .config import IST
+from .journal import APPROVAL_PENDING, APPROVAL_SUBMIT_FAILED

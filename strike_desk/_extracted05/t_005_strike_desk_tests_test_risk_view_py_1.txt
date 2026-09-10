@@ -1,0 +1,42 @@
+FILE: strike_desk/tests/test_risk_view.py
+
+#: Every code dt-1 and dt-2 shipped, with the class it shipped with. These may never change.
+FROZEN_CLASSES = {
+    "position-open": ("book", "routine"),
+    "data-quality": ("data", "degraded"),
+    "specialist-unavailable": ("specialist", "degraded"),
+    "specialist-timeout": ("specialist", "degraded"),
+    "regime-not-tradeable": ("regime", "routine"),
+    "regime-low-confidence": ("regime", "routine"),
+    "regime-ungrounded": ("regime", "defect"),
+    "tick-timeout": ("system", "degraded"),
+    "internal-error": ("system", "defect"),
+    "no-viable-contract": ("contract", "routine"),
+    "proposal-ungrounded": ("contract", "defect"),
+    "proposal-invalid": ("contract", "defect"),
+}
+
+
+@pytest.mark.parametrize(("code", "expected"), sorted(FROZEN_CLASSES.items()))
+def test_the_taxonomy_is_additive(code: str, expected: tuple[str, str]) -> None:
+    """An older row must never become taxonomy drift because we shipped dt-3."""
+    assert (describe(code).category, describe(code).disposition) == expected
+
+
+def test_the_outcome_set_gained_enter_and_nothing_else() -> None:
+    assert OUTCOMES == {"decline", "hold", "enter"}
+    assert describe("risk-cleared").outcome == "enter"
+    assert {entry.outcome for entry in REASONS.values() if entry.code != "risk-cleared"} == {
+        "decline",
+        "hold",
+    }
+
+
+def test_an_entry_never_flips_the_exit_code(journal) -> None:
+    """AC-10. A cleared intent is routine; only defects change what `declines` returns."""
+    seed_decision(journal, trading_day="2026-09-01", outcome="enter", reason_code="risk-cleared")
+    report = build_day_report(journal, "2026-09-01", "NIFTY")
+    assert (report.entries, report.declines, report.defects) == (1, 0, 0)
+    assert report.healthy is True
+    assert report.drift == 0
+    assert "entries" in render_window(build_window_report(journal, "NIFTY", ["2026-09-01"]))

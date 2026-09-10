@@ -1,0 +1,22 @@
+FILE: strike_desk/tests/test_risk_view.py
+
+def test_a_v4_journal_gains_the_table_in_place(tmp_path, v4_journal_bytes) -> None:
+    path = tmp_path / "strike_desk.db"
+    path.write_bytes(v4_journal_bytes)
+    before = _table_names(path), _row_count(path, "decisions"), _row_count(path, "proposals")
+
+    journal = Journal(path)
+    try:
+        journal.create_schema()
+        journal.create_schema()  # idempotent
+    finally:
+        journal.close()
+
+    after = _table_names(path), _row_count(path, "decisions"), _row_count(path, "proposals")
+    assert "risk_verdicts" not in before[0] and "risk_verdicts" in after[0]
+    assert before[1:] == after[1:]  # not one row read or rewritten
+    assert _triggers_for(path, "risk_verdicts") == {
+        "risk_verdicts_no_update",
+        "risk_verdicts_no_delete",
+    }
+    assert _pragma_user_columns(path, "proposals") == _pragma_user_columns_v4()

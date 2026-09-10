@@ -1,0 +1,9 @@
+FILE: strike_desk/src/strike_desk/session.py
+
+def engage_kill_switch(settings: Settings, reason: str) -> None:
+    """Write the kill switch file. Every subsequent gate evaluation blocks the tick."""
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    settings.kill_switch_path.write_text(
+        f"{datetime.now(tz=UTC).isoformat()} {reason}", encoding="utf-8"
+    )
+    logger.critical("kill switch engaged: %s", reason)

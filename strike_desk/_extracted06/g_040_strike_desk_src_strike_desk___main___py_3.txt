@@ -1,0 +1,11 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+        print(f"execution        : {'ENABLED' if settings.execution_enabled else 'disabled'}")
+        if settings.execution_enabled:
+            mirror = OpenAlgoMirror(settings)
+            try:
+                health = mirror.health()
+            finally:
+                mirror.close()
+            print(f"approval gate    : {'ok' if health.ok else 'UNUSABLE'} — {health.detail}")
+            print(f"outstanding      : {len(journal.open_approvals())}")

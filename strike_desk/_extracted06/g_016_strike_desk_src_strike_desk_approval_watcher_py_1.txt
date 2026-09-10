@@ -1,0 +1,5 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+REASON_APPROVAL_PENDING = "approval-pending"
+REASON_APPROVAL_QUEUE_STALE = "approval-queue-stale"
+REASON_APPROVAL_GATE_UNAVAILABLE = "approval-gate-unavailable"

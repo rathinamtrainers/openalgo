@@ -1,0 +1,6 @@
+FILE: strike_desk/.env.example
+
+uv run strike-desk run &
+kill -USR1 $(cat "$STRIKE_DESK_STATE_DIR/strike-desk.pid")
+uv run strike-desk journal        # the enter decision
+uv run strike-desk approvals      # the queued intent and the case behind it

@@ -1,0 +1,75 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    risk = state.get("risk")
+    if risk is None:
+        return (
+            OUTCOME_DECLINE,
+            REASON_SPECIALIST_UNAVAILABLE,
+            render(
+                REASON_SPECIALIST_UNAVAILABLE,
+                max_chars=cap,
+                variant="no_risk",
+                symbol=str(proposal.get("symbol", "a contract")),
+                entry=f"{float(proposal.get('entry_price_high') or 0.0):.2f}",
+                role=ROLE_RISK,
+            ),
+        )
+
+    tripped = risk.get("tripped") or {}
+    limit = str(tripped.get("limit", "a limit"))
+    configured = _money(tripped.get("configured"), tripped.get("unit"))
+    observed = _money(tripped.get("observed"), tripped.get("unit"))
+    symbol = str(proposal.get("symbol", "the contract"))
+
+    if risk["verdict"] == VERDICT_HOLD:
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_INPUT_UNAVAILABLE,
+            render(
+                REASON_RISK_INPUT_UNAVAILABLE,
+                max_chars=cap,
+                limit=limit,
+                detail=str(risk.get("detail", "")),
+            ),
+        )
+    if risk["verdict"] == VERDICT_VETO:
+        variant = "default"
+        if risk.get("lots_requested") and risk.get("lots_cleared") == 0:
+            variant = "sized_out" if limit in SIZEABLE_LIMITS else "default"
+        if "no longer passes the playbook" in str(risk.get("detail", "")):
+            variant = "playbook_disagreed"
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_VETO,
+            render(
+                REASON_RISK_VETO,
+                max_chars=cap,
+                variant=variant,
+                symbol=symbol,
+                limit=limit,
+                configured=configured,
+                observed=observed,
+                lots=risk.get("lots_cleared", 0),
+                detail=str(risk.get("detail", "")),
+            ),
+        )
+
+    reduced = risk["verdict"] == VERDICT_REDUCE
+    return (
+        OUTCOME_ENTER,
+        REASON_RISK_CLEARED,
+        render(
+            REASON_RISK_CLEARED,
+            max_chars=cap,
+            variant="reduced" if reduced else "default",
+            symbol=symbol,
+            lots=risk.get("lots_cleared", 0),
+            requested=risk.get("lots_requested", 0),
+            entry=f"{float(proposal.get('entry_price_high') or 0.0):.2f}",
+            stop=f"{float(proposal.get('stop_price') or 0.0):.2f}",
+            risk=f"Rs {float(risk.get('max_loss_at_stop') or 0.0):,.0f}",
+            base=f"Rs {float(risk.get('capital_base') or 0.0):,.0f}",
+            limit=limit,
+            configured=configured,
+        ),
+    )

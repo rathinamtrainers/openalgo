@@ -1,0 +1,6 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+REASON_RISK_SESSION_STOPPED = "risk-session-stopped"
+REASON_RISK_INPUT_UNAVAILABLE = "risk-input-unavailable"
+REASON_RISK_VETO = "risk-veto"
+REASON_RISK_CLEARED = "risk-cleared"

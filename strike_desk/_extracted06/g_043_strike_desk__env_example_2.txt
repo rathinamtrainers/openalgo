@@ -1,0 +1,6 @@
+FILE: strike_desk/.env.example
+
+export STRIKE_DESK_EXECUTION_ENABLED=true
+export STRIKE_DESK_OPENALGO_USER=<your OpenAlgo username>
+export STRIKE_DESK_OPENALGO_DB_PATH=$(pwd)/../db/openalgo.db
+uv run strike-desk status

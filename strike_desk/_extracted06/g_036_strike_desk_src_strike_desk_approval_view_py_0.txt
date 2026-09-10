@@ -1,0 +1,111 @@
+FILE: strike_desk/src/strike_desk/approval_view.py
+
+"""One approval, rendered for a human or for a script."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+from .config import IST
+from .journal import APPROVAL_PENDING, ApprovalRow, Journal, OrderRow
+
+
+def as_dict(row: ApprovalRow, orders: list[OrderRow]) -> dict[str, Any]:
+    """Everything one approval state holds, in the shape --json prints."""
+    return {
+        "approval_id": row.approval_id,
+        "status": row.status,
+        "tick_id": row.tick_id,
+        "trace_id": row.trace_id,
+        "tick_trace_id": row.tick_trace_id,
+        "proposal_id": row.proposal_id,
+        "verdict_id": row.verdict_id,
+        "created_at_utc": row.created_at_utc.isoformat(),
+        "trading_day": row.trading_day,
+        "symbol": row.symbol,
+        "exchange": row.exchange,
+        "action": row.action,
+        "product": row.product,
+        "lots": row.lots,
+        "lot_size": row.lot_size,
+        "quantity": row.quantity,
+        "limit_price": row.limit_price,
+        "band": [row.band_low, row.band_high],
+        "pending_order_id": row.pending_order_id,
+        "strategy_tag": row.strategy_tag,
+        "deadline_utc": row.deadline_utc.isoformat(),
+        "wait_seconds": row.wait_seconds,
+        "approved_by": row.approved_by,
+        "resolved_at_ist": row.resolved_at_ist,
+        "broker_order_id": row.broker_order_id,
+        "withdrawal": row.withdrawal,
+        "detail": row.detail,
+        "defect": bool(row.defect),
+        "orders": [
+            {
+                "order_id": order.order_id,
+                "broker_order_id": order.broker_order_id,
+                "order_status": order.order_status,
+                "average_price": order.average_price,
+                "quantity": order.quantity,
+                "created_at_utc": order.created_at_utc.isoformat(),
+            }
+            for order in orders
+        ],
+    }
+
+
+def _ist(moment: datetime) -> str:
+    aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+    return aware.astimezone(IST).strftime("%H:%M:%S")
+
+
+def render(row: ApprovalRow, orders: list[OrderRow], journal: Journal) -> str:
+    """One approval as a block of text, with the case behind it when it is still pending."""
+    lines = [
+        f"{_ist(row.created_at_utc)}  {row.status:<16} {row.symbol} "
+        f"{row.action} {row.quantity} @ {row.limit_price:.2f} LIMIT ({row.lots} lot(s))",
+        f"    band {row.band_low:.2f}-{row.band_high:.2f}  "
+        f"pending order {row.pending_order_id}  tag {row.strategy_tag}",
+        f"    {row.detail}",
+    ]
+    if row.status == APPROVAL_PENDING:
+        lines.append(f"    deadline {_ist(row.deadline_utc)} IST")
+        if row.verdict_id:
+            verdict = journal.risk_verdict(row.verdict_id)
+            if verdict is not None:
+                lines.append(
+                    f"    risk    : {verdict.verdict} at {verdict.lots_cleared} lot(s), "
+                    f"risking Rs {verdict.max_loss_at_stop:,.0f} of a "
+                    f"Rs {verdict.capital_base:,.0f} base"
+                )
+        read = journal.regime_read_for_tick(row.tick_id)
+        if read is not None and read.label:
+            lines.append(f"    regime  : {read.label} at {read.confidence:.2f} — {read.rationale}")
+        if row.proposal_id:
+            proposal = journal.proposal(row.proposal_id)
+            if proposal is not None:
+                lines.append(
+                    f"    levels  : stop {proposal.stop_price} target {proposal.target_price} "
+                    f"time-stop {proposal.time_stop_ist} IST"
+                )
+                lines.append(f"    case    : {proposal.rationale}")
+    else:
+        lines.append(
+            f"    waited {row.wait_seconds:.0f}s"
+            + (f", approved by {row.approved_by}" if row.approved_by else "")
+            + (f", withdrawal {row.withdrawal}" if row.withdrawal else "")
+        )
+    for order in orders:
+        average = f" at {order.average_price:.2f}" if order.average_price else ""
+        lines.append(
+            f"    order   : {order.broker_order_id} {order.order_status}{average} "
+            f"({_ist(order.created_at_utc)} IST)"
+        )
+    return "\n".join(lines)
+
+
+def to_json(rows: list[tuple[ApprovalRow, list[OrderRow]]]) -> str:
+    return json.dumps([as_dict(row, orders) for row, orders in rows], indent=2, sort_keys=True)

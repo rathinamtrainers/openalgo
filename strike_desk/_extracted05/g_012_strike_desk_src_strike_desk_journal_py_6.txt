@@ -1,0 +1,5 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    proposal_id: str | None
+    session_stop: dict[str, Any] | None
+    risk: dict[str, Any] | None

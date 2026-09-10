@@ -1,0 +1,120 @@
+FILE: strike_desk/tests/test_execution_client.py
+
+"""Three paths, one validation pass, and the rule that a placement is never retried."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from strike_desk.errors import ExecutionPathViolation, InvalidOrderPayload, OpenAlgoError
+
+PAYLOAD = {
+    "strategy": "strike-desk:abcd1234",
+    "symbol": "NIFTY02SEP2624500CE",
+    "exchange": "NFO",
+    "action": "BUY",
+    "quantity": 150,
+    "pricetype": "LIMIT",
+    "product": "MIS",
+    "price": 192.0,
+}
+
+
+def test_only_three_paths_are_reachable(execution_client):
+    """AC-5: refused before a socket is opened, so no route needs to be mocked."""
+    for path in ("/api/v1/closeposition", "/api/v1/positionbook", "/api/v1/modifyorder"):
+        with pytest.raises(ExecutionPathViolation):
+            execution_client._request(path, {}, retries=0)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"action": "SHORT"},
+        {"quantity": 0},
+        {"quantity": 1.5},
+        {"product": "BO"},
+        {"pricetype": "GTT"},
+        {"price": 0.0},
+        {"symbol": "  "},
+    ],
+)
+def test_a_malformed_payload_never_leaves(execution_client, openalgo, mutation):
+    with pytest.raises(InvalidOrderPayload):
+        execution_client.place_order({**PAYLOAD, **mutation})
+    assert not any(call.request.url.path == "/api/v1/placeorder" for call in openalgo.calls)
+
+
+def test_a_queued_placement_is_a_receipt(execution_client, openalgo):
+    openalgo.post("/api/v1/placeorder").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "mode": "semi_auto",
+                "pending_order_id": 41,
+                "message": "Order queued for approval in Action Center",
+            },
+        )
+    )
+    receipt = execution_client.place_order(PAYLOAD)
+    assert receipt.queued is True
+    assert receipt.pending_order_id == 41
+    assert receipt.broker_order_id is None
+
+
+def test_a_placement_that_reached_the_broker_is_not_queued(execution_client, openalgo):
+    """AC-3: the client classifies it; the gate is what stops the desk."""
+    openalgo.post("/api/v1/placeorder").mock(
+        return_value=httpx.Response(200, json={"status": "success", "orderid": "24090100000041"})
+    )
+    receipt = execution_client.place_order(PAYLOAD)
+    assert receipt.queued is False
+    assert receipt.pending_order_id is None
+    assert receipt.broker_order_id == "24090100000041"
+
+
+def test_a_placement_is_never_retried(execution_client, openalgo):
+    """A repeat POST is a second order, so a 503 fails rather than retries."""
+    route = openalgo.post("/api/v1/placeorder").mock(return_value=httpx.Response(503, json={}))
+    with pytest.raises(OpenAlgoError):
+        execution_client.place_order(PAYLOAD)
+    assert route.call_count == 1
+
+
+def test_order_status_returns_the_normalised_order(execution_client, openalgo):
+    openalgo.post("/api/v1/orderstatus").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"orderid": "1", "order_status": "complete", "average_price": 191.85},
+            },
+        )
+    )
+    data = execution_client.order_status("1", "strike-desk:abcd1234")
+    assert data["order_status"] == "complete" and data["average_price"] == 191.85
+
+
+def test_a_refused_cancel_is_an_answer_not_an_exception(execution_client, openalgo):
+    """OpenAlgo blocks cancelorder for a semi-auto API key; that is policy, not a fault."""
+    openalgo.post("/api/v1/cancelorder").mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "status": "error",
+                "message": "Cancel order operation is not allowed in Semi-Auto mode.",
+            },
+        )
+    )
+    permitted, detail = execution_client.cancel_order("1", "strike-desk:abcd1234")
+    assert permitted is False and "Semi-Auto" in detail
+
+
+def test_a_permitted_cancel_says_so(execution_client, openalgo):
+    openalgo.post("/api/v1/cancelorder").mock(
+        return_value=httpx.Response(200, json={"status": "success", "orderid": "1"})
+    )
+    permitted, detail = execution_client.cancel_order("1", "strike-desk:abcd1234")
+    assert permitted is True and "cancelled" in detail

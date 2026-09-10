@@ -1,0 +1,42 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+def _add_risk_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser("risk", help="list every risk adjudication")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--day", help="one IST trading day, YYYY-MM-DD")
+    group.add_argument(
+        "--since", nargs="?", type=int, const=-1, help="the most recent N journalled days"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON instead of text")
+
+
+def _cmd_risk(settings: Settings, args: Any) -> int:
+    try:
+        days = _resolve_days(args, settings)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        if days is None:
+            days = journal.recent_risk_days(settings.report_default_days)
+        rows = [row for day in days for row in journal.list_risk_verdicts(day)]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "limits": RiskLimits.from_settings(settings).artifact,
+                        "days": days,
+                        "verdicts": [risk_as_dict(row) for row in rows],
+                    },
+                    indent=2,
+                    default=str,
+                )
+            )
+        else:
+            print(risk_render(rows, days=days))
+    finally:
+        journal.close()
+    return 0

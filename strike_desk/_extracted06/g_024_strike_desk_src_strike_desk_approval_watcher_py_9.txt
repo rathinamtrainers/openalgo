@@ -1,0 +1,67 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+    def route_after_persist(state: TickState) -> str:
+        if state.get("outcome") != OUTCOME_ENTER:
+            return "end"
+        return "submit" if deps.settings.execution_enabled and deps.gate else "end"
+
+    def submit(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.submit") as span:
+            context = TickContext(
+                tick_id=state["tick_id"],
+                trace_id=state["trace_id"],
+                trading_day=state["trading_day"],
+                proposal=dict(state.get("proposal") or {}),
+                risk=dict(state.get("risk") or {}),
+                proposal_id=state.get("proposal_id"),
+                verdict_id=state.get("verdict_id"),
+            )
+            try:
+                result = deps.gate.submit(context)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 — see the note below this block
+                detail = f"the submission raised {type(exc).__name__}: {exc}"
+                logger.exception("tick %s could not be submitted", state["tick_id"])
+                span.set_status(Status(StatusCode.ERROR, "submit raised"))
+                result = deps.gate.record_failure(context, detail)  # type: ignore[union-attr]
+            span.set_attribute("approval.id", result.approval_id)
+            span.set_attribute("approval.status", result.status)
+            span.set_attribute("approval.pending_order_id", result.pending_order_id or 0)
+            span.set_attribute("approval.quantity", result.quantity)
+            span.set_attribute("approval.limit_price", result.limit_price)
+            span.set_attribute("approval.symbol", result.symbol)
+            if result.status != APPROVAL_PENDING:
+                span.set_status(Status(StatusCode.ERROR, result.status))
+                logger.warning(
+                    "tick %s did not reach the approval queue: %s (%s)",
+                    state["tick_id"],
+                    result.status,
+                    result.detail,
+                )
+            return {"approval": result.as_dict()}
+
+    def route_after_submit(state: TickState) -> str:
+        approval = state.get("approval") or {}
+        return "await" if approval.get("status") == APPROVAL_PENDING else "end"
+
+    def await_approval(state: TickState) -> dict[str, Any]:
+        # Nothing may precede this call: a resume re-runs the node from its first line.
+        approval = state.get("approval") or {}
+        resolution = interrupt(
+            {
+                "approval_id": approval.get("approval_id"),
+                "pending_order_id": approval.get("pending_order_id"),
+                "deadline_seconds": deps.settings.approval_deadline_seconds,
+            }
+        )
+        return {"resolution": dict(resolution or {})}
+
+    def settle(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.settle") as span:
+            resolution = Resolution.from_dict(dict(state.get("resolution") or {}))
+            trace_id = format(span.get_span_context().trace_id, "032x")
+            span.set_attribute("approval.id", resolution.approval_id)
+            span.set_attribute("approval.status", resolution.status)
+            span.set_attribute("strike_desk.tick_trace_id", state["trace_id"])
+            written = settle_approval(deps.journal, resolution, trace_id)
+            span.set_attribute("approval.settled", written)
+            return {}

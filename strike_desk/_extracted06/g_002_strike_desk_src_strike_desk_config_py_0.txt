@@ -1,0 +1,12 @@
+FILE: strike_desk/src/strike_desk/config.py
+
+    # --- Execution and the approval gate ------------------------------------
+    execution_enabled: bool = False
+    openalgo_user: str | None = None
+    openalgo_db_path: Path = Path("/opt/openalgo/db/openalgo.db")
+    order_product: str = "MIS"
+    order_strategy_prefix: str = "strike-desk"
+    price_tick: float = Field(default=0.05, gt=0, le=100)
+    approval_deadline_seconds: int = Field(default=300, ge=30, le=1800)
+    approval_poll_seconds: int = Field(default=5, ge=1, le=60)
+    fill_deadline_seconds: int = Field(default=300, ge=30, le=3600)

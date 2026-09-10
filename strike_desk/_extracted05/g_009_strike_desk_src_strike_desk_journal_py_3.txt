@@ -1,0 +1,4 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+        f"  {'day':<12}{'total':>6}{'declines':>10}{'holds':>7}{'entries':>9}"
+        f"{'defects':>9}{'cost':>10}",

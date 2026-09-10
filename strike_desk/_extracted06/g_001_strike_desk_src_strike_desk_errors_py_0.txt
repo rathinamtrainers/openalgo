@@ -1,0 +1,28 @@
+FILE: strike_desk/src/strike_desk/errors.py
+
+class MirrorUnavailable(StrikeDeskError):
+    """OpenAlgo's own database could not be read, so the approval gate is unverifiable."""
+
+
+class ExecutionPathViolation(StrikeDeskError):
+    """Execution code attempted a path outside the execution whitelist."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"path {path!r} is not in the execution whitelist")
+        self.path = path
+
+
+class InvalidOrderPayload(StrikeDeskError):
+    """An order payload failed its own validation and was never sent."""
+
+
+class UnpriceableBand(StrikeDeskError):
+    """The entry band contains no price on the exchange's tick grid."""
+
+
+class ApprovalGateBypassed(StrikeDeskError):
+    """A placement was accepted without the human gate — the desk must stop."""
+
+
+class AlreadyJournalled(StrikeDeskError):
+    """This exact append-only row already exists; the write was a repeat, not a failure."""

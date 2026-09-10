@@ -1,0 +1,7 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+    verdict_id: str | None
+    approval_pending: dict[str, Any] | None
+    gate_unavailable: str | None
+    approval: dict[str, Any] | None
+    resolution: dict[str, Any] | None

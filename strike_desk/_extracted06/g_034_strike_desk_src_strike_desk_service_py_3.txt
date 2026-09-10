@@ -1,0 +1,8 @@
+FILE: strike_desk/src/strike_desk/service.py
+
+    def _poll_approvals(self) -> None:
+        """Never let one bad poll kill the scheduler thread."""
+        try:
+            self._watcher.poll_once()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            logger.exception("approval watch failed")

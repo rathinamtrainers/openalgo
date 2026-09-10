@@ -1,0 +1,7 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+    handlers = {
+        ...
+        "proposals": _cmd_proposals,
+        "risk": _cmd_risk,
+    }

@@ -1,0 +1,16 @@
+FILE: .github/workflows/strike-desk-ci.yml
+
+      - name: Structural gates
+        working-directory: strike_desk
+        run: |
+          uv run pytest \
+            tests/test_decline_taxonomy.py \
+            tests/test_journal_migration.py \
+            tests/test_playbook.py \
+            tests/test_risk_officer.py \
+            tests/test_risk_scenarios.py \
+            tests/test_options_strategist.py::test_every_whitelisted_tool_is_a_reader \
+            tests/test_options_strategist.py::test_no_whitelist_holds_a_mutating_tool \
+            tests/test_tick_adjudication.py::test_enter_requires_a_cleared_verdict \
+            tests/test_tick_adjudication.py::test_no_write_path_is_ever_touched \
+            -q

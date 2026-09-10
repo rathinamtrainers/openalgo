@@ -1,0 +1,97 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    def record_approval(self, **fields: Any) -> str:
+        """Append one approval state. Raises AlreadyJournalled when that state already exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(ApprovalRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"approval {fields.get('approval_id')} is already at status "
+                f"{fields.get('status')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(f"could not append approval: {exc.__class__.__name__}") from exc
+        return str(fields["approval_id"])
+
+    def record_order(self, **fields: Any) -> str:
+        """Append one order state. Raises AlreadyJournalled when that state already exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(OrderRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"order for approval {fields.get('approval_id')} is already at status "
+                f"{fields.get('order_status')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(f"could not append order: {exc.__class__.__name__}") from exc
+        return str(fields["order_id"])
+
+    def approval_row(self, approval_id: str, status: str) -> ApprovalRow | None:
+        with self.session_scope() as session:
+            statement = select(ApprovalRow).where(
+                ApprovalRow.approval_id == approval_id, ApprovalRow.status == status
+            )
+            return session.execute(statement).scalars().first()
+
+    def open_approvals(self) -> Sequence[ApprovalRow]:
+        """Pending approvals with no terminal row yet, oldest first."""
+        with self.session_scope() as session:
+            settled = select(ApprovalRow.approval_id).where(ApprovalRow.status != APPROVAL_PENDING)
+            statement = (
+                select(ApprovalRow)
+                .where(
+                    ApprovalRow.status == APPROVAL_PENDING,
+                    ApprovalRow.approval_id.not_in(settled),
+                )
+                .order_by(ApprovalRow.created_at_utc.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def expired_awaiting_late_check(self, trading_day: str) -> Sequence[ApprovalRow]:
+        """Expired approvals whose queued order was never withdrawn and may still be clicked."""
+        with self.session_scope() as session:
+            already_late = select(ApprovalRow.approval_id).where(
+                ApprovalRow.status == APPROVAL_LATE
+            )
+            statement = select(ApprovalRow).where(
+                ApprovalRow.trading_day == trading_day,
+                ApprovalRow.status == APPROVAL_EXPIRED,
+                ApprovalRow.pending_order_id.is_not(None),
+                ApprovalRow.approval_id.not_in(already_late),
+            )
+            return list(session.execute(statement).scalars())
+
+    def watchable_orders(self, trading_day: str) -> Sequence[OrderRow]:
+        """The latest order row per approval today, where the order has not finished."""
+        with self.session_scope() as session:
+            latest = (
+                select(func.max(OrderRow.id))
+                .where(OrderRow.trading_day == trading_day)
+                .group_by(OrderRow.approval_id)
+                .scalar_subquery()
+            )
+            statement = select(OrderRow).where(
+                OrderRow.id.in_(latest), OrderRow.order_status.not_in(ORDER_TERMINAL)
+            )
+            return list(session.execute(statement).scalars())
+
+    def list_approvals(self, trading_day: str, limit: int = 100) -> Sequence[ApprovalRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(ApprovalRow)
+                .where(ApprovalRow.trading_day == trading_day)
+                .order_by(ApprovalRow.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def orders_for_approval(self, approval_id: str) -> Sequence[OrderRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(OrderRow)
+                .where(OrderRow.approval_id == approval_id)
+                .order_by(OrderRow.created_at_utc.asc())
+            )
+            return list(session.execute(statement).scalars())

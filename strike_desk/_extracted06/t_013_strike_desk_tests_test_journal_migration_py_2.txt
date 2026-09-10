@@ -1,0 +1,6 @@
+FILE: strike_desk/tests/test_journal_migration.py
+
+      - name: Guardrail and regression gate
+        run: |
+          uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py \
+                        tests/test_guardrails_execution.py tests/regression -q

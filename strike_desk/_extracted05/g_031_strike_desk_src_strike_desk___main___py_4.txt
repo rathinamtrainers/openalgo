@@ -1,0 +1,5 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+    limits = RiskLimits.from_settings(settings)
+    print(f"risk limits      : {limits.artifact}")
+    print(limits.describe())

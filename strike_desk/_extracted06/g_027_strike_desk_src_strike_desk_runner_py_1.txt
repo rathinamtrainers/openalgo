@@ -1,0 +1,16 @@
+FILE: strike_desk/src/strike_desk/runner.py
+
+    def resume_approval(self, tick_id: str, resolution: dict[str, Any]) -> bool:
+        """Wake a suspended tick so it settles its own approval. False when it could not."""
+        if not self._lock.acquire(timeout=2.0):
+            logger.info("approval resume for tick %s deferred: a tick is in flight", tick_id)
+            return False
+        try:
+            config = {"configurable": {"thread_id": tick_id}, "recursion_limit": 12}
+            self._graph.invoke(Command(resume=resolution), config)
+            return True
+        except Exception:  # noqa: BLE001 — the watcher falls back to settling directly
+            logger.exception("could not resume tick %s to settle its approval", tick_id)
+            return False
+        finally:
+            self._lock.release()

@@ -1,0 +1,4 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+from .risk_view import as_dict as risk_as_dict
+from .risk_view import render as risk_render

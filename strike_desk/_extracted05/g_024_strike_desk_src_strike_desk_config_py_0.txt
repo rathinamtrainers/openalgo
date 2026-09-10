@@ -1,0 +1,11 @@
+FILE: strike_desk/src/strike_desk/config.py
+
+    # --- Risk Officer (control plane) ---------------------------------------
+    risk_daily_loss_cap_pct: float = Field(default=2.0, gt=0.0, le=100.0)
+    risk_per_trade_loss_cap_pct: float = Field(default=0.5, gt=0.0, le=100.0)
+    risk_deployed_capital_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_per_index_exposure_pct: float = Field(default=10.0, gt=0.0, le=100.0)
+    risk_max_concurrent_positions: int = Field(default=1, ge=1, le=10)
+    risk_max_lots: int = Field(default=2, ge=1, le=20)
+    risk_max_trades_per_day: int = Field(default=3, ge=1, le=50)
+    risk_capital_floor: float = Field(default=50_000.0, ge=0.0, le=100_000_000.0)

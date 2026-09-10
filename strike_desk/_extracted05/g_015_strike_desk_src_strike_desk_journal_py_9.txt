@@ -1,0 +1,35 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+def _latch_session_stop(
+    deps: TickDeps, state: TickState, assessment: SessionAssessment, limits: RiskLimits
+) -> None:
+    """Write exactly one session-stop verdict for the day. The latch is a row, not a flag."""
+    verdict = held(
+        assessment.check.limit,
+        assessment.detail,
+        base=assessment.capital_base,
+    )
+    row = build_verdict_row(
+        verdict,
+        limits=limits,
+        tick_id=state["tick_id"],
+        trace_id=state["trace_id"],
+        trading_day=state["trading_day"],
+        index_symbol=deps.settings.index_symbol,
+        proposal_id=None,
+        symbol=None,
+        latency_us=0,
+    )
+    row.update(
+        {
+            "created_at_utc": datetime.now(tz=UTC),
+            "verdict": VERDICT_VETO,
+            "session_stop": True,
+            "tripped_limit": assessment.check.limit,
+            "configured_value": assessment.check.configured,
+            "observed_value": assessment.check.observed,
+            "limit_unit": assessment.check.unit,
+            "checks_json": json.dumps([assessment.check.as_dict()], sort_keys=True),
+        }
+    )
+    deps.journal.record_risk_verdict(**row)

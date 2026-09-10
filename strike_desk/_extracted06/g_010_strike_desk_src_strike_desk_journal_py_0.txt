@@ -1,0 +1,40 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+SCHEMA_VERSION = 6
+
+APPROVAL_PENDING = "pending"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_EXPIRED = "expired"
+APPROVAL_LATE = "late-approval"
+APPROVAL_WITHDRAWN = "withdrawn"
+APPROVAL_GATE_UNAVAILABLE = "gate-unavailable"
+APPROVAL_GATE_BYPASSED = "gate-bypassed"
+APPROVAL_SUBMIT_FAILED = "submit-failed"
+APPROVAL_UNPRICEABLE = "unpriceable-band"
+
+APPROVAL_TERMINAL = frozenset(
+    {
+        APPROVAL_APPROVED,
+        APPROVAL_REJECTED,
+        APPROVAL_EXPIRED,
+        APPROVAL_LATE,
+        APPROVAL_WITHDRAWN,
+        APPROVAL_GATE_UNAVAILABLE,
+        APPROVAL_GATE_BYPASSED,
+        APPROVAL_SUBMIT_FAILED,
+        APPROVAL_UNPRICEABLE,
+    }
+)
+#: Statuses that mean a human should go and look at something.
+APPROVAL_DEFECTS = frozenset(
+    {
+        APPROVAL_LATE,
+        APPROVAL_GATE_UNAVAILABLE,
+        APPROVAL_GATE_BYPASSED,
+        APPROVAL_SUBMIT_FAILED,
+        APPROVAL_UNPRICEABLE,
+    }
+)
+#: Order statuses OpenAlgo's normalised order book uses that need no further watching.
+ORDER_TERMINAL = frozenset({"complete", "rejected", "cancelled"})

@@ -1,0 +1,14 @@
+FILE: strike_desk/.env.example
+
+# --- Execution and the approval gate (iteration 06) ---
+# Off by default. Turn it on only after OpenAlgo's API key is in semi-auto order
+# mode at /apikey — with it in auto mode the desk refuses to submit anything.
+STRIKE_DESK_EXECUTION_ENABLED=false
+STRIKE_DESK_OPENALGO_USER=replace-me
+STRIKE_DESK_OPENALGO_DB_PATH=/opt/openalgo/db/openalgo.db
+STRIKE_DESK_ORDER_PRODUCT=MIS
+STRIKE_DESK_ORDER_STRATEGY_PREFIX=strike-desk
+STRIKE_DESK_PRICE_TICK=0.05
+STRIKE_DESK_APPROVAL_DEADLINE_SECONDS=300
+STRIKE_DESK_APPROVAL_POLL_SECONDS=5
+STRIKE_DESK_FILL_DEADLINE_SECONDS=300

@@ -1,0 +1,13 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+    builder.add_node("submit", submit)
+    builder.add_node("await_approval", await_approval)
+    builder.add_node("settle", settle)
+    builder.add_conditional_edges(
+        "persist", route_after_persist, {"submit": "submit", "end": END}
+    )
+    builder.add_conditional_edges(
+        "submit", route_after_submit, {"await": "await_approval", "end": END}
+    )
+    builder.add_edge("await_approval", "settle")
+    builder.add_edge("settle", END)

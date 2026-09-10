@@ -1,0 +1,25 @@
+FILE: strike_desk/src/strike_desk/decline_taxonomy.py
+
+TAXONOMY_VERSION = "dt-3"
+
+CATEGORY_BOOK = "book"
+CATEGORY_CONTRACT = "contract"
+CATEGORY_DATA = "data"
+CATEGORY_REGIME = "regime"
+CATEGORY_RISK = "risk"
+CATEGORY_SPECIALIST = "specialist"
+CATEGORY_SYSTEM = "system"
+CATEGORY_UNKNOWN = "unknown"
+CATEGORIES = frozenset(
+    {
+        CATEGORY_BOOK,
+        CATEGORY_CONTRACT,
+        CATEGORY_DATA,
+        CATEGORY_REGIME,
+        CATEGORY_RISK,
+        CATEGORY_SPECIALIST,
+        CATEGORY_SYSTEM,
+    }
+)
+
+OUTCOMES = frozenset({"decline", "hold", "enter"})

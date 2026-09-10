@@ -1,0 +1,57 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    def record_risk_verdict(self, **fields: Any) -> str:
+        """Append one verdict. Raises JournalWriteError so the tick fails closed."""
+        try:
+            with self.session_scope() as session:
+                session.add(RiskVerdictRow(**fields))
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(
+                f"could not append risk verdict: {exc.__class__.__name__}"
+            ) from exc
+        return str(fields["verdict_id"])
+
+    def list_risk_verdicts(self, trading_day: str, limit: int = 200) -> Sequence[RiskVerdictRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow)
+                .where(RiskVerdictRow.trading_day == trading_day)
+                .order_by(RiskVerdictRow.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def recent_risk_days(self, days: int) -> list[str]:
+        """The most recent trading days holding at least one verdict, oldest first."""
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow.trading_day)
+                .distinct()
+                .order_by(RiskVerdictRow.trading_day.desc())
+                .limit(days)
+            )
+            found = [str(row) for row in session.execute(statement).scalars()]
+        return sorted(found)
+
+    def session_stopped(self, trading_day: str) -> bool:
+        """True once a session-stop verdict has been latched for the day."""
+        with self.session_scope() as session:
+            statement = (
+                select(RiskVerdictRow.id)
+                .where(
+                    RiskVerdictRow.trading_day == trading_day,
+                    RiskVerdictRow.session_stop.is_(True),
+                )
+                .limit(1)
+            )
+            return session.execute(statement).first() is not None
+
+    def count_entries(self, trading_day: str) -> int:
+        """Entries journalled today — the observed value behind max-trades-per-day."""
+        with self.session_scope() as session:
+            statement = (
+                select(func.count())
+                .select_from(Decision)
+                .where(Decision.trading_day == trading_day, Decision.outcome == "enter")
+            )
+            return int(session.execute(statement).scalar_one())

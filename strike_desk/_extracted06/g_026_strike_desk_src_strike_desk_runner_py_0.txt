@@ -1,0 +1,5 @@
+FILE: strike_desk/src/strike_desk/runner.py
+
+            root.set_attribute("decision.outcome", str(final.get("outcome", "suspended")))
+            root.set_attribute("decision.reason_code", str(final.get("reason_code", "none")))
+            root.set_attribute("tick.suspended", "__interrupt__" in final)

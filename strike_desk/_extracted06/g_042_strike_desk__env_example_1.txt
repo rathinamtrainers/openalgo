@@ -1,0 +1,6 @@
+FILE: strike_desk/.env.example
+
+cd strike_desk
+uv sync
+uv run ruff check .
+uv run pytest -q

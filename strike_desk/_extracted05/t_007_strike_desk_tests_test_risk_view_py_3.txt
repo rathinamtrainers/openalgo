@@ -1,0 +1,9 @@
+FILE: strike_desk/tests/test_risk_view.py
+
+cd strike_desk
+
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest tests/ -q
+uv run pytest tests/ --cov=strike_desk --cov-report=term-missing --cov-fail-under=80
+uv run --group dev bandit -r src/ -q
