@@ -14,6 +14,7 @@ while you are watching it. Nothing in this document risks money.
 | **A — off-host** | The repo and `uv`. Nothing else. | Now. Any day, any hour. |
 | **B — a local OpenAlgo in analyze mode** | OpenAlgo running locally with a broker session, its key in semi-auto, analyze mode on, the WebSocket proxy up. | Market hours, so the feed carries ticks. |
 | **C — on the trading host** | A deployed release. | After §6 of the deployment guide. |
+| **D — unattended mode** | Everything Block B needs, plus the OpenAlgo key switched to **Auto** and `STRIKE_DESK_AUTONOMY=unattended`. Analyze mode stays **on**. | After Block B passes. Never on a live session from a laptop. |
 
 ## How to run these
 
@@ -74,7 +75,7 @@ uv run python -m tests.position_fixtures seed --stop-offset 2 --target-offset 40
 
 | ID | Title | Preconditions | Steps | Expected result | Covers |
 | --- | --- | --- | --- | --- | --- |
-| MT-10 | The feed delivers | OpenAlgo up, broker session live, market open | Run the `PriceFeed` snippet from §11 of the implementation guide against a liquid NIFTY weekly option | A `Tick` with a positive price and `source="websocket"` within two seconds; the log line `price feed subscribed to …` appears once. | AC-2, AC-12 |
+| MT-10 | The feed delivers | OpenAlgo up, broker session live, market open | Run the `PriceFeed` snippet from §12 of the implementation guide against a liquid NIFTY weekly option | A `Tick` with a positive price and `source="websocket"` within two seconds; the log line `price feed subscribed to …` appears once. | AC-2, AC-12 |
 | MT-11 | Adoption stamps the levels | Analyze mode on, seeded proposal, an approved sandbox order that filled | Watch the log; then `uv run python -m strike_desk position` | Within one poll of the fill: `managing N x SYMBOL at P — stop … target … time-stop …`. The view prints all three levels with live distances and a `websocket` feed source. | AC-1, AC-2, AC-14 |
 | MT-12 | Adoption uses the broker's quantity | As MT-11, with a partially filled sandbox order | Compare the `positions` row's `quantity` with the order's requested quantity and with `/api/v1/positionbook` | The row matches the position book, not the request. | AC-2 |
 | MT-13 | A stop fires and is recorded | As MT-11, seeded with a stop two rupees under the premium | Wait for the premium to trade through the stop | An `exits` row with `reason="stop"`, `path="closeposition"`, a `latency_ms` under 1500, the observed price and `feed_source="websocket"`; a `positions` row at `flat`; the sandbox position gone. | AC-3, AC-7, AC-10, AC-14 |
@@ -97,6 +98,37 @@ uv run python -m tests.position_fixtures seed --stop-offset 2 --target-offset 40
 | MT-25 | Auto mode also reopens it | Analyze mode off, key switched to Auto at `/apikey` | `strike-desk tick-now` | No `exit-path-gated` decline. Switch the key back to Semi-Auto immediately afterwards — auto mode removes the entry gate UC-06 depends on. | AC-9 |
 | MT-26 | The declines report counts it | After MT-23 | `strike-desk declines` | `exit-path-gated` appears with its count, category `system`, disposition `defect`, and the command exits 2. | AC-9, AC-14 |
 
+## Block D — unattended mode, no human in the loop
+
+These cover §9 of the use case and §11 of the implementation guide. **Run every one of them
+with OpenAlgo in analyze mode** unless the row says otherwise: unattended mode plus a live
+broker session plus Auto order mode is a desk that will place a real order without asking, and
+that combination belongs in Block E on the trading host, not on a laptop.
+
+Unattended is the **default** from this iteration on, so MT-27 onwards need no environment
+change — an unset `STRIKE_DESK_AUTONOMY` already runs unattended. Set it explicitly only for
+MT-29 and MT-39, which exercise the attended opt-out, and unset it again afterwards. The setting
+you must check before walking away is no longer the mode but the **order mode on the OpenAlgo
+key and analyze mode**, because those are now the only things standing between a default desk
+and a real order.
+
+| ID | Title | Preconditions | Steps | Expected result | Covers |
+| --- | --- | --- | --- | --- | --- |
+| MT-27 | Unattended is the default | Block A shell, no `STRIKE_DESK_AUTONOMY` set | `uv run python -c "from strike_desk.config import get_settings; s=get_settings(); print(s.autonomy, s.unattended)"` | `unattended True`. An `.env` that predates this iteration upgrades straight into autonomous operation — which is the point of the iteration, and why MT-27a exists next to it. | AC-22 |
+| MT-27a | An unmigrated key fails loudly, not quietly | Block A shell, no `STRIKE_DESK_AUTONOMY` set, OpenAlgo key still at **Semi-Auto** (an iteration-06 host as it stands today) | `strike-desk tick-now` | Declines with `autonomy-mode-mismatch` and spends no tokens. The upgraded desk neither enters unattended against a gated key nor silently falls back to waiting for a click — it stops until the operator moves the key to Auto. | AC-22, AC-16 |
+| MT-28 | The guards agree with the mirror | Block A shell | Call `autonomy.check_mode` with unattended settings and a fake mirror reporting `semi_auto`, then again reporting `auto` | First verdict `ok=False` with reason `autonomy-mode-mismatch` and a detail naming both modes; second `ok=True`. | AC-16 |
+| MT-29 | Attended refuses an auto key too | Block A shell | Same call, attended settings, mirror reporting `auto` | `ok=False`, reason `autonomy-mode-mismatch`. The check is symmetric — a desk that thinks it is gated and is not is the more dangerous of the two. | AC-16 |
+| MT-30 | The dead-man switch fires | Block A shell | `check_monitor` with unattended settings and (a) `monitor=None`, (b) a stub whose `is_alive()` is `False`, (c) a stub alive but with `heartbeat_utc` 90 seconds old | All three `ok=False`, reason `monitor-unavailable`, details naming the cause. A fresh heartbeat returns `ok=True`. | AC-18 |
+| MT-31 | An unattended entry needs no click | Analyze mode on, key at **Auto**, unattended, monitor running | `strike-desk tick-now` on a tick that clears the Risk Officer | A broker (sandbox) order id comes back in the same tick. No `pending_orders` row is created, the Action Center badge does not move, and the following `strike-desk tick-now` does **not** decline with `approval-pending`. | AC-15 |
+| MT-32 | The audit trail keeps its shape | After MT-31 | `strike-desk approvals` | The case prints exactly as an attended one does — contract, size, levels, regime read, rationale — with status `auto-approved`, approver `strike-desk` and no deadline. | AC-21 |
+| MT-33 | The unattended entry is loud | After MT-31 | `journalctl -u strike-desk -f` or the console, grepping `unattended entry` | One `WARNING` line carrying symbol, quantity, price and all three levels. This is the line the trader reads in the morning. | AC-21 |
+| MT-34 | Unattended fills flow straight to the monitor | MT-31's order filled | `strike-desk position` | Within one poll: `managing N x SYMBOL … stop … target … time-stop`, and the view's `autonomy:` line reads `unattended`. The whole path from tick to armed position ran with nobody clicking. | AC-15, AC-18 |
+| MT-35 | A queued response is a defect | Unattended, key switched back to **Semi-Auto** *without* restarting the desk, so the cached preflight is stale | Force a tick | Either the preflight catches it and declines with `autonomy-mode-mismatch`, or — if the switch landed between preflight and submit — the response check catches the `pending_order_id`, journals a defect, engages the kill switch and stops the desk. Both are passes; the failure would be an entry sitting silently in a queue. | AC-17 |
+| MT-36 | The loss cap stops the day | Unattended, `STRIKE_DESK_UNATTENDED_DAILY_LOSS_CAP=1` | Let one sandbox position exit at any realised loss, then force a tick | The tick declines with `daily-loss-cap`, the detail names the realised figure against the cap, and the kill switch file is present. `strike-desk declines` shows the reason with category `risk` and disposition `expected` — the command does **not** exit 2 for this one. | AC-19 |
+| MT-37 | The cap survives a restart | After MT-36, kill switch cleared | Restart the desk and force a tick | It declines with `daily-loss-cap` again. The figure comes from the journal, not from memory, so a restart is not a fresh start. | AC-19 |
+| MT-38 | The trade count caps the day | Unattended, `STRIKE_DESK_UNATTENDED_MAX_TRADES_PER_DAY=1`, one entry already taken today | Force a tick | Declines with `daily-trade-cap`, detail naming the count and the cap. | AC-20 |
+| MT-39 | The attended opt-out still works | `STRIKE_DESK_AUTONOMY=attended` set explicitly, key back at Semi-Auto | Re-run MT-11 from Block B end to end | Identical to before this section existed: the intent queues, the Action Center badge rises, the tick suspends, and nothing happens until you click. Then **unset** `STRIKE_DESK_AUTONOMY` again so the host is left on the default. | AC-21 |
+
 ## What non-determinism looks like here
 
 Nothing in this slice calls a model, so nothing in it is non-deterministic in the sense the
@@ -108,3 +140,11 @@ under 300 ms, but a first call after an idle period can be slower while the HTTP
 And the **feed's tick rate** depends on the symbol — a far out-of-the-money strike can go quiet
 for tens of seconds in a slow market, which is exactly the condition MT-17 exercises on purpose,
 so read `feed_source` before concluding the monitor stalled.
+
+A note on Block D. Unattended mode is the one part of this iteration where a mistake in the
+*test setup* costs money rather than a failed assertion: `autonomy=unattended` plus an Auto key
+plus analyze mode **off** is a desk that places real orders with nobody watching. Every Block D
+row above keeps analyze mode on for that reason. And because unattended is now the default, that
+mistake no longer needs a setting to be typed — it needs one to be *forgotten*. Before you stop
+paying attention to a host, confirm analyze mode is on, or that the Auto key and the two daily
+caps are the ones you meant to leave running.

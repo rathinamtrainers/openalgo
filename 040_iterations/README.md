@@ -19,7 +19,7 @@ explaining what the previous iteration left open and how this one closes it.
 | [04](iteration-04/01_use_case.md) | UC-04 — Propose a directional long | The Options Strategist fills the `strategist` role and turns a tradeable regime read into a concrete, verified contract. |
 | [05](iteration-05/01_use_case.md) | UC-05 — Adjudicate against hard risk limits | The Risk Officer clears or blocks a proposed contract against hard limits before it can become an intent. |
 | [06](iteration-06/01_use_case.md) | UC-06 — Place a live order behind human approval | A cleared `enter` intent reaches the broker — but only after a human approves it. |
-| [07](iteration-07/01_use_case.md) | UC-07 — Manage the open position | The Position Monitor holds a filled option to its stop, its target and its theta-aware time-stop, and exits without asking anyone. |
+| [07](iteration-07/01_use_case.md) | UC-07 — Manage the open position | The Position Monitor holds a filled option to its stop, its target and its theta-aware time-stop, and exits without asking anyone. Makes unattended autonomy the default, so the whole loop runs with no human in it. |
 
 ## What is inside an iteration
 

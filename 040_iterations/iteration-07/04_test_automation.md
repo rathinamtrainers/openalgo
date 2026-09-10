@@ -1197,7 +1197,247 @@ def test_a_non_positive_quantity_never_reaches_the_wire(monitor_settings, quanti
     assert executor.fire("X", "NFO", quantity).status == "failed"
 ```
 
-## 7. Running it
+## 7. Tests — unattended mode
+
+Two files. `test_autonomy.py` is pure unit work against the guard module — no OpenAlgo, no
+journal beyond the in-memory one, no clock that is not injected. `test_unattended_entry.py`
+drives the graph end to end with the fake mirror and fake execution client the iteration-06
+fixtures already provide, and its most important test is the one that asserts *attended mode
+did not change*.
+
+### `strike_desk/tests/test_autonomy.py`
+
+```python
+"""The guards that replace the human. Every one of them is arithmetic, so every one is a unit test."""
+
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
+
+from strike_desk import autonomy
+from strike_desk.openalgo_mirror import ORDER_MODE_AUTO, ORDER_MODE_SEMI_AUTO
+
+
+class _Mirror:
+    def __init__(self, mode: str) -> None:
+        self._mode = mode
+
+    def order_mode(self) -> str:
+        return self._mode
+
+
+class _Monitor:
+    def __init__(self, alive: bool, age_seconds: float) -> None:
+        self._alive = alive
+        self.heartbeat_utc = datetime.now(UTC) - timedelta(seconds=age_seconds)
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+
+@pytest.mark.parametrize(
+    ("mode", "reported", "ok"),
+    [
+        ("unattended", ORDER_MODE_AUTO, True),
+        ("unattended", ORDER_MODE_SEMI_AUTO, False),
+        ("attended", ORDER_MODE_SEMI_AUTO, True),
+        ("attended", ORDER_MODE_AUTO, False),
+    ],
+)
+def test_mode_must_agree_with_openalgo(monitor_settings, mode, reported, ok):
+    settings = monitor_settings.model_copy(update={"autonomy": mode})
+    verdict = autonomy.check_mode(settings, _Mirror(reported))
+    assert verdict.ok is ok
+    if not ok:
+        assert verdict.reason == "autonomy-mode-mismatch"
+        assert reported in verdict.detail
+
+
+def test_an_unreadable_mirror_blocks_rather_than_guesses(monitor_settings):
+    class _Broken:
+        def order_mode(self):
+            raise MirrorUnavailable("database is locked")
+
+    verdict = autonomy.check_mode(monitor_settings, _Broken())
+    assert verdict.ok is False
+    assert verdict.reason == "autonomy-mode-mismatch"
+
+
+@pytest.mark.parametrize(
+    ("monitor", "ok"),
+    [(None, False), (_Monitor(False, 0), False), (_Monitor(True, 900), False), (_Monitor(True, 1), True)],
+)
+def test_the_dead_man_switch(monitor_settings, monitor, ok):
+    settings = monitor_settings.model_copy(update={"autonomy": "unattended"})
+    verdict = autonomy.check_monitor(settings, monitor, datetime.now(UTC))
+    assert verdict.ok is ok
+
+
+def test_attended_mode_needs_no_monitor(monitor_settings):
+    """Attended, a person is the fallback, so a dead monitor does not block an entry."""
+    settings = monitor_settings.model_copy(update={"autonomy": "attended"})
+    assert autonomy.check_monitor(settings, None, datetime.now(UTC)).ok is True
+
+
+def test_the_loss_cap_reads_the_journal_not_memory(monitor_settings, journal, seeded_flat_loss):
+    settings = monitor_settings.model_copy(
+        update={"autonomy": "unattended", "unattended_daily_loss_cap": 500.0}
+    )
+    verdict = autonomy.check_day(settings, journal, date(2026, 9, 8))
+    assert verdict.ok is False
+    assert verdict.reason == "daily-loss-cap"
+
+
+def test_the_loss_cap_is_checked_before_the_trade_count(monitor_settings, journal, seeded_flat_loss):
+    """A desk out of budget says so; it never reports that it has room for one more."""
+    settings = monitor_settings.model_copy(
+        update={
+            "autonomy": "unattended",
+            "unattended_daily_loss_cap": 500.0,
+            "unattended_max_trades_per_day": 1,
+        }
+    )
+    assert autonomy.check_day(settings, journal, date(2026, 9, 8)).reason == "daily-loss-cap"
+
+
+def test_the_trade_count_caps_the_day(monitor_settings, journal, seeded_two_entries):
+    settings = monitor_settings.model_copy(
+        update={"autonomy": "unattended", "unattended_max_trades_per_day": 2}
+    )
+    verdict = autonomy.check_day(settings, journal, date(2026, 9, 8))
+    assert verdict.ok is False and verdict.reason == "daily-trade-cap"
+
+
+def test_every_guard_is_inert_when_attended(monitor_settings, journal, seeded_flat_loss):
+    """The whole of this module must be a no-op in the opt-out mode."""
+    settings = monitor_settings.model_copy(update={"autonomy": "attended"})
+    verdict = autonomy.evaluate(
+        settings, _Mirror(ORDER_MODE_SEMI_AUTO), journal, None, date(2026, 9, 8)
+    )
+    assert verdict.ok is True
+
+
+def test_unattended_is_the_default(tmp_path, monkeypatch):
+    """The iteration's headline: an unconfigured desk runs with no human in the loop."""
+    monkeypatch.delenv("STRIKE_DESK_AUTONOMY", raising=False)
+    settings = Settings(
+        openalgo_api_key="test-key-0123456789",
+        openalgo_user="tester",
+        openalgo_db_path=tmp_path / "openalgo.db",
+        state_dir=tmp_path / "state",
+    )
+    assert settings.autonomy == "unattended"
+    assert settings.unattended is True
+
+
+def test_an_upgraded_semi_auto_desk_declines_rather_than_enters(monitor_settings, journal):
+    """AC-22: default-unattended against an un-migrated key must stop, not guess."""
+    verdict = autonomy.evaluate(
+        monitor_settings, _Mirror(ORDER_MODE_SEMI_AUTO), journal, None, date(2026, 9, 8)
+    )
+    assert verdict.ok is False
+    assert verdict.reason == "autonomy-mode-mismatch"
+```
+
+Note what the `monitor_settings` fixture now means: it sets no `autonomy`, so it *is* an
+unattended desk, and the two attended tests above opt out explicitly. That inversion is
+deliberate — the fixture every other test in this suite shares should be the configuration
+every deploy will actually run.
+
+The two new fixtures — `seeded_flat_loss` writes one `positions` row at `flat` with a negative
+`realised_pnl` on 2026-09-08, and `seeded_two_entries` writes two BUY `orders` rows on the same
+day — join `position_fixtures.py` beside the ones §1 already defines. Both write through the
+journal's own append methods rather than raw SQL, so a schema drift breaks them loudly.
+
+### `strike_desk/tests/test_unattended_entry.py`
+
+```python
+"""The graph, end to end, with the human removed — and the proof that attended did not move."""
+
+
+def test_an_unattended_tick_places_without_suspending(unattended_deps, fake_execution):
+    """No interrupt, no pending order, one broker order id, in a single pass."""
+    result = run_tick(unattended_deps)
+    assert result.outcome == "enter"
+    assert result.interrupted is False
+    assert fake_execution.placed[0]["response"]["orderid"] == "SANDBOX-1"
+    assert "pending_order_id" not in fake_execution.placed[0]["response"]
+
+
+def test_the_next_tick_is_not_held_by_an_approval(unattended_deps):
+    run_tick(unattended_deps)
+    second = run_tick(unattended_deps)
+    assert second.reason != "approval-pending"
+
+
+def test_an_unattended_entry_writes_an_auto_approved_row(unattended_deps, journal):
+    run_tick(unattended_deps)
+    row = journal.latest_approval()
+    assert row.status == "auto-approved"
+    assert row.approver == "strike-desk"
+    assert row.deadline_utc is None
+    assert row.pending_order_id is None
+
+
+def test_an_unattended_entry_is_logged_at_warning(unattended_deps, caplog):
+    with caplog.at_level("WARNING"):
+        run_tick(unattended_deps)
+    line = next(r for r in caplog.records if "unattended entry" in r.message)
+    assert "stop" in line.getMessage() and "time-stop" in line.getMessage()
+
+
+def test_a_queued_response_kills_the_desk(unattended_deps, fake_execution, kill_switch):
+    """Unattended plus a pending_order_id means a human is silently holding our entry."""
+    fake_execution.next_response = {"status": "success", "mode": "semi_auto", "pending_order_id": 7}
+    result = run_tick(unattended_deps)
+    assert result.disposition == "defect"
+    assert kill_switch.engaged is True
+
+
+def test_a_dead_monitor_declines_before_a_token_is_spent(unattended_deps, fake_model):
+    unattended_deps.monitor = None
+    result = run_tick(unattended_deps)
+    assert result.outcome == "decline"
+    assert result.reason == "monitor-unavailable"
+    assert fake_model.call_count == 0
+
+
+def test_the_loss_cap_declines_and_kills(unattended_deps, journal, kill_switch, seeded_flat_loss):
+    result = run_tick(unattended_deps)
+    assert result.reason == "daily-loss-cap"
+    assert kill_switch.engaged is True
+
+
+def test_attended_mode_is_byte_for_byte_unchanged(attended_deps, fake_execution, snapshot):
+    """The regression that matters most in this section: iteration 06 still behaves as it did."""
+    result = run_tick(attended_deps)
+    assert result.interrupted is True
+    assert fake_execution.placed[0]["response"]["pending_order_id"] == 41
+    assert snapshot(journal_rows(attended_deps)) == snapshot.stored
+```
+
+`attended_deps` sets `autonomy="attended"` explicitly; `unattended_deps` leaves it at the
+default. They are otherwise the same `TickDeps`, differing only in that setting and
+in the order mode the fake mirror reports — which is the point. If a test passes under one and
+fails under the other for any reason other than the four behaviours named above, the switch has
+leaked into code it should not have touched.
+
+### `test_guardrails_position.py` — two additions
+
+```python
+def test_autonomy_imports_no_reasoning_module():
+    """The guards that replace the human must be as unreachable from an agent as the exits are."""
+    assert_no_reasoning_imports("strike_desk.autonomy")
+
+
+def test_unattended_mode_cannot_be_enabled_without_a_mirror(monitor_settings):
+    """A desk that cannot read OpenAlgo's order mode may not claim to be unattended."""
+    settings = monitor_settings.model_copy(update={"autonomy": "unattended"})
+    with pytest.raises(ConfigError, match="mirror"):
+        build_service(settings.model_copy(update={"openalgo_db_path": None}))
+```
+
+## 8. Running it
 
 Locally, from `strike_desk/`:
 
@@ -1220,15 +1460,19 @@ zero tests:
       - name: Guardrails and regression must run
         working-directory: strike_desk
         run: |
-          uv run pytest tests/test_guardrails_position.py tests/regression -q \
+          uv run pytest tests/test_guardrails_position.py tests/test_unattended_entry.py tests/regression -q \
             --strict-markers -p no:randomly
 ```
+
+`tests/test_unattended_entry.py` joins the same must-run list as the guardrails, for the same
+reason: it is the only place attended mode is proven unchanged, and a suite that silently
+collects zero of those tests would let the switch leak into the default path unnoticed.
 
 The tests need no network, no OpenAlgo, no broker session and no API key beyond the dummy in
 `monitor_settings`, so the whole suite runs on a laptop and in CI identically and in under a
 minute.
 
-## 8. Traceability
+## 9. Traceability
 
 | Test | Kind | Covers | Backstops manual case |
 | --- | --- | --- | --- |
@@ -1254,3 +1498,14 @@ minute.
 | `test_journal_positions.py::test_a_state_may_be_written_once`, `::test_rows_cannot_be_updated_or_deleted` | unit | AC-14 | MT-21 |
 | `test_position_monitor.py::test_adoption_is_idempotent` | integration | AC-14 | MT-21 |
 | `test_exit_executor.py::test_exclusive_book_uses_closeposition`, `::test_a_foreign_position_forces_a_targeted_sell` | integration | AC-11 | MT-13 |
+| `test_unattended_entry.py::test_an_unattended_tick_places_without_suspending`, `::test_the_next_tick_is_not_held_by_an_approval` | integration | AC-15 | MT-31 |
+| `test_autonomy.py::test_mode_must_agree_with_openalgo`, `::test_an_unreadable_mirror_blocks_rather_than_guesses` | unit | AC-16 | MT-28, MT-29 |
+| `test_unattended_entry.py::test_a_queued_response_kills_the_desk` | integration | AC-17 | MT-35 |
+| `test_autonomy.py::test_the_dead_man_switch`, `::test_attended_mode_needs_no_monitor` | unit | AC-18 | MT-30 |
+| `test_unattended_entry.py::test_a_dead_monitor_declines_before_a_token_is_spent` | integration | AC-18 | MT-30, MT-34 |
+| `test_autonomy.py::test_the_loss_cap_reads_the_journal_not_memory`, `::test_the_loss_cap_is_checked_before_the_trade_count` | unit | AC-19 | MT-36, MT-37 |
+| `test_unattended_entry.py::test_the_loss_cap_declines_and_kills` | integration | AC-19 | MT-36 |
+| `test_autonomy.py::test_the_trade_count_caps_the_day` | unit | AC-20 | MT-38 |
+| `test_unattended_entry.py::test_an_unattended_entry_writes_an_auto_approved_row`, `::test_an_unattended_entry_is_logged_at_warning` | integration | AC-21 | MT-32, MT-33 |
+| `test_unattended_entry.py::test_attended_mode_is_byte_for_byte_unchanged`, `test_autonomy.py::test_every_guard_is_inert_when_attended` | regression | AC-21 | MT-27, MT-39 |
+| `test_guardrails_position.py::test_autonomy_imports_no_reasoning_module` | guardrail | AC-8, AC-15 | MT-09 |

@@ -61,7 +61,13 @@ every price that arrives.** Everything else in this guide exists because the pos
 the feed is not always there, the exit can be refused, and every one of those facts has to end
 up in an append-only row you can read back in a month.
 
-Five files are new.
+Above that sits the second half of the slice, §11: the **autonomy switch** that lets the whole
+loop run with no human in it. It is deliberately built last **and it is the default**, because
+taking the trader out of the entry gate is only defensible once the monitor below is holding the
+fill — and once it is, the click has nothing left to add. `attended` remains as an opt-out for a
+desk that wants iteration 06's gate back.
+
+Six files are new.
 
 | File | What it is |
 | --- | --- |
@@ -70,6 +76,7 @@ Five files are new.
 | `exit_executor.py` | The preflight that decides whether an exit could fire at all, and the two-rung ladder that fires it. |
 | `position_monitor.py` | The loop: adopt a fill, arm the levels, evaluate every tick, exit, follow the exit to a fill, reconcile, stand down. |
 | `position_view.py` | The live position rendered as text or JSON, so the CLI and the tests cannot disagree. |
+| `autonomy.py` | The unattended-mode guards: mode agreement with OpenAlgo, the dead-man switch, and the two daily caps. Deterministic, and reachable by no agent. |
 
 Nine are edited.
 
@@ -2175,7 +2182,401 @@ No secret is added by this slice. The feed authenticates with the OpenAlgo API k
 already holds, and it is read from the environment exactly as before — never written to the
 journal, never logged, because `Redactor` already knows it.
 
-## 11. First working result
+## 11. Unattended operation — no human in the loop
+
+Everything above this section holds a position without a human. This section removes the human
+from the *entry* as well, which iteration 06 could not safely do because nothing was watching a
+fill. It is a switch over the same code paths: one setting, one guard module, three new decline
+reasons, four small edits, and no journal migration — and from this iteration on, **unattended is
+the default**: the desk runs tick to flat by itself unless someone asks for the gate back.
+
+The rule that governs every line of it: **attended mode must still behave exactly as iteration 06
+left it.** Flipping the default changes which branch is taken by an unconfigured deploy; it does
+not rewrite either branch.
+
+### `strike_desk/src/strike_desk/config.py` — the autonomy block
+
+```python
+    # --- Autonomy (iteration 07) --------------------------------------------
+    autonomy: Literal["attended", "unattended"] = "unattended"
+    monitor_heartbeat_max_age_seconds: float = Field(default=30.0, gt=0, le=600)
+    unattended_daily_loss_cap: float = Field(default=6000.0, gt=0)
+    unattended_max_trades_per_day: int = Field(default=3, ge=1, le=20)
+```
+
+```python
+    @property
+    def unattended(self) -> bool:
+        return self.autonomy == "unattended"
+```
+
+`unattended` is the default: the point of this iteration is a desk that runs itself, and a
+default that still waits for a click would leave that promise switched off on every deploy that
+did not read the release notes. The consequence is deliberate and must be stated in those notes —
+**upgrading to iteration 07 without touching `.env` turns entries autonomous**, so the OpenAlgo
+key must be moved to AUTO order mode and the two daily caps below reviewed before the upgrade.
+A desk that wants iteration 06's gate back sets `STRIKE_DESK_AUTONOMY=attended` explicitly. The
+caps are what make that default defensible, and so they are not optional: the loss cap defaults to roughly
+three times the per-trade cap the Risk Officer already enforces: a desk that loses three full
+stops in a day has been wrong about the regime, not unlucky, and should stop and be looked at.
+`unattended_max_trades_per_day` defaults to 3 for the same reason and is applied as the tighter
+of it and the limits pack's own count — a cap may only ever narrow.
+
+### `strike_desk/src/strike_desk/errors.py` — additions
+
+```python
+class AutonomyMismatch(StrikeDeskError):
+    """OpenAlgo's order mode contradicts the desk's configured autonomy."""
+
+
+class MonitorUnavailable(StrikeDeskError):
+    """No live position monitor, so no unattended entry may be formed."""
+```
+
+### `strike_desk/src/strike_desk/autonomy.py`
+
+The whole of the unattended decision surface, in one deterministic module with no imports from
+the reasoning plane — the same structural property §8 has, asserted by the same guardrail test.
+
+```python
+"""The unattended-mode guards: mode agreement, dead-man switch, loss cap, trade count.
+
+Every function here answers with a verdict object rather than raising, because each one runs
+inside the plan node before a token is spent and a decline is a journalled row, not an error.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from typing import Any
+
+from .config import Settings
+from .errors import MirrorUnavailable
+from .journal import Journal
+from .openalgo_mirror import ORDER_MODE_AUTO, ORDER_MODE_SEMI_AUTO, OpenAlgoMirror
+
+
+@dataclass(frozen=True)
+class AutonomyVerdict:
+    """Whether an entry may be formed right now under the configured autonomy."""
+
+    ok: bool
+    reason: str | None = None
+    detail: str = ""
+
+
+def required_order_mode(settings: Settings) -> str:
+    return ORDER_MODE_AUTO if settings.unattended else ORDER_MODE_SEMI_AUTO
+
+
+def check_mode(settings: Settings, mirror: OpenAlgoMirror) -> AutonomyVerdict:
+    """The desk's autonomy and OpenAlgo's order mode must agree before anything is sent."""
+    wanted = required_order_mode(settings)
+    try:
+        actual = mirror.order_mode()
+    except MirrorUnavailable as exc:
+        return AutonomyVerdict(False, "autonomy-mode-mismatch", f"order mode unreadable: {exc}")
+    if actual == wanted:
+        return AutonomyVerdict(True)
+    return AutonomyVerdict(
+        False,
+        "autonomy-mode-mismatch",
+        f"autonomy is {settings.autonomy!r} which needs order mode {wanted!r}, "
+        f"but OpenAlgo reports {actual!r}",
+    )
+
+
+def check_monitor(settings: Settings, monitor: Any | None, now: datetime) -> AutonomyVerdict:
+    """The dead-man switch: unattended, nothing is entered that nothing is watching."""
+    if not settings.unattended:
+        return AutonomyVerdict(True)
+    if monitor is None or not monitor.is_alive():
+        return AutonomyVerdict(False, "monitor-unavailable", "the position monitor is not running")
+    age = (now - monitor.heartbeat_utc).total_seconds()
+    if age > settings.monitor_heartbeat_max_age_seconds:
+        return AutonomyVerdict(
+            False, "monitor-unavailable", f"monitor heartbeat is {age:.0f}s old"
+        )
+    return AutonomyVerdict(True)
+
+
+def check_day(settings: Settings, journal: Journal, trading_day: date) -> AutonomyVerdict:
+    """The two daily caps, both derived from the journal so a restart cannot reset them."""
+    if not settings.unattended:
+        return AutonomyVerdict(True)
+    realised = journal.realised_pnl_for_day(trading_day)
+    if realised <= -abs(settings.unattended_daily_loss_cap):
+        return AutonomyVerdict(
+            False,
+            "daily-loss-cap",
+            f"realised {realised:.2f} against a cap of "
+            f"{-abs(settings.unattended_daily_loss_cap):.2f}",
+        )
+    entries = journal.entry_count_for_day(trading_day)
+    if entries >= settings.unattended_max_trades_per_day:
+        return AutonomyVerdict(
+            False,
+            "daily-trade-cap",
+            f"{entries} unattended entries already taken, cap is "
+            f"{settings.unattended_max_trades_per_day}",
+        )
+    return AutonomyVerdict(True)
+
+
+def evaluate(
+    settings: Settings,
+    mirror: OpenAlgoMirror,
+    journal: Journal,
+    monitor: Any | None,
+    trading_day: date,
+    now: datetime | None = None,
+) -> AutonomyVerdict:
+    """All three guards in precedence order: agreement, then watching, then the day's budget."""
+    now = now or datetime.now(UTC)
+    for verdict in (
+        check_mode(settings, mirror),
+        check_monitor(settings, monitor, now),
+        check_day(settings, journal, trading_day),
+    ):
+        if not verdict.ok:
+            return verdict
+    return AutonomyVerdict(True)
+```
+
+Two things about `check_day` are deliberate. It reads the journal rather than an in-memory
+counter, so a desk restarted at noon still knows it has already lost four thousand rupees this
+morning — a cap that a process restart clears is not a cap. And the loss check runs before the
+count check, so a desk that has lost its budget says so rather than reporting that it has room
+for one more trade.
+
+### `strike_desk/src/strike_desk/journal.py` — two read methods
+
+Both are queries over rows this iteration already writes; no schema change, `SCHEMA_VERSION`
+stays at 7.
+
+```python
+    def realised_pnl_for_day(self, trading_day: date) -> float:
+        """Sum of realised P&L across every position that reached flat on this trading day."""
+        with self._session() as session:
+            rows = session.execute(
+                select(PositionRow.realised_pnl).where(
+                    PositionRow.state == STATE_FLAT,
+                    PositionRow.trading_day == trading_day,
+                )
+            ).scalars()
+            return float(sum(value for value in rows if value is not None))
+
+    def entry_count_for_day(self, trading_day: date) -> int:
+        """How many entry orders were submitted on this trading day, in any final status."""
+        with self._session() as session:
+            return int(
+                session.execute(
+                    select(func.count())
+                    .select_from(OrderRow)
+                    .where(OrderRow.trading_day == trading_day, OrderRow.side == "BUY")
+                ).scalar_one()
+            )
+```
+
+### `strike_desk/src/strike_desk/approval_gate.py` — edits
+
+Three changes, each guarded on the mode so attended behaviour is untouched.
+
+The preflight now asks `autonomy.check_mode` instead of asserting `semi_auto` directly:
+
+```python
+        verdict = check_mode(self._settings, self._mirror)
+        if not verdict.ok:
+            raise AutonomyMismatch(verdict.detail)
+```
+
+The response check becomes symmetric. Attended, a bare `orderid` is the catastrophe iteration 06
+named; unattended, a `pending_order_id` is, because it means a human is silently holding an
+entry the desk believes went out:
+
+```python
+        pending_id = payload.get("pending_order_id")
+        broker_id = payload.get("orderid")
+        if self._settings.unattended:
+            if pending_id is not None:
+                self._kill_switch.engage("unattended submission was queued for approval")
+                raise AutonomyMismatch(
+                    f"unattended mode but OpenAlgo queued the order as pending {pending_id}"
+                )
+            if broker_id is None:
+                raise ExecutionFailed("unattended submission returned no order id")
+        else:
+            if broker_id is not None and pending_id is None:
+                self._kill_switch.engage("attended submission reached the broker ungated")
+                raise AutonomyMismatch(
+                    f"attended mode but OpenAlgo placed order {broker_id} with no approval"
+                )
+```
+
+And the settlement writes the approval row without a human. The row is written because the
+audit trail must keep its shape — `strike-desk approvals` prints the same case, with the stamp
+where the click used to be:
+
+```python
+        if self._settings.unattended:
+            self._journal.append_approval(
+                tick_id=tick_id,
+                decision_id=decision_id,
+                proposal_id=proposal_id,
+                verdict_id=verdict_id,
+                status=APPROVAL_AUTO_APPROVED,
+                pending_order_id=None,
+                broker_order_id=broker_id,
+                approver="strike-desk",
+                deadline_utc=None,
+                payload=order_payload,
+            )
+            logger.warning(
+                "unattended entry: %s x%d at %s — stop %s target %s time-stop %s — %s",
+                order_payload["symbol"], order_payload["quantity"], order_payload["price"],
+                levels.stop_price, levels.target_price, levels.time_stop_utc.isoformat(),
+                proposal.rationale,
+            )
+```
+
+`APPROVAL_AUTO_APPROVED = "auto-approved"` joins the other status constants in `journal.py`.
+The `WARNING` level is chosen, not accidental: an entry nobody saw should be the loudest
+non-error line in the morning's log, and when UC-14 arrives this is the line Telegram carries.
+
+### `strike_desk/src/strike_desk/graph.py` — edits
+
+`await_approval` becomes a no-op in unattended mode; the graph never suspends and the tick
+finishes in one pass:
+
+```python
+def await_approval(state: TickState, deps: TickDeps) -> dict[str, Any]:
+    if deps.settings.unattended:
+        return {"approval": state.get("approval")}
+    return interrupt({"awaiting": state["approval"].pending_order_id})
+```
+
+The plan gate gains the autonomy verdict beside the exit-path check, sharing its position —
+before a token is spent:
+
+```python
+                    if deps.settings.execution_enabled:
+                        verdict = autonomy_evaluate(
+                            deps.settings, deps.mirror, deps.journal,
+                            deps.monitor, snapshot.trading_day,
+                        )
+                        span.set_attribute("autonomy.mode", deps.settings.autonomy)
+                        span.set_attribute("autonomy.ok", verdict.ok)
+                        if not verdict.ok:
+                            return {"book": snapshot, "autonomy_blocked": verdict}
+```
+
+with a `TickState` key `autonomy_blocked: AutonomyVerdict | None`, the same routing treatment
+`exit_path_gated` gets in §10, and one decision-table branch placed immediately before the
+exit-path branch, since a mode disagreement explains an exit-path finding rather than competing
+with it:
+
+```python
+    blocked = state.get("autonomy_blocked")
+    if blocked is not None:
+        return (
+            OUTCOME_DECLINE,
+            blocked.reason,
+            render(blocked.reason, max_chars=cap, detail=blocked.detail),
+        )
+```
+
+The `daily-loss-cap` decline additionally engages the kill switch, in the same place the
+existing defect declines do, so the cap survives until a human clears the file by hand.
+
+### `strike_desk/src/strike_desk/decline_taxonomy.py` — edits
+
+`dt-6`, three entries added to `dt-5`'s one, nothing existing touched:
+
+```python
+TAXONOMY_VERSION = "dt-6"
+```
+
+```python
+    _entry(
+        "autonomy-mode-mismatch",
+        outcome="decline", category=CATEGORY_SYSTEM, disposition=DISPOSITION_DEFECT,
+        summary="OpenAlgo's order mode contradicts the configured autonomy",
+        default=(
+            "Declined: {detail}. The desk will not submit until its autonomy and OpenAlgo's "
+            "order mode say the same thing."
+        ),
+    ),
+    _entry(
+        "monitor-unavailable",
+        outcome="decline", category=CATEGORY_SYSTEM, disposition=DISPOSITION_DEFECT,
+        summary="unattended entry refused because nothing is watching",
+        default=(
+            "Declined: {detail}. Unattended, the desk opens nothing that the position "
+            "monitor is not alive to close."
+        ),
+    ),
+    _entry(
+        "daily-loss-cap",
+        outcome="decline", category=CATEGORY_RISK, disposition=DISPOSITION_EXPECTED,
+        summary="the day's realised loss reached the unattended cap",
+        default="Declined: {detail}. The desk is done for the day.",
+    ),
+```
+
+`daily-trade-cap` reuses the limits pack's existing daily-count entry rather than adding a
+fourth; only its detail string differs. And note the dispositions: the first two are defects and
+make `strike-desk declines` exit 2, because both mean the desk is misconfigured. The loss cap is
+`expected` — a desk that stops after a bad morning did the right thing, and should not read as
+broken.
+
+### `strike_desk/src/strike_desk/position_monitor.py` — the heartbeat
+
+The dead-man switch needs something to check. The monitor's loop stamps one attribute at the top
+of every pass, and exposes it with `is_alive`:
+
+```python
+        self._heartbeat_utc = datetime.now(UTC)
+```
+
+```python
+    @property
+    def heartbeat_utc(self) -> datetime:
+        return self._heartbeat_utc
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+```
+
+The stamp goes at the *top* of the loop body and not the bottom, so a pass that hangs inside the
+feed stops refreshing the heartbeat and the switch fires. A heartbeat written after the work is
+a heartbeat that only reports successful passes.
+
+### `strike_desk/src/strike_desk/position_view.py` — one line
+
+`strike-desk position` prints the autonomy it is running under, because the single most
+important thing to know when reading a live position is whether anyone is expected to be
+watching it:
+
+```python
+    lines.append(f"autonomy: {settings.autonomy}")
+```
+
+### `strike_desk/.env.example` — the autonomy block
+
+```bash
+# --- Autonomy (iteration 07) -----------------------------------------------
+# unattended = THE DEFAULT. No human in the loop, tick to flat. Requires the OpenAlgo API
+#              key in AUTO order mode, a live position monitor, and the two daily caps below.
+# attended   = opt-out, iteration 06 behaviour: every entry waits for a click in the Action
+#              Center. Requires the key in SEMI-AUTO order mode.
+STRIKE_DESK_AUTONOMY=unattended
+STRIKE_DESK_MONITOR_HEARTBEAT_MAX_AGE_SECONDS=30
+STRIKE_DESK_UNATTENDED_DAILY_LOSS_CAP=6000
+STRIKE_DESK_UNATTENDED_MAX_TRADES_PER_DAY=3
+```
+
+## 12. First working result
 
 Work in `strike_desk/`. Sync, lint and run the tests you will write from `04_test_automation.md`:
 
@@ -2235,7 +2636,7 @@ the current premium in a scratch proposal if you want to watch an exit fire on d
 manual test cases in `03_manual_test_cases.md` walk that through properly, and
 `05_deployment_guide.md` releases it to the host.
 
-## 12. Reference
+## 13. Reference
 
 | Thing | Value |
 | --- | --- |
@@ -2252,11 +2653,26 @@ manual test cases in `03_manual_test_cases.md` walk that through properly, and
 | New command | `strike-desk position [--day] [--json]` |
 | Exit codes | `position` exits 2 when a defect or orphaned state exists |
 
-## 13. Limitations
+## 14. Limitations
 
 The monitor manages **one** position, because the Risk Officer permits one. The structures here
 would need a supervised set of monitors and a portfolio-level view before that changes, and
 that is UC-20's work rather than a gap in this one.
+
+Unattended mode requires the OpenAlgo key in **Auto** order mode, which removes the platform's
+own gate for *every* key holder on that instance, not just this desk. On a single-purpose
+trading host that is the intended configuration; on a host where the trader also places manual
+orders through the same key it is a wider change than it looks, and the honest answer there is
+a second API key rather than a flag in this repo.
+
+The dead-man switch proves the monitor thread is running and stamping, not that the broker feed
+is healthy — a monitor sitting in REST-quote fallback still beats. That is the right call for an
+entry gate (the fallback is a working exit path) but it means "monitor alive" is a weaker claim
+than "prices are flowing", and the two should not be read as the same thing.
+
+The daily loss cap counts **realised** P&L only, so an open position bleeding towards its stop
+does not itself close the desk for the day. With one position permitted at a time the gap is
+bounded by a single per-trade cap, and it closes properly when UC-20 brings a portfolio view.
 
 The exit ladder's first rung closes the account's positions rather than a single symbol,
 because `/api/v1/closeposition` takes only a strategy. The executor therefore checks the

@@ -10,6 +10,8 @@
 
 This iteration builds exactly one thing: a loop that holds a filled long option from fill to flat against three levels it did not choose, and gets out the moment one of them is hit. It adopts the position, arms the levels, watches the price, fires a market exit, records what happened with the latency it took, reconciles against the broker, and stands down. Nothing beyond that.
 
+On top of that loop it adds the thing the loop makes safe to offer, and makes it **the default**: an **unattended mode** in which the trader approves nothing and the desk runs from tick to flat by itself. That is §9, and it is deliberately last — the human could only leave the entry gate once something was watching the fill. From this iteration on he leaves it by default, and attended mode survives only as an explicit opt-out.
+
 ## 1. The division of labour, restated for the control plane
 
 Iteration 04 established that the model proposes and code verifies. This slice states the same idea one step further down: **the agentic layer contributed the levels at entry time; enforcing them is arithmetic.** The stop, the target and the time-stop were fixed the moment the Options Strategist's proposal cleared `playbook.check` and the Risk Officer; the monitor never re-derives, re-negotiates or re-reasons about them. It compares two numbers and a clock, and when the comparison says get out, it sends a market order.
@@ -111,3 +113,50 @@ sequenceDiagram
     M->>J: positions row — flat
     M->>F: unsubscribe and close
 ```
+
+## 9. Unattended operation — taking the human out of the loop
+
+Iteration 06 put a person in front of every entry: the intent went into OpenAlgo's Action Center and waited for a click. That was the right shape for a desk that had nothing watching a fill. This iteration changes the fact underneath it — from here on a fill is adopted, armed against three levels and exited by code — and so the desk can now be asked to run the whole loop by itself. Amit wants that: **an unattended mode in which no human approves anything, from tick to flat.**
+
+The mode is a switch, not a rewrite. `STRIKE_DESK_AUTONOMY` reads `unattended` — the default from this iteration on — or `attended`, which is iteration 06's behaviour kept as an opt-out for a desk that wants its click back. Nothing about the reasoning plane changes in either: the same two agents, the same prompts, the same playbook check and the same Risk Officer clear the same contract. What changes is what happens to a cleared intent. Unattended, it goes. Attended, it queues and waits for a click.
+
+Flipping the default has a consequence worth naming plainly, because it lands on every existing deploy: **an iteration-06 desk upgraded to this iteration without touching its `.env` becomes autonomous.** That is the intent, not an accident, and §9.1 makes it fail loudly rather than quietly — the desk refuses to trade at all until the OpenAlgo key is moved to Auto order mode. An operator who upgrades and does nothing gets `autonomy-mode-mismatch` declines, not surprise unattended orders. The upgrade note in `05_deployment_guide.md` carries the same warning, and the two daily caps in §9.2 exist precisely because the safe path is now the default path.
+
+### 9.1 The same gate, read the other way
+
+The desk still never assumes what OpenAlgo will do with an order; it reads `api_keys.order_mode` from the read-only mirror and insists the platform agrees with it. Attended mode demands `semi_auto` and treats a response carrying a bare `orderid` as the catastrophe it is — an order reached a broker with nobody in the loop. Unattended mode demands `auto` and treats the mirror image as the catastrophe: a response carrying a `pending_order_id` means the desk believes it is autonomous while a human is quietly holding its entry in a queue, and an entry parked in a queue with a monitor waiting for a fill is a desk that will misread the whole day. Either mismatch declines the tick with `autonomy-mode-mismatch` before a token is spent, and a mismatch discovered in the *response* — after submission — engages the kill switch, exactly as iteration 06 does.
+
+This is also where the two halves of the iteration meet. §4's exit-path preflight already refuses to enter when the platform is live and the key is in semi-auto, because an exit would need a human. Unattended mode requires `auto`, which is precisely the configuration in which both the entry and the exit are ungated. The `exit-path-gated` decline and the `autonomy-mode-mismatch` decline are two readings of the same switch, and in unattended mode they agree.
+
+### 9.2 What replaces the click
+
+The click was never only a gate; it was also the last place a human could look at a case and say no. Removing it removes that, so the desk replaces it with controls that do not need a person awake, and all of them are arithmetic:
+
+The **dead-man switch** comes first. Unattended, no entry may be formed unless the Position Monitor is alive and recently alive — its thread running, and its heartbeat stamped within `monitor_heartbeat_max_age_seconds`. An unattended entry made while nothing is watching is the open-ended bet §1 of this document refuses; the tick declines with `monitor-unavailable` instead. Attended mode has no such rule, because attended, a person is the fallback — and since attended is now the exception, the dead-man switch is the rule that applies on almost every desk.
+
+The **daily realised-loss cap** comes second. The monitor now writes realised P&L on every `flat` row, so the day's realised loss is a sum over the `exits` table and needs no new state. When the day's realised loss reaches `unattended_daily_loss_cap`, the desk declines with `daily-loss-cap` and engages the kill switch, so the cap holds until a human clears it. A per-trade cap the Risk Officer already enforces stops one bad trade; this stops a bad day.
+
+The **unattended trade count** comes third: `unattended_max_trades_per_day`, taken as the tighter of it and the limits pack's own daily count. A strategy that is wrong about the regime is wrong repeatedly, and an unattended desk will happily prove it eight times before lunch.
+
+And the record comes fourth. Every unattended entry is logged at `WARNING` with the full case — contract, size, the three levels, the analyst's regime read and the strategist's rationale — so the trader reads in the morning exactly what was decided in his absence. The `approvals` row is still written, at status `auto-approved` with the approver recorded as the desk itself and no deadline, so `strike-desk approvals` prints the same case it always did with the click replaced by a stamp. The audit trail keeps its shape; only the approver changed.
+
+### 9.3 What the graph stops doing
+
+Unattended, the `await_approval` node does not call `interrupt()`. The tick runs from plan to submitted order in a single pass, the graph never suspends, no checkpoint is resumed, and no `approval-pending` hold blocks the following ticks — because there is no pending approval to be held by. The approval watcher's five-second poll narrows to what it is now for: following the placed order to a terminal status and handing a `complete` to the monitor. The five-minute approval deadline, and the expiry path that logs `CRITICAL` when a click never comes, are attended-mode concerns and simply do not arm.
+
+The journal does not move. No new table, no new column, no migration — `SCHEMA_VERSION` stays at 7. `auto-approved` is a new value in a column that already exists, and the loss cap is a query over rows this iteration was already writing.
+
+### 9.4 What the trader still holds
+
+Unattended is not unsupervised. The kill switch still stops the desk on the next tick and is honoured mid-position; `strike-desk pause` still holds new entries while letting an open position run to its levels; `strike-desk position` still prints what is live and its distance to each level; and the trader can close the position from OpenAlgo at any moment, which §5's reconciler reads as `manual` and stands down for. The human left the loop; he did not leave the room.
+
+### 9.5 Additional acceptance criteria
+
+15. **AC-15** — With `STRIKE_DESK_AUTONOMY=unattended` and the OpenAlgo key in Auto mode, a cleared intent reaches the broker in the same tick, with no `interrupt()`, no pending order and no `approval-pending` hold on the following tick.
+16. **AC-16** — The autonomy mode is verified against the mirror before submission: unattended with a key in semi-auto, or attended with a key in auto, declines with `autonomy-mode-mismatch` and no token is spent.
+17. **AC-17** — A response that contradicts the mode after submission — a `pending_order_id` unattended, an `orderid` attended — is journalled as a defect and engages the kill switch.
+18. **AC-18** — Unattended, no entry is formed unless the monitor is alive with a heartbeat newer than `monitor_heartbeat_max_age_seconds`; otherwise the tick declines with `monitor-unavailable`.
+19. **AC-19** — Unattended, the day's realised loss summed from `exits` reaching `unattended_daily_loss_cap` declines the tick with `daily-loss-cap` and engages the kill switch; the cap also holds across a restart, because it is derived from the journal and not from memory.
+20. **AC-20** — Unattended, the day's entry count is capped at the tighter of `unattended_max_trades_per_day` and the limits pack's daily count.
+21. **AC-21** — Every unattended entry writes an `approvals` row at `auto-approved` with the desk as approver and no deadline, logs the full case at `WARNING`, and prints under `strike-desk approvals` exactly as an attended case does. Attended mode's behaviour, when explicitly selected, is byte-for-byte unchanged, which the regression suite asserts.
+22. **AC-22** — A desk started with no `STRIKE_DESK_AUTONOMY` set runs unattended: `strike-desk position` reports `autonomy: unattended`, and an upgraded iteration-06 deploy whose key is still in Semi-Auto declines every tick with `autonomy-mode-mismatch` rather than entering or waiting for a click.

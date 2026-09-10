@@ -30,7 +30,7 @@ mindmap
 
 ## 1. What changes on the host
 
-No new process, no new listening port, no new secret and no new model call. Four things change.
+No new process, no new listening port, no new secret and no new model call. Five things change.
 
 1. **The journal gains `positions` and `exits`**, created on the first `create_schema()`. No
    `ALTER TABLE`, no existing row read or rewritten.
@@ -44,6 +44,14 @@ No new process, no new listening port, no new secret and no new model call. Four
    this one bought and stopped. After this one, a stop, a target or a clock produces a market
    exit through `/api/v1/closeposition` or a targeted SELL, on the deliberate reading of FR-7
    that getting out is never gated.
+
+5. **The desk now runs with no human at all, by default.** `STRIKE_DESK_AUTONOMY` ships set to
+   `unattended`: the Action Center is out of the entry path and nobody approves anything.
+   `attended` — iteration 06's behaviour, every entry waiting for a click — remains as an
+   explicit opt-out. **This is the breaking change in the release.** An iteration-06 host
+   upgraded without touching `.env` becomes autonomous, so §7A is no longer an optional extra
+   step: its four preconditions must be satisfied *before* the new build is started, or the desk
+   will decline every tick with `autonomy-mode-mismatch` until they are.
 
 Point four is why the exit-path preflight ships in the same release. In live semi-auto — the
 mode iteration 06 depends on — OpenAlgo refuses `closeposition` and queues a sell, so an exit
@@ -157,6 +165,15 @@ STRIKE_DESK_SESSION_EXIT_DEADLINE=15:10
 STRIKE_DESK_EXIT_LATENCY_BUDGET_MS=1500
 STRIKE_DESK_EXIT_MAX_ATTEMPTS=3
 STRIKE_DESK_EXIT_RETRY_SECONDS=2
+
+# --- Autonomy (iteration 07) ---
+# 'unattended' is the default and the shipped posture: no human in the entry path.
+# It requires the OpenAlgo key in AUTO order mode — see §7A before starting the unit.
+# Set 'attended' here only if you deliberately want iteration 06's click back.
+STRIKE_DESK_AUTONOMY=unattended
+STRIKE_DESK_MONITOR_HEARTBEAT_MAX_AGE_SECONDS=30
+STRIKE_DESK_UNATTENDED_DAILY_LOSS_CAP=6000
+STRIKE_DESK_UNATTENDED_MAX_TRADES_PER_DAY=3
 ENV
 
 sudo ln -sfn "/opt/strike-desk/releases/$RELEASE" /opt/strike-desk/current
@@ -241,7 +258,10 @@ keeps the path open. This is the recommended posture and the one the MVP gate in
 **Or go live with the key in Auto and accept the trade-off knowingly.** Entries no longer stop
 at the Action Center; the Risk Officer and the kill switch remain the binding limits. Do this
 only with the day's trade count and the per-trade cap set low, and only after a session in
-sandbox. Whichever you choose, prove which one you are in before the market opens:
+sandbox. Auto mode is also the precondition for §7A's unattended operation, and the two decisions are
+best taken together rather than a week apart: if the key is going to Auto, decide at the same
+time whether the desk is still expected to wait for a click it can no longer be given. Whichever
+you choose, prove which one you are in before the market opens:
 
 ```bash
 sudo -u strikedesk /opt/strike-desk/current/strike_desk/.venv/bin/strike-desk journal --limit 5
@@ -251,6 +271,79 @@ sudo -u openalgo sqlite3 /opt/openalgo/db/openalgo.db \
 
 An `exit-path-gated` decline in the journal means the desk is running but will not trade — that
 is the guardrail working, not a fault to route around.
+
+## 7A. Running with the human off — the default posture
+
+Everything up to here releases the monitor. This section covers the other half of the iteration,
+which is no longer a switch you may or may not throw: `unattended` is the default, so **this
+section is mandatory for every deploy of this release**, and it must be worked through before
+the new unit is started rather than after. An iteration-06 host that upgrades and starts without
+reading it will not misfire — the mode check refuses to trade against a Semi-Auto key — but it
+will sit declining `autonomy-mode-mismatch` all day, which is a failed deploy either way.
+
+Do it in this order and not another.
+
+**First, satisfy the four preconditions — before the restart, not after.** Unattended mode is
+refused, loudly, unless all four
+hold, and each of them is checked rather than assumed: the OpenAlgo API key is in **Auto** order
+mode at `/apikey`; the position monitor is enabled and its heartbeat is fresh; the desk can read
+OpenAlgo's database through the mirror, because that is how the order mode is verified; and the
+two daily caps are set to numbers you would be willing to lose while asleep.
+
+**Second, run a full sandbox session unattended before a live one.** Analyze mode on, key in
+Auto, autonomy unattended. This is the only configuration in which the entire loop — propose,
+clear, place, fill, adopt, arm, exit, reconcile — runs with no human touching it and no money
+at risk, and it is the configuration the proving week should spend a day in.
+
+```bash
+sudo -u strikedesk /opt/strike-desk/current/strike_desk/.venv/bin/strike-desk position
+sudo journalctl -u strike-desk -f | grep -E "unattended entry|managing|flat|declined"
+```
+
+You are looking for one `WARNING` line per entry, beginning `unattended entry:` and naming the
+symbol, the quantity and all three levels, followed within a poll by `managing …`. If the entry
+line appears and `managing` does not, stop: the monitor is not adopting, and unattended mode
+without adoption is exactly the open-ended bet this product exists to refuse.
+
+**Third, set the caps before you set the mode.** The three lines below go into `/etc/strike-desk/strike-desk.env`
+together, and the mode line is written explicitly even though it matches the default, so the
+file states the posture rather than relying on one:
+
+```bash
+STRIKE_DESK_MONITOR_HEARTBEAT_MAX_AGE_SECONDS=30
+STRIKE_DESK_UNATTENDED_DAILY_LOSS_CAP=6000
+STRIKE_DESK_UNATTENDED_MAX_TRADES_PER_DAY=3
+STRIKE_DESK_AUTONOMY=unattended
+```
+
+```bash
+sudo systemctl restart strike-desk
+sudo -u strikedesk /opt/strike-desk/current/strike_desk/.venv/bin/strike-desk position | head -3
+```
+
+The `autonomy: unattended` line in that output is the confirmation. If it reads `attended`,
+something is still setting the opt-out — a stale `.env` line or an old unit `Environment=` — and
+the desk is, correctly, still asking for a click nobody is there to give.
+
+**Fourth, know how to stop it.** Three controls, in increasing order of bluntness: `strike-desk
+pause` holds new entries and lets an open position run to its levels; the kill switch stops the
+desk on the next tick and is honoured mid-position; `sudo systemctl stop strike-desk` stops
+everything including the monitor, which means an open position is left to OpenAlgo's own
+auto square-off. The middle one is almost always the one you want, and the last one is the one
+to avoid while a position is live.
+
+Opting back out is one line — `STRIKE_DESK_AUTONOMY=attended` and a restart — and the key should
+go back to Semi-Auto at the same time, because attended mode with an Auto key is itself a
+mismatch and will decline every tick until the two agree.
+
+### What unattended mode does not change
+
+It does not touch the reasoning plane, the prompts, the models, the tool whitelists, the token
+budget or the Risk Officer's limits. It does not widen what the desk can send: the execution
+client still holds the same three write paths. It does not make the desk trade more often — the
+unattended trade cap makes it trade *less* often than the limits pack alone would allow. The
+only thing it removes is the click, and the only things it adds are the guards that stand in
+for the person who used to make it.
 
 ## 8. Observability
 
@@ -392,15 +485,17 @@ stack already names for the SEBI mandate — chosen by configuration, because th
 | Package version | `0.7.0` |
 | New dependency | `websockets==17.1` |
 | Journal schema | `SCHEMA_VERSION = 7` — adds `positions` and `exits` |
-| Taxonomy | `dt-5` — nineteen earlier codes unchanged, one added |
+| Taxonomy | `dt-6` — nineteen earlier codes unchanged, four added |
 | New endpoints | `/api/v1/quotes` (read-only), `/api/v1/closeposition` (execution) |
 | New outbound socket | `ws://127.0.0.1:8765`, one symbol, only while a position is open |
 | New host precondition | Proxy on 8765 delivering ticks; analyze mode **or** auto order mode |
-| New settings | Twelve `STRIKE_DESK_*` keys, monitor on by default |
+| New settings | Sixteen `STRIKE_DESK_*` keys — twelve for the monitor (on by default) and four for autonomy (`unattended` by default) |
 | New spans | `strike_desk.monitor.adopt`, `.exit`, `.reconcile` |
 | New command | `strike-desk position [--day] [--json]` |
 | New model calls, ports, secrets, processes | None |
-| Rollback | One env line, or a symlink swap plus deleting the twelve keys |
+| Autonomy | **`unattended` by default** (needs Auto order mode, a live monitor and two daily caps) — `attended` (iteration 06 behaviour, needs Semi-Auto) is an explicit opt-out |
+| Breaking change | Upgrading without editing `.env` makes entries autonomous; work §7A before starting the unit |
+| Rollback | One env line, or a symlink swap plus deleting the sixteen keys |
 
 ## 14. Limitations
 
@@ -418,7 +513,18 @@ stack already names for the SEBI mandate — chosen by configuration, because th
    and retried on the *next* rung, so a duplicate exit is theoretically possible where a
    duplicate entry is not. A market sell of an already-flat position is rejected by the broker,
    which bounds the consequence.
-5. **Slippage and realised P&L depend on the broker reporting an average price.** When it
+5. **Unattended is the default, so the Auto key is now a deploy-time precondition rather than a
+   later decision — and Auto ungates that key for everything.** Auto order
+   mode is a property of the OpenAlgo API key, not of this desk, so any other caller holding the
+   same key also stops being gated. On a single-purpose trading host that is intended; where the
+   trader places manual orders through the same key, issue a second key instead.
+6. **The dead-man switch proves the monitor is running, not that prices are flowing.** A monitor
+   in REST-quote fallback still beats, which is the right answer for an entry gate — the
+   fallback is a working exit path — but "monitor alive" is a weaker claim than "feed healthy".
+7. **The unattended loss cap counts realised P&L only.** An open position bleeding towards its
+   stop does not itself close the desk for the day; with one position permitted at a time the
+   exposure is bounded by a single per-trade cap, and the gap closes with UC-20's portfolio view.
+8. **Slippage and realised P&L depend on the broker reporting an average price.** When it
    arrives late those two fields stay null; the reason, the level and the latency never do.
 
 ---
