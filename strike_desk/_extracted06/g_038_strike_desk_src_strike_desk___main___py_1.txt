@@ -1,0 +1,7 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+    approvals_parser = subparsers.add_parser("approvals", help="print approvals and their orders")
+    approvals_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
+    approvals_parser.add_argument("--since", type=int, help="the last N days, ending today")
+    approvals_parser.add_argument("--limit", type=int, default=100)
+    approvals_parser.add_argument("--json", action="store_true")

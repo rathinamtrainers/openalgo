@@ -1,0 +1,59 @@
+FILE: strike_desk/src/strike_desk/decline_taxonomy.py
+
+    _entry(
+        "risk-session-stopped",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the day's loss cap has stopped the session",
+        default=(
+            "Declined: the day is down {observed} against a {configured} daily loss cap. "
+            "The desk stops proposing entries for the rest of the session."
+        ),
+    ),
+    _entry(
+        "risk-input-unavailable",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_DEGRADED,
+        summary="a hard limit could not be evaluated",
+        default=(
+            "Declined: the {limit} limit could not be evaluated ({detail}). "
+            "A proposal is held, never assumed safe."
+        ),
+    ),
+    _entry(
+        "risk-veto",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="a hard limit vetoed the proposal",
+        default=(
+            "Declined: {symbol} trips the {limit} limit - configured {configured}, "
+            "observed {observed}. The veto is arithmetic and is not negotiated."
+        ),
+        sized_out=(
+            "Declined: even one lot of {symbol} trips the {limit} limit - configured "
+            "{configured}, observed {observed}. There is no size this desk may take."
+        ),
+        playbook_disagreed=(
+            "Declined: {symbol} reduced to fit {limit} no longer passes the playbook "
+            "({detail}). A contract two checks disagree about is never bought."
+        ),
+    ),
+    _entry(
+        "risk-cleared",
+        outcome="enter",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the contract cleared every hard limit",
+        default=(
+            "Intent: buy {lots} lot(s) of {symbol} at up to {entry}, risking {risk} to the "
+            "{stop} stop against a {base} capital base. This is an intent, not an order."
+        ),
+        reduced=(
+            "Intent: buy {lots} lot(s) of {symbol} at up to {entry}, cut from {requested} "
+            "lot(s) to fit the {limit} limit of {configured}. Risking {risk} to the {stop} "
+            "stop. This is an intent, not an order."
+        ),
+    ),

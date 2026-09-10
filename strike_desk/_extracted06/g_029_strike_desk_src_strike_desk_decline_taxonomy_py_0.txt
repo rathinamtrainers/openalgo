@@ -1,0 +1,3 @@
+FILE: strike_desk/src/strike_desk/decline_taxonomy.py
+
+TAXONOMY_VERSION = "dt-4"

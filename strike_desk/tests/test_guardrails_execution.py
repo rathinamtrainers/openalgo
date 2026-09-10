@@ -1,0 +1,143 @@
+"""The five structural guarantees of UC-06. A red test here blocks the build."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import httpx
+import pytest
+
+import strike_desk
+from strike_desk.execution_client import EXECUTION_PATHS
+from strike_desk.openalgo_client import READ_ONLY_PATHS
+
+from .approval_fixtures import cleared_context
+
+SOURCE = Path(strike_desk.__file__).parent
+
+
+def test_the_two_clients_have_disjoint_whitelists():
+    """AC-5: the code that reasons cannot reach the code that places."""
+    assert EXECUTION_PATHS == {
+        "/api/v1/placeorder",
+        "/api/v1/orderstatus",
+        "/api/v1/cancelorder",
+    }
+    assert READ_ONLY_PATHS.isdisjoint(EXECUTION_PATHS)
+    assert not any("order" in path for path in READ_ONLY_PATHS)
+
+
+@pytest.mark.parametrize("module", ["regime_analyst", "options_strategist", "mcp_toolbox"])
+def test_no_agent_module_imports_the_execution_edge(module):
+    """AC-5: an agent that cannot import the client cannot place by hallucination."""
+    tree = ast.parse((SOURCE / f"{module}.py").read_text(encoding="utf-8"))
+    imported = {
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+    } | {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    forbidden = {"execution_client", "approval_gate", "approval_watcher", "openalgo_mirror"}
+    assert not {name.split(".")[-1] for name in imported} & forbidden
+
+
+def test_a_response_without_a_queue_receipt_stops_the_desk(
+    gate, journal, openalgo, execution_settings, today
+):
+    """AC-3: the audit property of the MVP is zero autonomous live orders."""
+    openalgo.post("/api/v1/placeorder").mock(
+        return_value=httpx.Response(200, json={"status": "success", "orderid": "24090100000041"})
+    )
+    cancel = openalgo.post("/api/v1/cancelorder").mock(
+        return_value=httpx.Response(
+            403, json={"status": "error", "message": "not allowed in Semi-Auto mode"}
+        )
+    )
+
+    gate.submit(cleared_context())
+
+    assert execution_settings.kill_switch_path.exists()
+    assert journal.list_approvals(today)[0].defect is True
+    assert cancel.call_count == 1
+
+
+def test_openalgos_database_is_never_written(mirror, openalgo_db):
+    """AC-13: proved against a real file, by trying."""
+    import sqlite3
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+
+    before = sqlite3.connect(openalgo_db).execute("SELECT order_mode FROM api_keys").fetchone()
+    with pytest.raises(OperationalError):
+        with mirror._session_scope() as session:  # noqa: SLF001
+            session.execute(text("DELETE FROM pending_orders"))
+            session.commit()
+    after = sqlite3.connect(openalgo_db).execute("SELECT order_mode FROM api_keys").fetchone()
+    assert before == after
+
+
+def test_the_append_only_triggers_cover_the_new_tables(journal, gate, openalgo):
+    """AC-11: approvals and orders are as immutable as decisions."""
+    import sqlite3
+
+    openalgo.post("/api/v1/placeorder").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "mode": "semi_auto", "pending_order_id": 41}
+        )
+    )
+    gate.submit(cleared_context())
+
+    # SQLite BEFORE UPDATE/DELETE triggers are FOR EACH ROW. Submit journals an
+    # approval, not an order — seed one so the orders triggers are actually hit.
+    head = journal.open_approvals()[0]
+    journal.record_order(
+        order_id="order-guardrail",
+        approval_id=head.approval_id,
+        tick_id=head.tick_id,
+        trace_id=head.trace_id,
+        created_at_utc=head.created_at_utc,
+        trading_day=head.trading_day,
+        pending_order_id=head.pending_order_id,
+        broker_order_id="24090100000041",
+        symbol=head.symbol,
+        exchange=head.exchange,
+        action=head.action,
+        product=head.product,
+        price_type="LIMIT",
+        limit_price=head.limit_price,
+        lots=head.lots,
+        lot_size=head.lot_size,
+        quantity=head.quantity,
+        order_status="open",
+        average_price=None,
+        raw_json="{}",
+        schema_version=head.schema_version,
+    )
+
+    connection = sqlite3.connect(journal.path)
+    try:
+        for statement in (
+            "UPDATE approvals SET status = 'approved'",
+            "DELETE FROM approvals",
+            "UPDATE orders SET order_status = 'complete'",
+            "DELETE FROM orders",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement)
+    finally:
+        connection.close()
+
+
+def test_one_intent_at_a_time_is_a_query_not_a_flag(journal, gate, openalgo):
+    """AC-10: restart-proof, because it is answered from the journal."""
+    openalgo.post("/api/v1/placeorder").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "mode": "semi_auto", "pending_order_id": 41}
+        )
+    )
+    gate.submit(cleared_context())
+    assert len(journal.open_approvals()) == 1

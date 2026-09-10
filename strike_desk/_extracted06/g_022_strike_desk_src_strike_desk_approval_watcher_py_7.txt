@@ -1,0 +1,34 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+    pending = state.get("approval_pending")
+    if pending:
+        if pending.get("stale"):
+            return (
+                OUTCOME_HOLD,
+                REASON_APPROVAL_QUEUE_STALE,
+                render(
+                    REASON_APPROVAL_QUEUE_STALE,
+                    max_chars=cap,
+                    pending_order_id=pending.get("pending_order_id", "?"),
+                    deadline=str(pending.get("deadline", "an unrecorded time")),
+                ),
+            )
+        return (
+            OUTCOME_HOLD,
+            REASON_APPROVAL_PENDING,
+            render(
+                REASON_APPROVAL_PENDING,
+                max_chars=cap,
+                symbol=str(pending.get("symbol", "a contract")),
+                quantity=pending.get("quantity", 0),
+                pending_order_id=pending.get("pending_order_id", "?"),
+            ),
+        )
+
+    gate_detail = state.get("gate_unavailable")
+    if gate_detail:
+        return (
+            OUTCOME_DECLINE,
+            REASON_APPROVAL_GATE_UNAVAILABLE,
+            render(REASON_APPROVAL_GATE_UNAVAILABLE, max_chars=cap, detail=str(gate_detail)),
+        )

@@ -132,7 +132,7 @@ def test_the_artifact_moves_when_the_taxonomy_moves():
     assert TAXONOMY_ARTIFACT == f"{TAXONOMY_VERSION}+{TAXONOMY_DIGEST}"
     assert len(TAXONOMY_DIGEST) == 12
     assert compute_digest(ENTRIES[1:]) != TAXONOMY_DIGEST
-    assert TAXONOMY_VERSION == "dt-3"
+    assert TAXONOMY_VERSION == "dt-4"
 
 
 #: Every code dt-1 and dt-2 shipped, with the class it shipped with. These may never change.
@@ -149,12 +149,16 @@ FROZEN_CLASSES = {
     "no-viable-contract": ("contract", "routine"),
     "proposal-ungrounded": ("contract", "defect"),
     "proposal-invalid": ("contract", "defect"),
+    "risk-session-stopped": ("risk", "routine"),
+    "risk-input-unavailable": ("risk", "degraded"),
+    "risk-veto": ("risk", "routine"),
+    "risk-cleared": ("risk", "routine"),
 }
 
 
 @pytest.mark.parametrize(("code", "expected"), sorted(FROZEN_CLASSES.items()))
 def test_the_taxonomy_is_additive(code: str, expected: tuple[str, str]) -> None:
-    """An older row must never become taxonomy drift because we shipped dt-3."""
+    """An older row must never become taxonomy drift because we shipped dt-4."""
     found = describe(code)
     assert (found.category, found.disposition) == expected
 

@@ -1,0 +1,317 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+"""The scheduled job that turns a queued intent into a settled, journalled fact."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
+
+from opentelemetry.trace import Status, StatusCode
+
+from .approval_gate import (
+    WITHDRAWAL_NOT_ATTEMPTED,
+    WITHDRAWAL_NOT_QUEUED,
+    WITHDRAWAL_PERMITTED,
+    WITHDRAWAL_REFUSED,
+    Resolution,
+    settle_approval,
+    strategy_tag,
+)
+from .config import IST, Settings
+from .errors import MirrorUnavailable, OpenAlgoError
+from .execution_client import ExecutionClient
+from .journal import (
+    APPROVAL_APPROVED,
+    APPROVAL_EXPIRED,
+    APPROVAL_LATE,
+    APPROVAL_REJECTED,
+    APPROVAL_WITHDRAWN,
+    ORDER_TERMINAL,
+    SCHEMA_VERSION,
+    Journal,
+)
+from .observability import get_tracer
+from .openalgo_mirror import APPROVED, REJECTED, OpenAlgoMirror
+
+logger = logging.getLogger(__name__)
+
+#: The resume signature: (tick_id, resolution payload) -> was the graph resumed?
+ResumeCallback = Callable[[str, dict[str, Any]], bool]
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """Timestamps read back from SQLite are naive; treat them as the UTC they were written in."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+class ApprovalWatcher:
+    """Resolves outstanding approvals and follows placed orders. Stateless between runs."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        journal: Journal,
+        mirror: OpenAlgoMirror,
+        client: ExecutionClient,
+        resume: ResumeCallback,
+    ) -> None:
+        self._settings = settings
+        self._journal = journal
+        self._mirror = mirror
+        self._client = client
+        self._resume = resume
+        self._tracer = get_tracer()
+
+    def poll_once(self) -> int:
+        """One pass. Returns the number of approvals settled, for tests and logging."""
+        settled = 0
+        for row in self._journal.open_approvals():
+            resolution = self._resolve(row)
+            if resolution is None:
+                continue
+            if self._settle(row.tick_id, resolution):
+                settled += 1
+        self._check_for_late_clicks()
+        self._follow_orders()
+        return settled
+
+    # --- resolving an outstanding approval ---------------------------------
+
+    def _resolve(self, row: Any) -> Resolution | None:
+        """What has happened to one queued intent, or None when it is still waiting."""
+        now = datetime.now(tz=UTC)
+        waited = (now - _as_utc(row.created_at_utc)).total_seconds()
+        killed = self._settings.kill_switch_path.exists()
+        expired = killed or now >= _as_utc(row.deadline_utc)
+
+        try:
+            pending = self._mirror.pending_order(int(row.pending_order_id))
+        except MirrorUnavailable as exc:
+            # An unreadable queue is not a settlement: a clickable order may still be in it,
+            # and settling blind would release the hold and let a second intent form. Past
+            # the deadline it stops being a transient and becomes something a human must see.
+            if expired:
+                logger.critical(
+                    "APPROVAL QUEUE UNREADABLE: pending order %s passed its deadline and the "
+                    "queue cannot be read (%s). The desk is holding and is not trading.",
+                    row.pending_order_id,
+                    exc,
+                )
+            else:
+                logger.error("cannot read the approval queue for %s: %s", row.approval_id, exc)
+            return None
+
+        if pending is None:
+            return Resolution(
+                approval_id=row.approval_id,
+                tick_id=row.tick_id,
+                status=APPROVAL_WITHDRAWN,
+                detail=f"pending order {row.pending_order_id} is no longer in the queue",
+                wait_seconds=waited,
+                withdrawal=WITHDRAWAL_NOT_QUEUED,
+            )
+
+        if pending.status == APPROVED:
+            return self._approved_resolution(row, pending, waited, late=False)
+
+        if pending.status == REJECTED:
+            reason = (pending.rejected_reason or "no reason given").strip()
+            return Resolution(
+                approval_id=row.approval_id,
+                tick_id=row.tick_id,
+                status=APPROVAL_REJECTED,
+                detail=f"rejected by {pending.rejected_by or 'the trader'}: {reason}",
+                approved_by=pending.rejected_by,
+                resolved_at_ist=pending.resolved_at_ist,
+                wait_seconds=waited,
+                withdrawal=WITHDRAWAL_NOT_QUEUED,
+            )
+
+        if expired:
+            cause = "the kill switch is engaged" if killed else "the approval deadline passed"
+            logger.critical(
+                "APPROVAL EXPIRED: %s while pending order %s was still queued. "
+                "Reject pending order %s in OpenAlgo's Action Center — approving it now would "
+                "buy %d x %s at a price band read %.0f seconds ago.",
+                cause,
+                row.pending_order_id,
+                row.pending_order_id,
+                row.quantity,
+                row.symbol,
+                waited,
+            )
+            return Resolution(
+                approval_id=row.approval_id,
+                tick_id=row.tick_id,
+                status=APPROVAL_EXPIRED,
+                detail=(
+                    f"{cause} after {waited:.0f}s; pending order {row.pending_order_id} is still "
+                    "queued and has no broker order behind it to cancel"
+                ),
+                wait_seconds=waited,
+                withdrawal=WITHDRAWAL_NOT_QUEUED,
+            )
+        return None
+
+    def _approved_resolution(
+        self, row: Any, pending: Any, waited: float, *, late: bool
+    ) -> Resolution:
+        """An approved pending order, with the order read back and — if late — withdrawn."""
+        broker_order_id = (pending.broker_order_id or "").strip() or None
+        order: dict[str, Any] = {}
+        order_status = pending.broker_status or "unknown"
+        average_price: float | None = None
+        tag = strategy_tag(self._settings, row.tick_id)
+
+        if broker_order_id:
+            try:
+                order = self._client.order_status(broker_order_id, tag)
+                order_status = str(order.get("order_status") or order_status)
+                raw_average = order.get("average_price")
+                average_price = float(raw_average) if raw_average else None
+            except OpenAlgoError as exc:
+                logger.error("could not read order %s back: %s", broker_order_id, exc)
+
+        withdrawal = WITHDRAWAL_NOT_ATTEMPTED
+        if late and broker_order_id and order_status not in ORDER_TERMINAL:
+            permitted, detail = self._client.cancel_order(broker_order_id, tag)
+            withdrawal = WITHDRAWAL_PERMITTED if permitted else WITHDRAWAL_REFUSED
+            logger.critical(
+                "LATE APPROVAL: pending order %s was approved after its deadline; "
+                "withdrawal %s (%s)",
+                row.pending_order_id,
+                withdrawal,
+                detail,
+            )
+
+        approver = pending.approved_by or "the trader"
+        return Resolution(
+            approval_id=row.approval_id,
+            tick_id=row.tick_id,
+            status=APPROVAL_LATE if late else APPROVAL_APPROVED,
+            detail=(
+                f"approved by {approver} at {pending.approved_at_ist or 'an unrecorded time'}; "
+                f"order {broker_order_id or 'unknown'} is {order_status}"
+            ),
+            approved_by=pending.approved_by,
+            resolved_at_ist=pending.approved_at_ist,
+            broker_order_id=broker_order_id,
+            withdrawal=withdrawal,
+            wait_seconds=waited,
+            order_status=order_status,
+            average_price=average_price,
+            order_raw=order,
+        )
+
+    def _settle(self, tick_id: str, resolution: Resolution) -> bool:
+        """Resume the suspended tick so it settles itself; settle it here if that fails."""
+        with self._tracer.start_as_current_span("strike_desk.approval") as span:
+            trace_id = format(span.get_span_context().trace_id, "032x")
+            span.set_attribute("strike_desk.tick_id", tick_id)
+            span.set_attribute("approval.id", resolution.approval_id)
+            span.set_attribute("approval.status", resolution.status)
+            span.set_attribute("approval.wait_seconds", resolution.wait_seconds)
+            span.set_attribute("approval.withdrawal", resolution.withdrawal or "none")
+            span.set_attribute("order.status", resolution.order_status or "none")
+            if resolution.status in {APPROVAL_LATE, APPROVAL_EXPIRED}:
+                span.set_status(Status(StatusCode.ERROR, resolution.status))
+
+            if self._resume(tick_id, resolution.as_dict()):
+                span.set_attribute("approval.settled_by", "graph")
+                return True
+            span.set_attribute("approval.settled_by", "watcher")
+            return settle_approval(self._journal, resolution, trace_id)
+
+    # --- the two follow-up passes ------------------------------------------
+
+    def _check_for_late_clicks(self) -> None:
+        """An expired approval whose queued row a human may still approve."""
+        today = datetime.now(tz=IST).date().isoformat()
+        for row in self._journal.expired_awaiting_late_check(today):
+            try:
+                pending = self._mirror.pending_order(int(row.pending_order_id))
+            except MirrorUnavailable as exc:
+                logger.error("cannot re-read pending order %s: %s", row.pending_order_id, exc)
+                continue
+            if pending is None or pending.status != APPROVED:
+                continue
+            waited = (
+                datetime.now(tz=UTC) - _as_utc(row.created_at_utc)
+            ).total_seconds()
+            resolution = self._approved_resolution(row, pending, waited, late=True)
+            with self._tracer.start_as_current_span("strike_desk.approval") as span:
+                trace_id = format(span.get_span_context().trace_id, "032x")
+                span.set_attribute("approval.id", row.approval_id)
+                span.set_attribute("approval.status", resolution.status)
+                span.set_attribute("strike_desk.tick_trace_id", row.tick_trace_id)
+                span.set_status(Status(StatusCode.ERROR, APPROVAL_LATE))
+                settle_approval(self._journal, resolution, trace_id)
+
+    def _follow_orders(self) -> None:
+        """Watch a placed order to a terminal state, and cancel one that never fills."""
+        today = datetime.now(tz=IST).date().isoformat()
+        now = datetime.now(tz=UTC)
+        for order in self._journal.watchable_orders(today):
+            tag = strategy_tag(self._settings, order.tick_id)
+            try:
+                data = self._client.order_status(order.broker_order_id, tag)
+            except OpenAlgoError as exc:
+                logger.error("could not read order %s back: %s", order.broker_order_id, exc)
+                continue
+            status = str(data.get("order_status") or "unknown")
+            raw_average = data.get("average_price")
+            average_price = float(raw_average) if raw_average else None
+
+            age = (now - _as_utc(order.created_at_utc)).total_seconds()
+            if status not in ORDER_TERMINAL and age >= self._settings.fill_deadline_seconds:
+                permitted, detail = self._client.cancel_order(order.broker_order_id, tag)
+                logger.warning(
+                    "order %s had not filled after %.0fs; cancel %s (%s)",
+                    order.broker_order_id,
+                    age,
+                    "permitted" if permitted else "refused",
+                    detail,
+                )
+                if permitted:
+                    status = "cancelled"
+
+            if status == order.order_status:
+                continue
+            self._append_order_state(order, status, average_price, data)
+
+    def _append_order_state(
+        self, order: Any, status: str, average_price: float | None, raw: dict[str, Any]
+    ) -> None:
+        """One more row for the same order, at its new state."""
+        import json
+        import uuid
+
+        try:
+            self._journal.record_order(
+                order_id=str(uuid.uuid4()),
+                approval_id=order.approval_id,
+                tick_id=order.tick_id,
+                trace_id=order.trace_id,
+                created_at_utc=datetime.now(tz=UTC),
+                trading_day=order.trading_day,
+                pending_order_id=order.pending_order_id,
+                broker_order_id=order.broker_order_id,
+                symbol=order.symbol,
+                exchange=order.exchange,
+                action=order.action,
+                product=order.product,
+                price_type=order.price_type,
+                limit_price=order.limit_price,
+                lots=order.lots,
+                lot_size=order.lot_size,
+                quantity=order.quantity,
+                order_status=status,
+                average_price=average_price,
+                raw_json=json.dumps(raw, default=str, sort_keys=True),
+                schema_version=SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001 — bookkeeping must never kill the scheduler thread
+            logger.exception("could not append order state %s for %s", status, order.order_id)

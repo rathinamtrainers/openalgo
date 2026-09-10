@@ -1,0 +1,36 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+def _cmd_approvals(settings: Settings, args: argparse.Namespace) -> int:
+    if args.day and args.since:
+        print("--day and --since are mutually exclusive", file=sys.stderr)
+        return 1
+    if args.since is not None and args.since < 1:
+        print("--since must be at least 1", file=sys.stderr)
+        return 1
+
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        if args.since:
+            today = datetime.now(tz=IST).date()
+            days = [
+                (today - timedelta(days=offset)).isoformat() for offset in range(args.since - 1, -1, -1)
+            ]
+        else:
+            days = [args.day or _today()]
+
+        collected: list[tuple[Any, list[Any]]] = []
+        for day in days:
+            for row in journal.list_approvals(day, limit=args.limit):
+                collected.append((row, list(journal.orders_for_approval(row.approval_id))))
+
+        if args.json:
+            print(approval_view.to_json(collected))
+        elif not collected:
+            print(f"no approvals for {', '.join(days)}")
+        else:
+            for row, orders in collected:
+                print(approval_view.render(row, orders, journal))
+        return 2 if any(row.defect for row, _ in collected) else 0
+    finally:
+        journal.close()

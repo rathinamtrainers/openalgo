@@ -127,6 +127,17 @@ class Settings(BaseSettings):
     risk_max_trades_per_day: int = Field(default=3, ge=1, le=50)
     risk_capital_floor: float = Field(default=50_000.0, ge=0.0, le=100_000_000.0)
 
+    # --- Execution and the approval gate ------------------------------------
+    execution_enabled: bool = False
+    openalgo_user: str | None = None
+    openalgo_db_path: Path = Path("/opt/openalgo/db/openalgo.db")
+    order_product: str = "MIS"
+    order_strategy_prefix: str = "strike-desk"
+    price_tick: float = Field(default=0.05, gt=0, le=100)
+    approval_deadline_seconds: int = Field(default=300, ge=30, le=1800)
+    approval_poll_seconds: int = Field(default=5, ge=1, le=60)
+    fill_deadline_seconds: int = Field(default=300, ge=30, le=3600)
+
     # --- MCP toolbox --------------------------------------------------------
     mcp_python: Path = Path("/opt/openalgo/.venv/bin/python")
     mcp_server_script: Path = Path("/opt/openalgo/mcp/mcpserver.py")
@@ -173,6 +184,29 @@ class Settings(BaseSettings):
     def _validate_time_stop(cls, value: str) -> str:
         time.fromisoformat(value)
         return value
+
+    @field_validator("order_product")
+    @classmethod
+    def _validate_product(cls, value: str) -> str:
+        if value not in {"MIS", "NRML", "CNC"}:
+            raise ValueError("order_product must be one of MIS, NRML, CNC")
+        return value
+
+    @field_validator("order_strategy_prefix")
+    @classmethod
+    def _validate_strategy_prefix(cls, value: str) -> str:
+        if not value or len(value) > 15 or not all(ch.isalnum() or ch in "-_" for ch in value):
+            raise ValueError("order_strategy_prefix must be 1-15 chars of [A-Za-z0-9_-]")
+        return value
+
+    @model_validator(mode="after")
+    def _execution_needs_a_user(self) -> Settings:
+        """A desk that may place orders must know whose approval queue it is writing into."""
+        if self.execution_enabled and not (self.openalgo_user or "").strip():
+            raise ValueError(
+                "STRIKE_DESK_EXECUTION_ENABLED=true requires STRIKE_DESK_OPENALGO_USER"
+            )
+        return self
 
     @model_validator(mode="after")
     def _budgets_fit(self) -> Settings:

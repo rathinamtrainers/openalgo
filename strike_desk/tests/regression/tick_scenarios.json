@@ -213,6 +213,42 @@
         }
       },
       "expect": {"outcome": "enter", "reason_code": "risk-cleared"}
+    },
+    {
+      "id": "REG-19",
+      "note": "an intent is already waiting — propose nothing",
+      "state": {
+        "book": {"open_positions": []},
+        "approval_pending": {
+          "symbol": "NIFTY02SEP2624800CE",
+          "quantity": 150,
+          "pending_order_id": 42,
+          "stale": false
+        }
+      },
+      "expect": {"outcome": "hold", "reason_code": "approval-pending"}
+    },
+    {
+      "id": "REG-20",
+      "note": "an intent is past its deadline and still unsettled",
+      "state": {
+        "book": {"open_positions": []},
+        "approval_pending": {
+          "pending_order_id": 42,
+          "deadline": "11:35:00 IST",
+          "stale": true
+        }
+      },
+      "expect": {"outcome": "hold", "reason_code": "approval-queue-stale"}
+    },
+    {
+      "id": "REG-21",
+      "note": "the human gate cannot be verified",
+      "state": {
+        "book": {"open_positions": []},
+        "gate_unavailable": "OpenAlgo has no api_keys row for user practice"
+      },
+      "expect": {"outcome": "decline", "reason_code": "approval-gate-unavailable"}
     }
   ]
 }

@@ -1,0 +1,4 @@
+FILE: strike_desk/src/strike_desk/decline_taxonomy.py
+
+        if item.outcome not in OUTCOMES:
+            raise ValueError(f"{item.code!r}: outcome {item.outcome!r} is not a tick outcome")

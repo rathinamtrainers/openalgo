@@ -1,0 +1,11 @@
+FILE: strike_desk/src/strike_desk/service.py
+
+        self._watcher: ApprovalWatcher | None = None
+        if self._gate is not None and self._mirror is not None and self._execution is not None:
+            self._watcher = ApprovalWatcher(
+                settings,
+                self._journal,
+                self._mirror,
+                self._execution,
+                self._runner.resume_approval,
+            )

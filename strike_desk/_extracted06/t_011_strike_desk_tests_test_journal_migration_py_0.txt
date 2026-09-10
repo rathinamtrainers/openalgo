@@ -1,0 +1,25 @@
+FILE: strike_desk/tests/test_journal_migration.py
+
+def test_schema_six_adds_two_tables_and_touches_no_row(legacy_five_journal):
+    """The iteration-05 database gains two tables and loses nothing."""
+    before = legacy_five_journal.count_decisions(TRADING_DAY)
+    journal = Journal(legacy_five_journal.path)
+    try:
+        journal.create_schema()
+        assert journal.count_decisions(TRADING_DAY) == before
+        assert journal.open_approvals() == []
+    finally:
+        journal.close()
+
+    connection = sqlite3.connect(legacy_five_journal.path)
+    try:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert {"approvals", "orders"} <= tables
+        indexes = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'uq_%'"
+        )}
+        assert {"uq_approvals_state", "uq_orders_state"} <= indexes
+    finally:
+        connection.close()

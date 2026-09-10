@@ -1,0 +1,6 @@
+FILE: strike_desk/src/strike_desk/service.py
+
+        if self._execution is not None:
+            self._execution.close()
+        if self._mirror is not None:
+            self._mirror.close()

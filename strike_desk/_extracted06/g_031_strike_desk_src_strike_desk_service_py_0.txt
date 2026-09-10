@@ -1,0 +1,9 @@
+FILE: strike_desk/src/strike_desk/service.py
+
+        self._mirror: OpenAlgoMirror | None = None
+        self._execution: ExecutionClient | None = None
+        self._gate: ApprovalGate | None = None
+        if settings.execution_enabled:
+            self._mirror = OpenAlgoMirror(settings)
+            self._execution = ExecutionClient(settings)
+            self._gate = ApprovalGate(settings, self._journal, self._mirror, self._execution)

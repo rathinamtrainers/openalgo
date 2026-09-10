@@ -1,0 +1,4 @@
+FILE: strike_desk/src/strike_desk/risk_officer.py
+
+class RiskInputUnavailable(StrikeDeskError):
+    """A limit could not be evaluated because an input it needs was unusable."""

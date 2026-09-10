@@ -1,0 +1,9 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    def route_after_plan(state: TickState) -> str:
+        if state.get("budget_exceeded") or state.get("book_error"):
+            return "decide"
+        book = state.get("book") or {}
+        if book.get("open_positions"):
+            return "decide"
+        return "decide" if state.get("session_stop") else "consult"

@@ -1,0 +1,21 @@
+FILE: strike_desk/src/strike_desk/service.py
+
+        if self._gate is not None:
+            health = self._gate.health()
+            if health.ok:
+                logger.info("approval gate: %s", health.detail)
+            else:
+                logger.critical(
+                    "approval gate is NOT usable: %s — the desk will decline every tick "
+                    "with approval-gate-unavailable until this is fixed",
+                    health.detail,
+                )
+        if self._watcher is not None:
+            self._scheduler.add_job(
+                self._poll_approvals,
+                IntervalTrigger(seconds=self._settings.approval_poll_seconds),
+                id="approval-watch",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )

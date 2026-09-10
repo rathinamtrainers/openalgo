@@ -1,0 +1,3 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    proposal_id = deps.journal.record_proposal(**build_proposal_row(...))

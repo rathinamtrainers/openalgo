@@ -1,0 +1,4 @@
+FILE: strike_desk/src/strike_desk/session.py
+
+    def engage_kill_switch(self, reason: str) -> None:
+        engage_kill_switch(self._settings, reason)

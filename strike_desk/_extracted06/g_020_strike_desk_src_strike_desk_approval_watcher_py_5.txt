@@ -1,0 +1,29 @@
+FILE: strike_desk/src/strike_desk/approval_watcher.py
+
+                if not (assessment.stopped or latched):
+                    outstanding = deps.journal.open_approvals()
+                    if outstanding:
+                        head = outstanding[0]
+                        deadline = head.deadline_utc
+                        if deadline.tzinfo is None:
+                            deadline = deadline.replace(tzinfo=UTC)
+                        stale = datetime.now(tz=UTC) >= deadline
+                        span.set_attribute("approval.outstanding", head.approval_id)
+                        span.set_attribute("approval.stale", stale)
+                        return {
+                            "book": snapshot,
+                            "approval_pending": {
+                                "approval_id": head.approval_id,
+                                "pending_order_id": head.pending_order_id,
+                                "symbol": head.symbol,
+                                "quantity": head.quantity,
+                                "deadline": deadline.astimezone(IST).strftime("%H:%M:%S IST"),
+                                "stale": stale,
+                            },
+                        }
+                    if deps.settings.execution_enabled and deps.gate is not None:
+                        health = deps.gate.health()
+                        span.set_attribute("approval.gate_ok", health.ok)
+                        if not health.ok:
+                            return {"book": snapshot, "gate_unavailable": health.detail}
+                    return {"book": snapshot}

@@ -1,0 +1,14 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    stop = state.get("session_stop")
+    if stop:
+        return (
+            OUTCOME_DECLINE,
+            REASON_RISK_SESSION_STOPPED,
+            render(
+                REASON_RISK_SESSION_STOPPED,
+                max_chars=cap,
+                configured=f"Rs {float(stop.get('configured') or 0.0):,.0f}",
+                observed=f"Rs {float(stop.get('observed') or 0.0):,.0f}",
+            ),
+        )

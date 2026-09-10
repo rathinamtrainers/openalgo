@@ -7,25 +7,28 @@ import os
 import signal
 import sqlite3
 import threading
-from datetime import UTC, datetime
 from types import FrameType
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from .approval_gate import ApprovalGate
+from .approval_watcher import ApprovalWatcher
 from .config import IST, Settings
 from .errors import JournalWriteError, McpUnavailable, ModelCallFailed, PromptNotFound
+from .execution_client import ExecutionClient
 from .graph import TickDeps
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing
 from .openalgo_client import OpenAlgoClient
+from .openalgo_mirror import OpenAlgoMirror
 from .options_strategist import build_options_strategist
 from .prompt_registry import PromptRegistry
 from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
-from .session import SessionGate
+from .session import SessionGate, engage_kill_switch
 from .specialists import SpecialistRegistry, shutdown_executor
 
 logger = logging.getLogger(__name__)
@@ -56,6 +59,14 @@ class StrikeDeskService:
         self._toolbox: McpToolbox | None = None
         self._register_specialists()
 
+        self._mirror: OpenAlgoMirror | None = None
+        self._execution: ExecutionClient | None = None
+        self._gate: ApprovalGate | None = None
+        if settings.execution_enabled:
+            self._mirror = OpenAlgoMirror(settings)
+            self._execution = ExecutionClient(settings)
+            self._gate = ApprovalGate(settings, self._journal, self._mirror, self._execution)
+
         self._checkpoint_conn = sqlite3.connect(
             str(settings.checkpoint_path), check_same_thread=False
         )
@@ -70,8 +81,18 @@ class StrikeDeskService:
             prompts=self._prompts,
             span_processor=self._span_processor,
             checkpointer=checkpointer,
+            gate=self._gate,
         )
         self._runner = TickRunner(deps, SessionGate(self._client, settings))
+        self._watcher: ApprovalWatcher | None = None
+        if self._gate is not None and self._mirror is not None and self._execution is not None:
+            self._watcher = ApprovalWatcher(
+                settings,
+                self._journal,
+                self._mirror,
+                self._execution,
+                self._runner.resume_approval,
+            )
         self._scheduler = BackgroundScheduler(timezone=IST)
         self._stop = threading.Event()
         self._manual = threading.Event()
@@ -124,10 +145,14 @@ class StrikeDeskService:
             self._journal_failures = 0
 
     def engage_kill_switch(self, reason: str) -> None:
-        self._settings.kill_switch_path.write_text(
-            f"{datetime.now(tz=UTC).isoformat()} {reason}", encoding="utf-8"
-        )
-        logger.critical("kill switch engaged: %s", reason)
+        engage_kill_switch(self._settings, reason)
+
+    def _poll_approvals(self) -> None:
+        """Never let one bad poll kill the scheduler thread."""
+        try:
+            self._watcher.poll_once()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            logger.exception("approval watch failed")
 
     def _handle_stop(self, _signum: int, _frame: FrameType | None) -> None:
         self._stop.set()
@@ -155,6 +180,25 @@ class StrikeDeskService:
             coalesce=True,
             misfire_grace_time=30,
         )
+        if self._gate is not None:
+            health = self._gate.health()
+            if health.ok:
+                logger.info("approval gate: %s", health.detail)
+            else:
+                logger.critical(
+                    "approval gate is NOT usable: %s — the desk will decline every tick "
+                    "with approval-gate-unavailable until this is fixed",
+                    health.detail,
+                )
+        if self._watcher is not None:
+            self._scheduler.add_job(
+                self._poll_approvals,
+                IntervalTrigger(seconds=self._settings.approval_poll_seconds),
+                id="approval-watch",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
         self._scheduler.start()
         signal.signal(signal.SIGTERM, self._handle_stop)
         signal.signal(signal.SIGINT, self._handle_stop)
@@ -182,6 +226,10 @@ class StrikeDeskService:
             self._toolbox.close()
         self._provider.shutdown()
         self._client.close()
+        if self._execution is not None:
+            self._execution.close()
+        if self._mirror is not None:
+            self._mirror.close()
         try:
             self._checkpoint_conn.close()
         finally:

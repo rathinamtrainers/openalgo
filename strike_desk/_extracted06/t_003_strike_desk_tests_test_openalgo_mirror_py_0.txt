@@ -1,0 +1,94 @@
+FILE: strike_desk/tests/test_openalgo_mirror.py
+
+"""The read-only window onto OpenAlgo: what it reads, and what it refuses to do."""
+
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
+
+from strike_desk.errors import MirrorUnavailable
+from strike_desk.openalgo_mirror import OpenAlgoMirror
+
+from .approval_fixtures import (
+    USER,
+    approve_pending,
+    delete_pending,
+    queue_pending_order,
+    reject_pending,
+    set_order_mode,
+)
+
+
+def test_semi_auto_is_the_only_healthy_mode(mirror, openalgo_db):
+    assert mirror.order_mode() == "semi_auto"
+    assert mirror.health().ok is True
+
+    set_order_mode(openalgo_db, "auto")
+    health = mirror.health()
+    assert health.ok is False
+    assert health.order_mode == "auto"
+    assert "without a human approval" in health.detail
+
+
+def test_a_missing_database_is_unhealthy_not_a_crash(execution_settings):
+    settings = execution_settings.model_copy(
+        update={"openalgo_db_path": execution_settings.state_dir / "nope.db"}
+    )
+    mirror = OpenAlgoMirror(settings)
+    try:
+        assert mirror.health().ok is False
+        with pytest.raises(MirrorUnavailable):
+            mirror.order_mode()
+    finally:
+        mirror.close()
+
+
+def test_an_unconfigured_user_is_unhealthy(execution_settings):
+    mirror = OpenAlgoMirror(execution_settings.model_copy(update={"openalgo_user": None}))
+    try:
+        assert "OPENALGO_USER" in mirror.health().detail
+    finally:
+        mirror.close()
+
+
+def test_an_unknown_user_is_unhealthy(execution_settings):
+    mirror = OpenAlgoMirror(execution_settings.model_copy(update={"openalgo_user": "someone"}))
+    try:
+        assert "no api_keys row" in mirror.health().detail
+    finally:
+        mirror.close()
+
+
+def test_pending_order_states_read_back(mirror, openalgo_db):
+    pending_order_id = queue_pending_order(openalgo_db)
+    row = mirror.pending_order(pending_order_id)
+    assert row.status == "pending" and row.resolved is False and row.user_id == USER
+
+    approve_pending(openalgo_db, pending_order_id, by="amit")
+    row = mirror.pending_order(pending_order_id)
+    assert row.status == "approved" and row.resolved is True
+    assert row.approved_by == "amit" and row.broker_order_id == "24090100000041"
+    assert row.resolved_at_ist == row.approved_at_ist
+
+
+def test_a_rejection_carries_its_reason(mirror, openalgo_db):
+    pending_order_id = queue_pending_order(openalgo_db)
+    reject_pending(openalgo_db, pending_order_id, reason="strike too far OTM")
+    row = mirror.pending_order(pending_order_id)
+    assert row.status == "rejected" and row.rejected_reason == "strike too far OTM"
+
+
+def test_a_deleted_row_reads_as_none(mirror, openalgo_db):
+    pending_order_id = queue_pending_order(openalgo_db)
+    delete_pending(openalgo_db, pending_order_id)
+    assert mirror.pending_order(pending_order_id) is None
+
+
+def test_the_connection_cannot_write(mirror):
+    """AC-13: the guarantee is the driver's, not our discipline's."""
+    with pytest.raises(OperationalError, match="readonly database"):
+        with mirror._session_scope() as session:  # noqa: SLF001 - proving the connection mode
+            session.execute(text("UPDATE api_keys SET order_mode = 'auto'"))
+            session.commit()

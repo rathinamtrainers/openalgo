@@ -1,0 +1,6 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+        lines.append(
+            f"  {day.trading_day:<12}{day.total:>6}{day.declines:>10}{day.holds:>7}"
+            f"{day.entries:>9}{day.defects:>9}{day.token_cost_micros / 1_000_000:>10.4f}"
+        )

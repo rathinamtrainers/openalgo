@@ -1,0 +1,16 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    def proposal(self, proposal_id: str) -> Proposal | None:
+        with self.session_scope() as session:
+            statement = select(Proposal).where(Proposal.proposal_id == proposal_id)
+            return session.execute(statement).scalars().first()
+
+    def risk_verdict(self, verdict_id: str) -> RiskVerdictRow | None:
+        with self.session_scope() as session:
+            statement = select(RiskVerdictRow).where(RiskVerdictRow.verdict_id == verdict_id)
+            return session.execute(statement).scalars().first()
+
+    def regime_read_for_tick(self, tick_id: str) -> RegimeRead | None:
+        with self.session_scope() as session:
+            statement = select(RegimeRead).where(RegimeRead.tick_id == tick_id)
+            return session.execute(statement).scalars().first()

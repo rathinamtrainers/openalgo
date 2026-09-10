@@ -1,0 +1,12 @@
+FILE: strike_desk/src/strike_desk/config.py
+
+        if self.risk_per_trade_loss_cap_pct > self.risk_daily_loss_cap_pct:
+            raise ValueError(
+                "risk_per_trade_loss_cap_pct must not exceed risk_daily_loss_cap_pct, or one "
+                "trade can end the session"
+            )
+        if self.risk_max_lots > self.playbook_max_lots:
+            raise ValueError(
+                f"risk_max_lots {self.risk_max_lots} is looser than playbook_max_lots "
+                f"{self.playbook_max_lots}; the hard limit must bind at or before the playbook"
+            )

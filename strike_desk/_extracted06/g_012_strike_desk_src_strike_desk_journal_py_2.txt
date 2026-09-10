@@ -1,0 +1,11 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+for _table in (
+    Decision.__table__,
+    TraceSpan.__table__,
+    RegimeRead.__table__,
+    Proposal.__table__,
+    RiskVerdictRow.__table__,
+    ApprovalRow.__table__,
+    OrderRow.__table__,
+):

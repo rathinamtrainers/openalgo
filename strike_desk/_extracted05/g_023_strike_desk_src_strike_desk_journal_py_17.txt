@@ -1,0 +1,7 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    builder.add_node("adjudicate", adjudicate)
+    builder.add_conditional_edges(
+        "propose", route_after_propose, {"adjudicate": "adjudicate", "decide": "decide"}
+    )
+    builder.add_edge("adjudicate", "decide")

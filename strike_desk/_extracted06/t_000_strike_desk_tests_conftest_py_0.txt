@@ -1,0 +1,7 @@
+FILE: strike_desk/tests/conftest.py
+
+        router.post("/api/v1/funds").mock(
+            side_effect=lambda request: httpx.Response(
+                200, json={"status": "success", "data": dict(FUNDS)}
+            )
+        )

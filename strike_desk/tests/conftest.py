@@ -132,7 +132,9 @@ def openalgo():
             return_value=httpx.Response(200, json={"status": "success", "data": {"broker": "test"}})
         )
         router.post("/api/v1/funds").mock(
-            return_value=httpx.Response(200, json={"status": "success", "data": FUNDS})
+            side_effect=lambda request: httpx.Response(
+                200, json={"status": "success", "data": dict(FUNDS)}
+            )
         )
         router.post("/api/v1/positionbook").mock(
             return_value=httpx.Response(200, json={"status": "success", "data": []})
@@ -411,7 +413,7 @@ def tick_state() -> dict[str, Any]:
 
 
 @pytest.fixture
-def tick_harness(runner, deps, journal, today, openalgo):
+def tick_harness(runner, deps, journal, openalgo):
     """A real graph with stubbed regime and strategist specialists."""
     import uuid
 
@@ -428,7 +430,8 @@ def tick_harness(runner, deps, journal, today, openalgo):
             self.runner = runner
             self.deps = deps
             self.journal = journal
-            self.today = today
+            # A morning before the recorded 2026-09-02 expiry, so DTE stays inside 1-10.
+            self.today = "2026-08-25"
             self.openalgo = openalgo
             self.analyst_calls = 0
             self.strategist_calls = 0
@@ -558,11 +561,97 @@ def tick_harness(runner, deps, journal, today, openalgo):
             self.analyst_calls = 0
             self.strategist_calls = 0
             # Adjudication re-checks a reduced proposal against the playbook clock.
-            # Freeze to the session's morning so a 14:45 time-stop stays in the future.
-            frozen = datetime.now(tz=IST).replace(hour=11, minute=30, second=0, microsecond=0)
+            # Freeze to a morning before the recorded 2026-09-02 expiry so DTE stays
+            # inside 1-10 and a 14:45 time-stop stays in the future.
+            frozen = datetime(2026, 8, 25, 11, 30, tzinfo=IST)
             with freeze_time(frozen):
                 self.runner.run_tick("schedule")
             rows = self.journal.list_decisions(self.today)
             return rows[0] if rows else None
 
     return Harness()
+
+
+@pytest.fixture
+def rich_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Rs 15,00,000 capital base — two lots of the recorded contract clear every limit."""
+    monkeypatch.setitem(FUNDS, "availablecash", "1200000.00")
+    monkeypatch.setitem(FUNDS, "utiliseddebits", "300000.00")
+
+
+@pytest.fixture
+def openalgo_db(tmp_path) -> Path:
+    """An OpenAlgo database holding one semi-auto api_keys row and no pending orders."""
+    from .approval_fixtures import make_openalgo_db
+
+    return make_openalgo_db(tmp_path / "openalgo.db")
+
+
+@pytest.fixture
+def execution_settings(settings: Settings, openalgo_db: Path) -> Settings:
+    from .approval_fixtures import USER
+
+    return settings.model_copy(
+        update={
+            "execution_enabled": True,
+            "openalgo_user": USER,
+            "openalgo_db_path": openalgo_db,
+            "approval_deadline_seconds": 300,
+            "approval_poll_seconds": 1,
+            "fill_deadline_seconds": 300,
+        }
+    )
+
+
+@pytest.fixture
+def mirror(execution_settings: Settings):
+    from strike_desk.openalgo_mirror import OpenAlgoMirror
+
+    mirror = OpenAlgoMirror(execution_settings)
+    yield mirror
+    mirror.close()
+
+
+@pytest.fixture
+def execution_client(execution_settings: Settings, openalgo):
+    from strike_desk.execution_client import ExecutionClient
+
+    client = ExecutionClient(execution_settings)
+    yield client
+    client.close()
+
+
+@pytest.fixture
+def gate(execution_settings, journal, mirror, execution_client):
+    from strike_desk.approval_gate import ApprovalGate
+
+    return ApprovalGate(execution_settings, journal, mirror, execution_client)
+
+
+@pytest.fixture
+def execution_deps(
+    execution_settings, client, journal, registry, tracing, prompts, gate
+) -> TickDeps:
+    import sqlite3
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    connection = sqlite3.connect(str(execution_settings.checkpoint_path), check_same_thread=False)
+    checkpointer = SqliteSaver(connection)
+    checkpointer.setup()
+    yield TickDeps(
+        settings=execution_settings,
+        client=client,
+        journal=journal,
+        registry=registry,
+        prompts=prompts,
+        span_processor=tracing,
+        checkpointer=checkpointer,
+        gate=gate,
+    )
+    connection.close()
+
+
+@pytest.fixture
+def execution_runner(execution_deps: TickDeps) -> TickRunner:
+    return TickRunner(execution_deps, SessionGate(execution_deps.client, execution_deps.settings))

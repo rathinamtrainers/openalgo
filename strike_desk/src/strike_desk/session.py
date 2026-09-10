@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from .config import IST, Settings
 from .errors import OpenAlgoError
@@ -20,6 +20,15 @@ CALENDAR_UNAVAILABLE = "calendar-unavailable"
 OVERLAP = "overlap"
 
 _CACHE_LIMIT = 14
+
+
+def engage_kill_switch(settings: Settings, reason: str) -> None:
+    """Write the kill switch file. Every subsequent gate evaluation blocks the tick."""
+    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    settings.kill_switch_path.write_text(
+        f"{datetime.now(tz=UTC).isoformat()} {reason}", encoding="utf-8"
+    )
+    logger.critical("kill switch engaged: %s", reason)
 
 
 @dataclass(frozen=True)

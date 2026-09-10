@@ -1,0 +1,58 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+    def route_after_propose(state: TickState) -> str:
+        return "adjudicate" if state.get("proposal_status") == "proposed" else "decide"
+
+    def adjudicate(state: TickState) -> dict[str, Any]:
+        with tracer.start_as_current_span("tick.adjudicate") as span:
+            limits = RiskLimits.from_settings(deps.settings)
+            span.set_attribute("risk.limits_artifact", limits.artifact)
+            payload = state.get("proposal") or {}
+            started = time.perf_counter()
+            try:
+                proposal = ProposalSubmission.model_validate(payload)
+            except ValidationError as exc:
+                verdict = held(
+                    LIMIT_PROPOSAL_SHAPE,
+                    f"the proposal could not be read as a submission: {exc.error_count()} field(s)",
+                )
+            else:
+                verdict = adjudicate_proposal(
+                    proposal,
+                    state.get("book") or {},
+                    limits,
+                    Playbook.from_settings(deps.settings),
+                    now_ist=datetime.now(tz=IST),
+                    entries_today=deps.journal.count_entries(state["trading_day"]),
+                )
+            latency_us = int((time.perf_counter() - started) * 1_000_000)
+
+            row = build_verdict_row(
+                verdict,
+                limits=limits,
+                tick_id=state["tick_id"],
+                trace_id=state["trace_id"],
+                trading_day=state["trading_day"],
+                index_symbol=deps.settings.index_symbol,
+                proposal_id=state.get("proposal_id"),
+                symbol=str(payload.get("symbol") or "") or None,
+                latency_us=latency_us,
+            )
+            row["created_at_utc"] = datetime.now(tz=UTC)
+            deps.journal.record_risk_verdict(**row)
+
+            span.set_attribute("risk.verdict", verdict.verdict)
+            span.set_attribute("risk.limit", verdict.tripped.limit if verdict.tripped else "none")
+            span.set_attribute(
+                "risk.configured", verdict.tripped.configured if verdict.tripped else 0.0
+            )
+            span.set_attribute(
+                "risk.observed", verdict.tripped.observed if verdict.tripped else 0.0
+            )
+            span.set_attribute("risk.capital_base", verdict.capital_base)
+            span.set_attribute("risk.lots_requested", verdict.lots_requested)
+            span.set_attribute("risk.lots_cleared", verdict.lots_cleared)
+            span.set_attribute("risk.latency_us", latency_us)
+            if verdict.verdict == VERDICT_HOLD:
+                span.set_status(Status(StatusCode.ERROR, "risk input unavailable"))
+            return {"risk": verdict.as_dict()}

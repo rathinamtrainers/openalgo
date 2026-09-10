@@ -1,0 +1,9 @@
+FILE: strike_desk/src/strike_desk/journal.py
+
+def _money(value: Any, unit: Any) -> str:
+    """Format a limit's value the way its unit wants to be read."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unspecified"
+    return f"Rs {number:,.0f}" if unit == UNIT_RUPEES else f"{number:g}"

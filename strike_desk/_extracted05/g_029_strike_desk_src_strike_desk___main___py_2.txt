@@ -1,0 +1,3 @@
+FILE: strike_desk/src/strike_desk/__main__.py
+
+    _add_risk_parser(subparsers)

@@ -1,5 +1,5 @@
 """Append-only SQLite journal: ``decisions``, ``traces``, ``regime_reads``,
-``proposals`` and ``risk_verdicts``."""
+``proposals``, ``risk_verdicts``, ``approvals`` and ``orders``."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -24,15 +25,52 @@ from sqlalchemy import (
     func,
     select,
 )
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
-from .errors import JournalWriteError
+from .errors import AlreadyJournalled, JournalWriteError
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+APPROVAL_PENDING = "pending"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_EXPIRED = "expired"
+APPROVAL_LATE = "late-approval"
+APPROVAL_WITHDRAWN = "withdrawn"
+APPROVAL_GATE_UNAVAILABLE = "gate-unavailable"
+APPROVAL_GATE_BYPASSED = "gate-bypassed"
+APPROVAL_SUBMIT_FAILED = "submit-failed"
+APPROVAL_UNPRICEABLE = "unpriceable-band"
+
+APPROVAL_TERMINAL = frozenset(
+    {
+        APPROVAL_APPROVED,
+        APPROVAL_REJECTED,
+        APPROVAL_EXPIRED,
+        APPROVAL_LATE,
+        APPROVAL_WITHDRAWN,
+        APPROVAL_GATE_UNAVAILABLE,
+        APPROVAL_GATE_BYPASSED,
+        APPROVAL_SUBMIT_FAILED,
+        APPROVAL_UNPRICEABLE,
+    }
+)
+#: Statuses that mean a human should go and look at something.
+APPROVAL_DEFECTS = frozenset(
+    {
+        APPROVAL_LATE,
+        APPROVAL_GATE_UNAVAILABLE,
+        APPROVAL_GATE_BYPASSED,
+        APPROVAL_SUBMIT_FAILED,
+        APPROVAL_UNPRICEABLE,
+    }
+)
+#: Order statuses OpenAlgo's normalised order book uses that need no further watching.
+ORDER_TERMINAL = frozenset({"complete", "rejected", "cancelled"})
 
 
 class Base(DeclarativeBase):
@@ -212,6 +250,80 @@ class RiskVerdictRow(Base):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
 
 
+class ApprovalRow(Base):
+    """One row per state of one human approval. Never updated, never deleted."""
+
+    __tablename__ = "approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), index=True, nullable=False)
+    tick_id: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    tick_trace_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    verdict_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    index_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    product: Mapped[str] = mapped_column(String(8), nullable=False)
+    lots: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    limit_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    band_low: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    band_high: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    pending_order_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    strategy_tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    deadline_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    wait_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    approved_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    resolved_at_ist: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    broker_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    withdrawal: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    defect: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+    __table_args__ = (Index("uq_approvals_state", "approval_id", "status", unique=True),)
+
+
+class OrderRow(Base):
+    """One row per observed state of one placed order. Never updated, never deleted."""
+
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    approval_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    tick_id: Mapped[str] = mapped_column(String(48), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    pending_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    broker_order_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    product: Mapped[str] = mapped_column(String(8), nullable=False)
+    price_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    limit_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    lots: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    order_status: Mapped[str] = mapped_column(String(24), index=True, nullable=False)
+    average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+    __table_args__ = (Index("uq_orders_state", "approval_id", "order_status", unique=True),)
+
+
 # Append-only enforcement lives in the database, not in application discipline.
 for _table in (
     Decision.__table__,
@@ -219,6 +331,8 @@ for _table in (
     RegimeRead.__table__,
     Proposal.__table__,
     RiskVerdictRow.__table__,
+    ApprovalRow.__table__,
+    OrderRow.__table__,
 ):
     for _operation in ("UPDATE", "DELETE"):
         event.listen(
@@ -526,6 +640,116 @@ class Journal:
                 .order_by(func.count().desc())
             )
             return {str(row.label): int(row.total) for row in session.execute(statement)}
+
+    def record_approval(self, **fields: Any) -> str:
+        """Append one approval state. Raises AlreadyJournalled when that state already exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(ApprovalRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"approval {fields.get('approval_id')} is already at status {fields.get('status')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(f"could not append approval: {exc.__class__.__name__}") from exc
+        return str(fields["approval_id"])
+
+    def record_order(self, **fields: Any) -> str:
+        """Append one order state. Raises AlreadyJournalled when that state already exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(OrderRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"order for approval {fields.get('approval_id')} is already at status "
+                f"{fields.get('order_status')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(f"could not append order: {exc.__class__.__name__}") from exc
+        return str(fields["order_id"])
+
+    def approval_row(self, approval_id: str, status: str) -> ApprovalRow | None:
+        with self.session_scope() as session:
+            statement = select(ApprovalRow).where(
+                ApprovalRow.approval_id == approval_id, ApprovalRow.status == status
+            )
+            return session.execute(statement).scalars().first()
+
+    def open_approvals(self) -> Sequence[ApprovalRow]:
+        """Pending approvals with no terminal row yet, oldest first."""
+        with self.session_scope() as session:
+            settled = select(ApprovalRow.approval_id).where(ApprovalRow.status != APPROVAL_PENDING)
+            statement = (
+                select(ApprovalRow)
+                .where(
+                    ApprovalRow.status == APPROVAL_PENDING,
+                    ApprovalRow.approval_id.not_in(settled),
+                )
+                .order_by(ApprovalRow.created_at_utc.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def expired_awaiting_late_check(self, trading_day: str) -> Sequence[ApprovalRow]:
+        """Expired approvals whose queued order was never withdrawn and may still be clicked."""
+        with self.session_scope() as session:
+            already_late = select(ApprovalRow.approval_id).where(
+                ApprovalRow.status == APPROVAL_LATE
+            )
+            statement = select(ApprovalRow).where(
+                ApprovalRow.trading_day == trading_day,
+                ApprovalRow.status == APPROVAL_EXPIRED,
+                ApprovalRow.pending_order_id.is_not(None),
+                ApprovalRow.approval_id.not_in(already_late),
+            )
+            return list(session.execute(statement).scalars())
+
+    def watchable_orders(self, trading_day: str) -> Sequence[OrderRow]:
+        """The latest order row per approval today, where the order has not finished."""
+        with self.session_scope() as session:
+            latest = (
+                select(func.max(OrderRow.id))
+                .where(OrderRow.trading_day == trading_day)
+                .group_by(OrderRow.approval_id)
+                .scalar_subquery()
+            )
+            statement = select(OrderRow).where(
+                OrderRow.id.in_(latest), OrderRow.order_status.not_in(ORDER_TERMINAL)
+            )
+            return list(session.execute(statement).scalars())
+
+    def list_approvals(self, trading_day: str, limit: int = 100) -> Sequence[ApprovalRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(ApprovalRow)
+                .where(ApprovalRow.trading_day == trading_day)
+                .order_by(ApprovalRow.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def orders_for_approval(self, approval_id: str) -> Sequence[OrderRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(OrderRow)
+                .where(OrderRow.approval_id == approval_id)
+                .order_by(OrderRow.created_at_utc.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def proposal(self, proposal_id: str) -> Proposal | None:
+        with self.session_scope() as session:
+            statement = select(Proposal).where(Proposal.proposal_id == proposal_id)
+            return session.execute(statement).scalars().first()
+
+    def risk_verdict(self, verdict_id: str) -> RiskVerdictRow | None:
+        with self.session_scope() as session:
+            statement = select(RiskVerdictRow).where(RiskVerdictRow.verdict_id == verdict_id)
+            return session.execute(statement).scalars().first()
+
+    def regime_read_for_tick(self, tick_id: str) -> RegimeRead | None:
+        with self.session_scope() as session:
+            statement = select(RegimeRead).where(RegimeRead.tick_id == tick_id)
+            return session.execute(statement).scalars().first()
 
     def recent_trading_days(self, limit: int = 5) -> list[str]:
         """The most recent days that hold at least one decision, newest first."""

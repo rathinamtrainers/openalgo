@@ -1,0 +1,630 @@
+FILE: strike_desk/src/strike_desk/risk_officer.py
+
+"""The Risk Officer: the hard limits, and the pure functions that adjudicate against them.
+
+No model, no tool, no network, no timeout, no exception. Every number used here is
+recomputed from the proposal's own declared prices and from the book read this tick — the
+model's rationale has no standing in this module, which is why the module cannot import it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time
+from typing import Any
+
+from .config import Settings
+from .grounding import ProposalSubmission
+from .playbook import Playbook
+from .playbook import check as playbook_check
+
+RISK_LIMITS_VERSION = "rl-1"
+
+VERDICT_PASS = "pass"
+VERDICT_REDUCE = "reduce"
+VERDICT_VETO = "veto"
+VERDICT_HOLD = "hold"
+#: The two verdicts that permit an intent. Everything else ends the tick without one.
+CLEARING_VERDICTS = frozenset({VERDICT_PASS, VERDICT_REDUCE})
+
+LIMIT_CAPITAL_BASE = "capital-base"
+LIMIT_DAILY_LOSS = "daily-loss-cap"
+LIMIT_PER_TRADE_LOSS = "per-trade-loss-cap"
+LIMIT_MAX_POSITIONS = "max-concurrent-positions"
+LIMIT_DEPLOYED_CAPITAL = "deployed-capital-ceiling"
+LIMIT_PER_INDEX_EXPOSURE = "per-index-exposure"
+LIMIT_MAX_LOTS = "max-lots"
+LIMIT_MAX_TRADES = "max-trades-per-day"
+LIMIT_EXPIRY_WINDOW = "expiry-day-window"
+LIMIT_PROPOSAL_SHAPE = "proposal-shape"
+
+#: The eight limits FR-5 names, in the order they are evaluated.
+FR5_LIMITS: tuple[str, ...] = (
+    LIMIT_DAILY_LOSS,
+    LIMIT_MAX_POSITIONS,
+    LIMIT_MAX_TRADES,
+    LIMIT_EXPIRY_WINDOW,
+    LIMIT_MAX_LOTS,
+    LIMIT_PER_TRADE_LOSS,
+    LIMIT_DEPLOYED_CAPITAL,
+    LIMIT_PER_INDEX_EXPOSURE,
+)
+
+#: The limits a smaller position can satisfy. A count limit is never one of them.
+SIZEABLE_LIMITS: tuple[str, ...] = (
+    LIMIT_PER_TRADE_LOSS,
+    LIMIT_DEPLOYED_CAPITAL,
+    LIMIT_PER_INDEX_EXPOSURE,
+)
+
+UNIT_RUPEES = "INR"
+UNIT_COUNT = "count"
+UNIT_CLOCK = "IST-minutes"
+
+#: The observed value recorded for a clock limit that does not apply today.
+NOT_APPLICABLE = -1.0
+
+
+@dataclass(frozen=True)
+class LimitCheck:
+    """One limit, evaluated: what it was set to, what was observed, whether it bound."""
+
+    limit: str
+    unit: str
+    configured: float
+    observed: float
+    breached: bool
+    detail: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _rupee_check(limit: str, configured: float, observed: float, detail: str) -> LimitCheck:
+    """A money limit. Touching the cap is breaching it.
+
+    Both values are rounded to paise *before* they are compared, so the verdict a row
+    records is the verdict its own two numbers imply. A stored ``3000.00`` beside a stored
+    ``3000.00`` and ``breached: false`` is an audit row nobody can check.
+    """
+    cap = round(configured, 2)
+    seen = round(observed, 2)
+    return LimitCheck(
+        limit=limit,
+        unit=UNIT_RUPEES,
+        configured=cap,
+        observed=seen,
+        breached=seen >= cap,
+        detail=detail,
+    )
+
+
+def _count_check(limit: str, configured: int, observed: int, detail: str) -> LimitCheck:
+    """A count limit. The configured number is permitted; one more is not."""
+    return LimitCheck(
+        limit=limit,
+        unit=UNIT_COUNT,
+        configured=float(configured),
+        observed=float(observed),
+        breached=observed > configured,
+        detail=detail,
+    )
+
+
+@dataclass(frozen=True)
+class RiskLimits:
+    """The hard limits, resolved from settings once and then immutable."""
+
+    daily_loss_cap_pct: float
+    per_trade_loss_cap_pct: float
+    deployed_capital_pct: float
+    per_index_exposure_pct: float
+    max_concurrent_positions: int
+    max_lots: int
+    max_trades_per_day: int
+    capital_floor: float
+    expiry_cutoff: str
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> RiskLimits:
+        return cls(
+            daily_loss_cap_pct=settings.risk_daily_loss_cap_pct,
+            per_trade_loss_cap_pct=settings.risk_per_trade_loss_cap_pct,
+            deployed_capital_pct=settings.risk_deployed_capital_pct,
+            per_index_exposure_pct=settings.risk_per_index_exposure_pct,
+            max_concurrent_positions=settings.risk_max_concurrent_positions,
+            max_lots=settings.risk_max_lots,
+            max_trades_per_day=settings.risk_max_trades_per_day,
+            capital_floor=settings.risk_capital_floor,
+            expiry_cutoff=settings.expiry_cutoff,
+        )
+
+    @property
+    def digest(self) -> str:
+        """A content digest over the resolved limits, so a change is attributable."""
+        canonical = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+    @property
+    def artifact(self) -> str:
+        return f"{RISK_LIMITS_VERSION}+{self.digest}"
+
+    @property
+    def expiry_cutoff_time(self) -> time:
+        return time.fromisoformat(self.expiry_cutoff)
+
+    def rupees(self, base: float, pct: float) -> float:
+        return base * pct / 100.0
+
+    def describe(self) -> str:
+        """The limits as ``status`` prints them."""
+        return "\n".join(
+            (
+                f"  daily loss cap        {self.daily_loss_cap_pct:.2f}% of base",
+                f"  per-trade loss cap    {self.per_trade_loss_cap_pct:.2f}% of base",
+                f"  deployed capital      {self.deployed_capital_pct:.2f}% of base",
+                f"  per-index exposure    {self.per_index_exposure_pct:.2f}% of base",
+                f"  max positions         {self.max_concurrent_positions}",
+                f"  max lots per trade    {self.max_lots}",
+                f"  max trades per day    {self.max_trades_per_day}",
+                f"  capital base floor    Rs {self.capital_floor:,.0f}",
+                f"  expiry-day cutoff     {self.expiry_cutoff} IST",
+            )
+        )
+
+
+@dataclass(frozen=True)
+class SessionAssessment:
+    """Whether the desk may propose at all today, from the book alone."""
+
+    stopped: bool
+    check: LimitCheck
+    capital_base: float
+    detail: str
+
+
+@dataclass(frozen=True)
+class RiskVerdict:
+    """One adjudication. ``checks`` is evaluated at the size that was requested."""
+
+    verdict: str
+    checks: tuple[LimitCheck, ...]
+    tripped: LimitCheck | None
+    lots_requested: int
+    lots_cleared: int
+    capital_base: float
+    premium_at_risk: float
+    max_loss_at_stop: float
+    session_stop: bool
+    detail: str
+
+    @property
+    def cleared(self) -> bool:
+        return self.verdict in CLEARING_VERDICTS
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "checks": [check.as_dict() for check in self.checks],
+            "tripped": self.tripped.as_dict() if self.tripped else None,
+            "lots_requested": self.lots_requested,
+            "lots_cleared": self.lots_cleared,
+            "capital_base": self.capital_base,
+            "premium_at_risk": self.premium_at_risk,
+            "max_loss_at_stop": self.max_loss_at_stop,
+            "session_stop": self.session_stop,
+            "detail": self.detail,
+        }
+
+
+def capital_base(book: Mapping[str, Any]) -> float | None:
+    """Available cash plus utilised margin: the one base every percentage is taken of."""
+    try:
+        cash = float(book["available_cash"])
+        margin = float(book["utilised_margin"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    base = cash + margin
+    return base if base > 0 else None
+
+
+def day_loss(book: Mapping[str, Any]) -> float:
+    """The day's loss as a positive number. A profitable day loses nothing."""
+    try:
+        pnl = float(book.get("realised_pnl") or 0.0) + float(book.get("unrealised_pnl") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, -pnl)
+
+
+def open_premium(book: Mapping[str, Any]) -> float:
+    """Premium already deployed in open positions, at the price it was paid."""
+    total = 0.0
+    for position in book.get("open_positions") or ():
+        if not isinstance(position, Mapping):
+            continue
+        try:
+            total += abs(float(position.get("quantity") or 0)) * float(
+                position.get("average_price") or 0.0
+            )
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def assess_session(book: Mapping[str, Any], limits: RiskLimits) -> SessionAssessment:
+    """May the desk propose entries today? Read before any specialist is consulted."""
+    base = capital_base(book)
+    if base is None or base <= limits.capital_floor:
+        check = _rupee_check(
+            LIMIT_CAPITAL_BASE,
+            limits.capital_floor,
+            base or 0.0,
+            "capital base is unusable; the daily cap is evaluated per proposal",
+        )
+        return SessionAssessment(
+            stopped=False,
+            check=check,
+            capital_base=base or 0.0,
+            detail=check.detail,
+        )
+
+    cap = limits.rupees(base, limits.daily_loss_cap_pct)
+    observed = day_loss(book)
+    check = _rupee_check(
+        LIMIT_DAILY_LOSS,
+        cap,
+        observed,
+        f"day P&L against {limits.daily_loss_cap_pct:.2f}% of a Rs {base:,.0f} base",
+    )
+    return SessionAssessment(
+        stopped=check.breached,
+        check=check,
+        capital_base=base,
+        detail=(
+            f"the day is down Rs {observed:,.0f} against a Rs {cap:,.0f} cap"
+            if check.breached
+            else f"Rs {cap - observed:,.0f} of daily headroom remains"
+        ),
+    )
+
+
+def held(limit: str, detail: str, *, lots_requested: int = 0, base: float = 0.0) -> RiskVerdict:
+    """The verdict for an input the officer cannot use. Never a pass."""
+    check = LimitCheck(
+        limit=limit,
+        unit=UNIT_RUPEES if limit == LIMIT_CAPITAL_BASE else UNIT_COUNT,
+        configured=0.0,
+        observed=0.0,
+        breached=True,
+        detail=detail,
+    )
+    return RiskVerdict(
+        verdict=VERDICT_HOLD,
+        checks=(check,),
+        tripped=check,
+        lots_requested=lots_requested,
+        lots_cleared=0,
+        capital_base=base,
+        premium_at_risk=0.0,
+        max_loss_at_stop=0.0,
+        session_stop=False,
+        detail=detail,
+    )
+
+
+def _sizeable_checks(
+    proposal: ProposalSubmission,
+    *,
+    lots: int,
+    base: float,
+    limits: RiskLimits,
+    already_deployed: float,
+) -> list[LimitCheck]:
+    """The three rupee limits, evaluated at a given lot count."""
+    quantity = lots * proposal.lot_size
+    premium = proposal.entry_price_high * quantity
+    loss_at_stop = max(0.0, proposal.entry_price_high - proposal.stop_price) * quantity
+    deployed_cap = limits.rupees(base, limits.deployed_capital_pct)
+    exposure_cap = limits.rupees(base, limits.per_index_exposure_pct)
+    return [
+        _rupee_check(
+            LIMIT_PER_TRADE_LOSS,
+            limits.rupees(base, limits.per_trade_loss_cap_pct),
+            loss_at_stop,
+            f"{lots} lot(s) risking (entry {proposal.entry_price_high:.2f} - stop "
+            f"{proposal.stop_price:.2f}) x {quantity}",
+        ),
+        _rupee_check(
+            LIMIT_DEPLOYED_CAPITAL,
+            deployed_cap,
+            already_deployed + premium,
+            f"Rs {already_deployed:,.0f} already deployed plus Rs {premium:,.0f} of new premium",
+        ),
+        _rupee_check(
+            LIMIT_PER_INDEX_EXPOSURE,
+            exposure_cap,
+            already_deployed + premium,
+            f"{proposal.index_symbol} exposure after this entry",
+        ),
+    ]
+
+
+def _first_breach(checks: Sequence[LimitCheck]) -> LimitCheck | None:
+    for check in checks:
+        if check.breached:
+            return check
+    return None
+
+
+def adjudicate(
+    proposal: ProposalSubmission,
+    book: Mapping[str, Any],
+    limits: RiskLimits,
+    playbook: Playbook,
+    *,
+    now_ist: datetime,
+    entries_today: int,
+) -> RiskVerdict:
+    """Clear a verified proposal against every hard limit.
+
+    Returns ``pass``, ``reduce``, ``veto`` or ``hold``. Never raises, never rewrites the
+    proposal in place, and never consults anything the model wrote.
+    """
+    base = capital_base(book)
+    if base is None or base <= limits.capital_floor:
+        return held(
+            LIMIT_CAPITAL_BASE,
+            f"capital base Rs {base or 0.0:,.0f} is at or below the "
+            f"Rs {limits.capital_floor:,.0f} floor",
+            lots_requested=proposal.lots,
+            base=base or 0.0,
+        )
+    if proposal.lot_size <= 0 or proposal.lots <= 0:
+        return held(
+            LIMIT_PROPOSAL_SHAPE,
+            f"proposal declares {proposal.lots} lot(s) of {proposal.lot_size}",
+            lots_requested=max(0, proposal.lots),
+            base=base,
+        )
+
+    already_deployed = open_premium(book)
+    open_positions = len(book.get("open_positions") or ())
+    checks: list[LimitCheck] = []
+
+    session = assess_session(book, limits)
+    checks.append(session.check)
+
+    checks.append(
+        _count_check(
+            LIMIT_MAX_POSITIONS,
+            limits.max_concurrent_positions,
+            open_positions + 1,
+            f"{open_positions} open now, {open_positions + 1} after this entry",
+        )
+    )
+    checks.append(
+        _count_check(
+            LIMIT_MAX_TRADES,
+            limits.max_trades_per_day,
+            entries_today + 1,
+            f"{entries_today} entr(ies) journalled today, {entries_today + 1} after this one",
+        )
+    )
+
+    cutoff = limits.expiry_cutoff_time
+    try:
+        expiry = date.fromisoformat(proposal.expiry)
+    except ValueError:
+        expiry = None
+    expires_today = expiry == now_ist.date()
+    cutoff_minutes = cutoff.hour * 60 + cutoff.minute
+    now_minutes = now_ist.hour * 60 + now_ist.minute
+    checks.append(
+        LimitCheck(
+            limit=LIMIT_EXPIRY_WINDOW,
+            unit=UNIT_CLOCK,
+            configured=float(cutoff_minutes),
+            observed=float(now_minutes) if expires_today else NOT_APPLICABLE,
+            breached=expires_today and now_minutes >= cutoff_minutes,
+            detail=(
+                f"contract expires today; now {now_ist.strftime('%H:%M')} IST "
+                f"against a {limits.expiry_cutoff} cutoff"
+                if expires_today
+                else f"expiry {proposal.expiry} is not today"
+            ),
+        )
+    )
+    checks.append(
+        _count_check(
+            LIMIT_MAX_LOTS,
+            limits.max_lots,
+            proposal.lots,
+            f"{proposal.lots} lot(s) proposed",
+        )
+    )
+
+    # Nothing above this line can be fixed by taking a smaller position.
+    blocking = _first_breach(checks)
+    if blocking is not None:
+        requested = _sizeable_checks(
+            proposal,
+            lots=proposal.lots,
+            base=base,
+            limits=limits,
+            already_deployed=already_deployed,
+        )
+        return RiskVerdict(
+            verdict=VERDICT_VETO,
+            checks=tuple(checks + requested),
+            tripped=blocking,
+            lots_requested=proposal.lots,
+            lots_cleared=0,
+            capital_base=base,
+            premium_at_risk=0.0,
+            max_loss_at_stop=0.0,
+            session_stop=blocking.limit == LIMIT_DAILY_LOSS,
+            detail=blocking.detail,
+        )
+
+    requested = _sizeable_checks(
+        proposal,
+        lots=proposal.lots,
+        base=base,
+        limits=limits,
+        already_deployed=already_deployed,
+    )
+    checks.extend(requested)
+
+    cleared_lots = 0
+    for candidate in range(proposal.lots, 0, -1):
+        trial = _sizeable_checks(
+            proposal,
+            lots=candidate,
+            base=base,
+            limits=limits,
+            already_deployed=already_deployed,
+        )
+        if _first_breach(trial) is None:
+            cleared_lots = candidate
+            break
+
+    tripped = _first_breach(requested)
+    if cleared_lots == 0:
+        binding = _first_breach(
+            _sizeable_checks(
+                proposal, lots=1, base=base, limits=limits, already_deployed=already_deployed
+            )
+        )
+        return RiskVerdict(
+            verdict=VERDICT_VETO,
+            checks=tuple(checks),
+            tripped=binding or tripped,
+            lots_requested=proposal.lots,
+            lots_cleared=0,
+            capital_base=base,
+            premium_at_risk=0.0,
+            max_loss_at_stop=0.0,
+            session_stop=False,
+            detail=(binding or tripped).detail if (binding or tripped) else "no size clears",
+        )
+
+    quantity = cleared_lots * proposal.lot_size
+    premium = proposal.entry_price_high * quantity
+    loss_at_stop = max(0.0, proposal.entry_price_high - proposal.stop_price) * quantity
+
+    if cleared_lots != proposal.lots:
+        reduced = proposal.model_copy(update={"lots": cleared_lots, "quantity": quantity})
+        violations = playbook_check(reduced, playbook, now_ist=now_ist)
+        if violations:
+            return RiskVerdict(
+                verdict=VERDICT_VETO,
+                checks=tuple(checks),
+                tripped=tripped,
+                lots_requested=proposal.lots,
+                lots_cleared=0,
+                capital_base=base,
+                premium_at_risk=0.0,
+                max_loss_at_stop=0.0,
+                session_stop=False,
+                detail=f"reduced to {cleared_lots} lot(s): {'; '.join(violations[:2])}",
+            )
+
+    return RiskVerdict(
+        verdict=VERDICT_PASS if cleared_lots == proposal.lots else VERDICT_REDUCE,
+        checks=tuple(checks),
+        tripped=tripped if cleared_lots != proposal.lots else None,
+        lots_requested=proposal.lots,
+        lots_cleared=cleared_lots,
+        capital_base=base,
+        premium_at_risk=round(premium, 2),
+        max_loss_at_stop=round(loss_at_stop, 2),
+        session_stop=False,
+        detail=(
+            f"cleared {cleared_lots} lot(s) risking Rs {loss_at_stop:,.0f}"
+            if cleared_lots == proposal.lots
+            else f"reduced from {proposal.lots} to {cleared_lots} lot(s) to fit "
+            f"{tripped.limit if tripped else 'a rupee limit'}"
+        ),
+    )
+
+
+def build_verdict_row(
+    verdict: RiskVerdict,
+    *,
+    limits: RiskLimits,
+    tick_id: str,
+    trace_id: str,
+    trading_day: str,
+    index_symbol: str,
+    proposal_id: str | None,
+    symbol: str | None,
+    latency_us: int,
+) -> dict[str, Any]:
+    """Everything ``record_risk_verdict`` needs, in the shape the table stores it."""
+    tripped = verdict.tripped
+    return {
+        "verdict_id": str(uuid.uuid4()),
+        "tick_id": tick_id,
+        "trace_id": trace_id,
+        "proposal_id": proposal_id,
+        "created_at_utc": None,  # filled by the caller with a timezone-aware UTC datetime
+        "trading_day": trading_day,
+        "index_symbol": index_symbol,
+        "symbol": symbol,
+        "verdict": verdict.verdict,
+        "tripped_limit": tripped.limit if tripped else None,
+        "configured_value": tripped.configured if tripped else None,
+        "observed_value": tripped.observed if tripped else None,
+        "limit_unit": tripped.unit if tripped else None,
+        "capital_base": verdict.capital_base,
+        "lots_requested": verdict.lots_requested,
+        "lots_cleared": verdict.lots_cleared,
+        "premium_at_risk": verdict.premium_at_risk,
+        "max_loss_at_stop": verdict.max_loss_at_stop,
+        "session_stop": verdict.session_stop,
+        "checks_json": json.dumps([check.as_dict() for check in verdict.checks], sort_keys=True),
+        "limits_artifact": limits.artifact,
+        "detail": verdict.detail,
+        "latency_us": latency_us,
+    }
+
+
+__all__ = [
+    "CLEARING_VERDICTS",
+    "FR5_LIMITS",
+    "LIMIT_CAPITAL_BASE",
+    "LIMIT_DAILY_LOSS",
+    "LIMIT_DEPLOYED_CAPITAL",
+    "LIMIT_EXPIRY_WINDOW",
+    "LIMIT_MAX_LOTS",
+    "LIMIT_MAX_POSITIONS",
+    "LIMIT_MAX_TRADES",
+    "LIMIT_PER_INDEX_EXPOSURE",
+    "LIMIT_PER_TRADE_LOSS",
+    "LIMIT_PROPOSAL_SHAPE",
+    "RISK_LIMITS_VERSION",
+    "SIZEABLE_LIMITS",
+    "UNIT_CLOCK",
+    "UNIT_COUNT",
+    "UNIT_RUPEES",
+    "VERDICT_HOLD",
+    "VERDICT_PASS",
+    "VERDICT_REDUCE",
+    "VERDICT_VETO",
+    "LimitCheck",
+    "RiskLimits",
+    "RiskVerdict",
+    "SessionAssessment",
+    "adjudicate",
+    "assess_session",
+    "build_verdict_row",
+    "capital_base",
+    "day_loss",
+    "held",
+    "open_premium",
+]
