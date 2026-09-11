@@ -29,6 +29,7 @@ from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing, get_tracer
 from .openalgo_mirror import OpenAlgoMirror
 from .playbook import Playbook
+from .position_view import build_position_report, render_position_report
 from .prompt_registry import PromptRegistry
 from .proposal_view import as_dict
 from .proposal_view import render as render_proposals
@@ -60,6 +61,45 @@ def _positive_int(raw: str) -> int:
     if value < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return value
+
+
+def _cmd_position(settings: Settings, args: argparse.Namespace) -> int:
+    """Print today's position states and the live position as the journal knows it."""
+    journal = Journal(settings.db_path)
+    try:
+        journal.create_schema()
+        day = args.day or _today()
+        row = journal.live_position()
+        snapshot: dict[str, object] = {"managed": False}
+        if row is not None:
+            snapshot = {
+                "managed": True,
+                "position_id": row.position_id,
+                "symbol": row.symbol,
+                "exchange": row.exchange,
+                "quantity": row.quantity,
+                "entry_price": row.entry_price,
+                "levels": {
+                    "stop_price": row.stop_price,
+                    "target_price": row.target_price,
+                    "time_stop_utc": (
+                        row.time_stop_utc.isoformat() if row.time_stop_utc else None
+                    ),
+                    "time_stop_reason": "time-stop",
+                },
+                "last_price": None,
+                "feed_source": "journal",
+                "feed_age_ms": None,
+                "attempts": len(journal.exits_for_position(row.position_id)),
+            }
+        report = build_position_report(journal, snapshot, day)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        else:
+            print(render_position_report(report, settings))
+        return 2 if report["defects"] else 0
+    finally:
+        journal.close()
 
 
 def _cmd_run(settings: Settings, _args: argparse.Namespace) -> int:
@@ -477,6 +517,10 @@ def main(argv: list[str] | None = None) -> int:
     approvals_parser.add_argument("--limit", type=int, default=100)
     approvals_parser.add_argument("--json", action="store_true")
 
+    position_parser = subparsers.add_parser("position", help="show the managed position")
+    position_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
+    position_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
     args = parser.parse_args(argv)
     if getattr(args, "since", None) is not None and getattr(args, "day", None) is not None:
         parser.error("--day and --since are alternatives; pass one of them")
@@ -493,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
         "proposals": _cmd_proposals,
         "risk": _cmd_risk,
         "approvals": _cmd_approvals,
+        "position": _cmd_position,
     }
     return handlers[args.command](settings, args)
 

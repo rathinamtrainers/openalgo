@@ -23,6 +23,7 @@ def test_the_two_clients_have_disjoint_whitelists():
         "/api/v1/placeorder",
         "/api/v1/orderstatus",
         "/api/v1/cancelorder",
+        "/api/v1/closeposition",
     }
     assert READ_ONLY_PATHS.isdisjoint(EXECUTION_PATHS)
     assert not any("order" in path for path in READ_ONLY_PATHS)

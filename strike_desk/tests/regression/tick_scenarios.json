@@ -249,6 +249,63 @@
         "gate_unavailable": "OpenAlgo has no api_keys row for user practice"
       },
       "expect": {"outcome": "decline", "reason_code": "approval-gate-unavailable"}
+    },
+    {
+      "id": "REG-22",
+      "note": "an exit would need a human, so no position may be opened",
+      "state": {
+        "book": {"open_positions": []},
+        "exit_path_gated": "OpenAlgo is live and in semi-auto"
+      },
+      "expect": {"outcome": "decline", "reason_code": "exit-path-gated"}
+    },
+    {
+      "id": "REG-23",
+      "note": "OpenAlgo's order mode contradicts the configured autonomy",
+      "state": {
+        "book": {"open_positions": []},
+        "autonomy_blocked": {
+          "reason": "autonomy-mode-mismatch",
+          "detail": "autonomy is 'unattended' which needs order mode 'auto', but OpenAlgo reports 'semi_auto'"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "autonomy-mode-mismatch"}
+    },
+    {
+      "id": "REG-24",
+      "note": "unattended entry refused because nothing is watching",
+      "state": {
+        "book": {"open_positions": []},
+        "autonomy_blocked": {
+          "reason": "monitor-unavailable",
+          "detail": "the position monitor is not running"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "monitor-unavailable"}
+    },
+    {
+      "id": "REG-25",
+      "note": "the day's realised loss reached the unattended cap",
+      "state": {
+        "book": {"open_positions": []},
+        "autonomy_blocked": {
+          "reason": "daily-loss-cap",
+          "detail": "realised -600.00 against a cap of -500.00"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "daily-loss-cap"}
+    },
+    {
+      "id": "REG-26",
+      "note": "the day's unattended trade count reached its cap",
+      "state": {
+        "book": {"open_positions": []},
+        "autonomy_blocked": {
+          "reason": "daily-trade-cap",
+          "detail": "2 unattended entries already taken, cap is 2"
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "daily-trade-cap"}
     }
   ]
 }

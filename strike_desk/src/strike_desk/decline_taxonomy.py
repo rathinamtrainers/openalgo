@@ -14,7 +14,7 @@ from .errors import StrikeDeskError
 
 logger = logging.getLogger(__name__)
 
-TAXONOMY_VERSION = "dt-4"
+TAXONOMY_VERSION = "dt-5"
 
 CATEGORY_BOOK = "book"
 CATEGORY_CONTRACT = "contract"
@@ -332,6 +332,55 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
             "nothing is resolving — read the log and clear the queue."
         ),
     ),
+    _entry(
+        "exit-path-gated",
+        outcome="decline",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="an exit would need a human, so no position may be opened",
+        default=(
+            "Declined: the exit path is gated ({detail}). The desk does not open a position "
+            "it cannot close without someone clicking Approve."
+        ),
+    ),
+    _entry(
+        "autonomy-mode-mismatch",
+        outcome="decline",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="OpenAlgo's order mode contradicts the configured autonomy",
+        default=(
+            "Declined: {detail}. The desk will not submit until its autonomy and OpenAlgo's "
+            "order mode say the same thing."
+        ),
+    ),
+    _entry(
+        "monitor-unavailable",
+        outcome="decline",
+        category=CATEGORY_SYSTEM,
+        disposition=DISPOSITION_DEFECT,
+        summary="unattended entry refused because nothing is watching",
+        default=(
+            "Declined: {detail}. Unattended, the desk opens nothing that the position "
+            "monitor is not alive to close."
+        ),
+    ),
+    _entry(
+        "daily-loss-cap",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the day's realised loss reached the unattended cap",
+        default="Declined: {detail}. The desk is done for the day.",
+    ),
+    _entry(
+        "daily-trade-cap",
+        outcome="decline",
+        category=CATEGORY_RISK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the day's unattended trade count reached its cap",
+        default="Declined: {detail}. The desk is done for the day.",
+    ),
 )
 
 
@@ -398,6 +447,11 @@ def entry(code: str) -> ReasonEntry:
         return REASONS[code]
     except KeyError as exc:
         raise ReasonCodeUnknown(f"reason code {code!r} is not in the taxonomy") from exc
+
+
+def entry_for(code: str) -> ReasonEntry:
+    """Alias used by the position-monitor guardrail suite."""
+    return entry(code)
 
 
 def describe(code: str) -> ReasonEntry:

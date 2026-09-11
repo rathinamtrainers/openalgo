@@ -99,3 +99,31 @@ class ApprovalGateBypassed(StrikeDeskError):
 
 class AlreadyJournalled(StrikeDeskError):
     """This exact append-only row already exists; the write was a repeat, not a failure."""
+
+
+class FeedUnavailable(StrikeDeskError):
+    """The live price feed could not be reached, authenticated or subscribed."""
+
+
+class LevelsUnavailable(StrikeDeskError):
+    """A position was adopted whose stop, target or time-stop cannot be resolved."""
+
+
+class ExitPathGated(StrikeDeskError):
+    """An exit would be queued for human approval — the desk must not hold this position."""
+
+
+class ExitFailed(StrikeDeskError):
+    """Every rung of the exit ladder failed; the position is still open."""
+
+
+class AutonomyMismatch(StrikeDeskError):
+    """OpenAlgo's order mode contradicts the desk's configured autonomy."""
+
+
+class MonitorUnavailable(StrikeDeskError):
+    """No live position monitor, so no unattended entry may be formed."""
+
+
+class ExecutionFailed(StrikeDeskError):
+    """An unattended submission returned no broker order id."""

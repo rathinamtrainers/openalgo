@@ -24,6 +24,7 @@ def test_read_only_whitelist_is_exactly_the_four_read_paths():
         "/api/v1/funds",
         "/api/v1/positionbook",
         "/api/v1/market/timings",
+        "/api/v1/quotes",
     }
 
 

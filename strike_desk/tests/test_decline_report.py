@@ -187,7 +187,7 @@ def test_the_command_emits_its_own_span(seeded, cli_settings, tracing, journal, 
         }
     assert "report.declines" in spans
     attributes = spans["report.declines"]
-    assert attributes["report.taxonomy"].startswith("dt-4+")
+    assert attributes["report.taxonomy"].startswith("dt-5+")
     assert attributes["report.total"] == 8
     assert attributes["report.defects"] == 1
     assert attributes["report.healthy"] is False
@@ -202,7 +202,7 @@ def test_the_command_exits_two_on_a_defect(journal, today, cli_settings, tracing
 def test_the_command_prints_json_on_request(seeded, cli_settings, tracing, capsys):
     cli.main(["declines", "--json"])
     payload = json.loads(capsys.readouterr().out)
-    assert payload["taxonomy_version"] == "dt-4"
+    assert payload["taxonomy_version"] == "dt-5"
     assert payload["report"]["total"] == 8
 
 
@@ -221,7 +221,7 @@ def test_the_command_rejects_a_day_and_a_window_together(cli_settings):
 def test_status_reads_from_the_same_report(seeded, cli_settings, capsys):
     assert cli.main(["status"]) == 0
     printed = capsys.readouterr().out
-    assert "taxonomy         : dt-4+" in printed
+    assert "taxonomy         : dt-5+" in printed
     assert "playbook         : pb-1+" in printed
     assert "risk limits      : rl-1+" in printed
     assert "strategist model : claude-sonnet-5" in printed

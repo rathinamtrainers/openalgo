@@ -1,0 +1,66 @@
+[
+  {
+    "name": "quiet-hold",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[110.0, 0], [112.0, 10], [108.5, 20], [111.0, 30]],
+    "expect": null
+  },
+  {
+    "name": "clean-stop",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[110.0, 0], [92.0, 10], [79.5, 20]],
+    "expect": {"reason": "stop", "at_index": 2}
+  },
+  {
+    "name": "stop-touched-exactly",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[110.0, 0], [80.0, 5]],
+    "expect": {"reason": "stop", "at_index": 1}
+  },
+  {
+    "name": "gap-through-the-stop",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[110.0, 0], [41.0, 5]],
+    "expect": {"reason": "stop", "at_index": 1}
+  },
+  {
+    "name": "clean-target",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[110.0, 0], [138.0, 10], [141.0, 20]],
+    "expect": {"reason": "target", "at_index": 2}
+  },
+  {
+    "name": "time-stop-while-profitable",
+    "stop": 80.0,
+    "target": 200.0,
+    "minutes_to_time_stop": 1,
+    "observations": [[150.0, 0], [155.0, 120]],
+    "expect": {"reason": "time-stop", "at_index": 1}
+  },
+  {
+    "name": "time-beats-a-simultaneous-stop",
+    "stop": 80.0,
+    "target": 200.0,
+    "minutes_to_time_stop": 1,
+    "observations": [[110.0, 0], [70.0, 120]],
+    "expect": {"reason": "time-stop", "at_index": 1}
+  },
+  {
+    "name": "no-price-then-a-stop",
+    "stop": 80.0,
+    "target": 140.0,
+    "minutes_to_time_stop": 60,
+    "observations": [[null, 0], [null, 10], [78.0, 20]],
+    "expect": {"reason": "stop", "at_index": 2}
+  }
+]
