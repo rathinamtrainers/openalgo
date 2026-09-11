@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from . import approval_view
+from .autonomy import required_order_mode
 from .config import IST, Settings, get_settings
 from .decline_report import (
     DayReport,
@@ -173,9 +174,10 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(limits.describe())
         print(f"execution        : {'ENABLED' if settings.execution_enabled else 'disabled'}")
         if settings.execution_enabled:
+            print(f"autonomy         : {settings.autonomy}")
             mirror = OpenAlgoMirror(settings)
             try:
-                health = mirror.health()
+                health = mirror.health(expected=required_order_mode(settings))
             finally:
                 mirror.close()
             print(f"approval gate    : {'ok' if health.ok else 'UNUSABLE'} — {health.detail}")

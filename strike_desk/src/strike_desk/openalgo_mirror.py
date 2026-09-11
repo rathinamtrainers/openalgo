@@ -172,19 +172,28 @@ class OpenAlgoMirror:
             ) from exc
         return bool(found)
 
-    def health(self) -> GateHealth:
-        """Whether OpenAlgo will queue an order rather than place it."""
+    def health(self, expected: str = ORDER_MODE_SEMI_AUTO) -> GateHealth:
+        """Whether OpenAlgo's order mode matches the mode this desk is configured for."""
         try:
             mode = self.order_mode()
         except MirrorUnavailable as exc:
             return GateHealth(False, None, str(exc))
-        if mode != ORDER_MODE_SEMI_AUTO:
+        if mode != expected:
+            if expected == ORDER_MODE_AUTO:
+                return GateHealth(
+                    False,
+                    mode,
+                    f"OpenAlgo order mode is {mode!r}, not {ORDER_MODE_AUTO!r}: "
+                    "an unattended entry would be queued for a click nobody will give",
+                )
             return GateHealth(
                 False,
                 mode,
                 f"OpenAlgo order mode is {mode!r}, not {ORDER_MODE_SEMI_AUTO!r}: "
                 "an order would reach the broker without a human approval",
             )
+        if expected == ORDER_MODE_AUTO:
+            return GateHealth(True, mode, "auto order mode is active — unattended entries place directly")
         return GateHealth(True, mode, "semi-auto approval gate is active")
 
     def pending_order(self, pending_order_id: int) -> PendingOrder | None:

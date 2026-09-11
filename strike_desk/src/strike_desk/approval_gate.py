@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
-from .autonomy import check_mode
+from .autonomy import check_mode, required_order_mode
 from .config import Settings
 from .errors import (
     AlreadyJournalled,
@@ -337,7 +337,7 @@ class ApprovalGate:
 
     def health(self) -> GateHealth:
         """Whether a submission is allowed to be attempted at all."""
-        return self._mirror.health()
+        return self._mirror.health(expected=required_order_mode(self._settings))
 
     def submit(self, context: TickContext) -> SubmitResult:
         """Queue one cleared intent for approval, or journal exactly why it was not."""

@@ -27,7 +27,7 @@ from sqlalchemy import (
     inspect,
     select,
 )
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -500,7 +500,12 @@ class Journal:
 
     def create_schema(self) -> None:
         """Create tables and triggers if absent, then add any column this release added."""
-        Base.metadata.create_all(self._engine)
+        try:
+            Base.metadata.create_all(self._engine)
+        except OperationalError as exc:
+            if "already exists" not in str(exc).lower():
+                raise
+            logger.info("journal schema already present during create_all")
         self._add_missing_columns()
 
     def _add_missing_columns(self) -> None:
