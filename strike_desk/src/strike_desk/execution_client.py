@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 PATH_PLACE = "/api/v1/placeorder"
 PATH_STATUS = "/api/v1/orderstatus"
 PATH_CANCEL = "/api/v1/cancelorder"
-EXECUTION_PATHS = frozenset({PATH_PLACE, PATH_STATUS, PATH_CANCEL})
+PATH_CLOSE = "/api/v1/closeposition"
+EXECUTION_PATHS = frozenset({PATH_PLACE, PATH_STATUS, PATH_CANCEL, PATH_CLOSE})
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -189,3 +190,19 @@ class ExecutionClient:
             return True, f"order {orderid} cancelled"
         detail = str(parsed.get("message") or f"HTTP {status_code}")[:200]
         return False, f"cancel refused by the platform: {detail}"
+
+    def close_position(self, strategy: str) -> tuple[bool, dict[str, Any]]:
+        """Close the account's open position immediately. Never queued for approval.
+
+        OpenAlgo lists ``closeposition`` among the operations that never route to the Action
+        Center, and permits it in analyze mode regardless of order mode. In live semi-auto it
+        answers 403, which the caller reads as 'this rung of the ladder is closed' rather than
+        as a fault. Retried once: closing an already-flat book is a no-op, so it is safe.
+        """
+        try:
+            status_code, parsed = self._request(PATH_CLOSE, {"strategy": strategy}, retries=1)
+        except OpenAlgoError as exc:
+            return False, {"status": "error", "message": str(exc)}
+        if status_code == 200 and parsed.get("status") == "success":
+            return True, parsed
+        return False, parsed

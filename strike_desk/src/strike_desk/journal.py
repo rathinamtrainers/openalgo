@@ -1,5 +1,5 @@
 """Append-only SQLite journal: ``decisions``, ``traces``, ``regime_reads``,
-``proposals``, ``risk_verdicts``, ``approvals`` and ``orders``."""
+``proposals``, ``risk_verdicts``, ``approvals``, ``orders``, ``positions`` and ``exits``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +20,14 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
     event,
     func,
+    inspect,
     select,
 )
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -33,9 +35,48 @@ from .errors import AlreadyJournalled, JournalWriteError
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+POSITION_ADOPTED = "adopted"
+POSITION_ARMED = "armed"
+POSITION_EXITING = "exiting"
+POSITION_FLAT = "flat"
+POSITION_STOOD_DOWN = "stood-down"
+POSITION_ORPHANED = "orphaned"
+
+POSITION_LIVE = frozenset({POSITION_ADOPTED, POSITION_ARMED, POSITION_EXITING})
+POSITION_TERMINAL = frozenset({POSITION_FLAT, POSITION_STOOD_DOWN, POSITION_ORPHANED})
+
+EXIT_STOP = "stop"
+EXIT_TARGET = "target"
+EXIT_TIME_STOP = "time-stop"
+EXIT_SESSION_DEADLINE = "session-deadline"
+EXIT_FEED_BLACKOUT = "feed-blackout"
+EXIT_LEVELS_UNAVAILABLE = "levels-unavailable"
+EXIT_MANUAL = "manual"
+EXIT_SQUARE_OFF = "square-off"
+
+EXIT_REASONS = frozenset(
+    {
+        EXIT_STOP,
+        EXIT_TARGET,
+        EXIT_TIME_STOP,
+        EXIT_SESSION_DEADLINE,
+        EXIT_FEED_BLACKOUT,
+        EXIT_LEVELS_UNAVAILABLE,
+        EXIT_MANUAL,
+        EXIT_SQUARE_OFF,
+    }
+)
+
+EXIT_SUBMITTED = "submitted"
+EXIT_FILLED = "filled"
+EXIT_REFUSED = "refused"
+EXIT_GATED = "gated"
+EXIT_FAILED = "failed"
 
 APPROVAL_PENDING = "pending"
+APPROVAL_AUTO_APPROVED = "auto-approved"
 APPROVAL_APPROVED = "approved"
 APPROVAL_REJECTED = "rejected"
 APPROVAL_EXPIRED = "expired"
@@ -49,6 +90,7 @@ APPROVAL_UNPRICEABLE = "unpriceable-band"
 APPROVAL_TERMINAL = frozenset(
     {
         APPROVAL_APPROVED,
+        APPROVAL_AUTO_APPROVED,
         APPROVAL_REJECTED,
         APPROVAL_EXPIRED,
         APPROVAL_LATE,
@@ -324,6 +366,79 @@ class OrderRow(Base):
     __table_args__ = (Index("uq_orders_state", "approval_id", "order_status", unique=True),)
 
 
+class PositionRow(Base):
+    """One row per state of one managed position. Never updated, never deleted."""
+
+    __tablename__ = "positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    order_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    approval_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    tick_id: Mapped[str | None] = mapped_column(String(48), index=True, nullable=True)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    product: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    time_stop_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    theta_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    realised_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    defect: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+    __table_args__ = (UniqueConstraint("position_id", "state", name="uq_positions_state"),)
+
+
+class ExitRow(Base):
+    """One row per exit attempt. Never updated, never deleted."""
+
+    __tablename__ = "exits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exit_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    position_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    reason: Mapped[str] = mapped_column(String(24), index=True, nullable=False)
+    path: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    trading_day: Mapped[str] = mapped_column(String(10), index=True, nullable=False)
+    triggered_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    submitted_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    round_trip_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    level_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    feed_source: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    feed_age_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    broker_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    slippage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realised_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=SCHEMA_VERSION)
+
+    __table_args__ = (UniqueConstraint("position_id", "attempt", name="uq_exits_attempt"),)
+
+
 # Append-only enforcement lives in the database, not in application discipline.
 for _table in (
     Decision.__table__,
@@ -333,6 +448,8 @@ for _table in (
     RiskVerdictRow.__table__,
     ApprovalRow.__table__,
     OrderRow.__table__,
+    PositionRow.__table__,
+    ExitRow.__table__,
 ):
     for _operation in ("UPDATE", "DELETE"):
         event.listen(
@@ -383,7 +500,12 @@ class Journal:
 
     def create_schema(self) -> None:
         """Create tables and triggers if absent, then add any column this release added."""
-        Base.metadata.create_all(self._engine)
+        try:
+            Base.metadata.create_all(self._engine)
+        except OperationalError as exc:
+            if "already exists" not in str(exc).lower():
+                raise
+            logger.info("journal schema already present during create_all")
         self._add_missing_columns()
 
     def _add_missing_columns(self) -> None:
@@ -770,6 +892,137 @@ class Journal:
                 .order_by(TraceSpan.started_at_utc.asc())
             )
             return list(session.execute(statement).scalars())
+
+    def table_names(self) -> list[str]:
+        return list(inspect(self._engine).get_table_names())
+
+    def order_row(self, order_id: str) -> OrderRow | None:
+        with self.session_scope() as session:
+            statement = select(OrderRow).where(OrderRow.order_id == order_id).limit(1)
+            return session.execute(statement).scalars().first()
+
+    def latest_approval(self) -> ApprovalRow | None:
+        with self.session_scope() as session:
+            statement = select(ApprovalRow).order_by(ApprovalRow.id.desc()).limit(1)
+            return session.execute(statement).scalars().first()
+
+    def record_position_state(self, **fields: Any) -> str:
+        """Append one position state. Raises AlreadyJournalled when that state exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(PositionRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"position {fields.get('position_id')} is already at state "
+                f"{fields.get('state')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(
+                f"could not append position state: {exc.__class__.__name__}"
+            ) from exc
+        return str(fields["position_id"])
+
+    def record_exit(self, **fields: Any) -> str:
+        """Append one exit attempt. Raises AlreadyJournalled when that attempt exists."""
+        try:
+            with self.session_scope() as session:
+                session.add(ExitRow(**fields))
+        except IntegrityError as exc:
+            raise AlreadyJournalled(
+                f"position {fields.get('position_id')} already has attempt "
+                f"{fields.get('attempt')}"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise JournalWriteError(f"could not append exit: {exc.__class__.__name__}") from exc
+        return str(fields["exit_id"])
+
+    def live_position(self) -> PositionRow | None:
+        """The most recent non-terminal position, or None when the book is flat."""
+        with self.session_scope() as session:
+            terminal = select(PositionRow.position_id).where(
+                PositionRow.state.in_(tuple(POSITION_TERMINAL))
+            )
+            statement = (
+                select(PositionRow)
+                .where(PositionRow.position_id.not_in(terminal))
+                .order_by(PositionRow.id.desc())
+                .limit(1)
+            )
+            return session.execute(statement).scalars().first()
+
+    def position_states(self, position_id: str) -> Sequence[PositionRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(PositionRow)
+                .where(PositionRow.position_id == position_id)
+                .order_by(PositionRow.id.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def position_for_order(self, order_id: str) -> PositionRow | None:
+        with self.session_scope() as session:
+            statement = (
+                select(PositionRow).where(PositionRow.order_id == order_id).limit(1)
+            )
+            return session.execute(statement).scalars().first()
+
+    def exits_for_position(self, position_id: str) -> Sequence[ExitRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(ExitRow)
+                .where(ExitRow.position_id == position_id)
+                .order_by(ExitRow.attempt.asc(), ExitRow.id.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def list_positions(self, trading_day: str, limit: int = 100) -> Sequence[PositionRow]:
+        with self.session_scope() as session:
+            statement = (
+                select(PositionRow)
+                .where(PositionRow.trading_day == trading_day)
+                .order_by(PositionRow.created_at_utc.asc())
+                .limit(limit)
+            )
+            return list(session.execute(statement).scalars())
+
+    def unadopted_orders(self, trading_day: str) -> Sequence[OrderRow]:
+        """Orders that reached 'complete' today and were never adopted by the monitor."""
+        with self.session_scope() as session:
+            adopted = select(PositionRow.order_id).where(PositionRow.order_id.is_not(None))
+            statement = (
+                select(OrderRow)
+                .where(
+                    OrderRow.trading_day == trading_day,
+                    OrderRow.order_status == "complete",
+                    OrderRow.order_id.not_in(adopted),
+                )
+                .order_by(OrderRow.created_at_utc.asc())
+            )
+            return list(session.execute(statement).scalars())
+
+    def realised_pnl_for_day(self, trading_day: date | str) -> float:
+        """Sum of realised P&L across every position that reached flat on this trading day."""
+        day = trading_day.isoformat() if isinstance(trading_day, date) else trading_day
+        with self.session_scope() as session:
+            rows = session.execute(
+                select(PositionRow.realised_pnl).where(
+                    PositionRow.state == POSITION_FLAT,
+                    PositionRow.trading_day == day,
+                )
+            ).scalars()
+            return float(sum(value for value in rows if value is not None))
+
+    def entry_count_for_day(self, trading_day: date | str) -> int:
+        """How many entry orders were submitted on this trading day, in any final status."""
+        day = trading_day.isoformat() if isinstance(trading_day, date) else trading_day
+        with self.session_scope() as session:
+            return int(
+                session.execute(
+                    select(func.count())
+                    .select_from(OrderRow)
+                    .where(OrderRow.trading_day == day, OrderRow.action == "BUY")
+                ).scalar_one()
+            )
 
     def close(self) -> None:
         """Dispose the engine — every connection released, no descriptor left open."""

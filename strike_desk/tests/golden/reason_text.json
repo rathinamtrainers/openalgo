@@ -292,6 +292,51 @@
         "deadline": "11:35:00 IST"
       },
       "expect": "Held: pending order 42 passed its approval deadline at 11:35:00 IST and has still not been settled. The desk is holding on an intent nothing is resolving — read the log and clear the queue."
+    },
+    {
+      "id": "GD-29",
+      "code": "exit-path-gated",
+      "variant": "default",
+      "fields": {
+        "detail": "OpenAlgo is live and in semi-auto"
+      },
+      "expect": "Declined: the exit path is gated (OpenAlgo is live and in semi-auto). The desk does not open a position it cannot close without someone clicking Approve."
+    },
+    {
+      "id": "GD-30",
+      "code": "autonomy-mode-mismatch",
+      "variant": "default",
+      "fields": {
+        "detail": "autonomy is 'unattended' which needs order mode 'auto', but OpenAlgo reports 'semi_auto'"
+      },
+      "expect": "Declined: autonomy is 'unattended' which needs order mode 'auto', but OpenAlgo reports 'semi_auto'. The desk will not submit until its autonomy and OpenAlgo's order mode say the same thing."
+    },
+    {
+      "id": "GD-31",
+      "code": "monitor-unavailable",
+      "variant": "default",
+      "fields": {
+        "detail": "the position monitor is not running"
+      },
+      "expect": "Declined: the position monitor is not running. Unattended, the desk opens nothing that the position monitor is not alive to close."
+    },
+    {
+      "id": "GD-32",
+      "code": "daily-loss-cap",
+      "variant": "default",
+      "fields": {
+        "detail": "realised -600.00 against a cap of -500.00"
+      },
+      "expect": "Declined: realised -600.00 against a cap of -500.00. The desk is done for the day."
+    },
+    {
+      "id": "GD-33",
+      "code": "daily-trade-cap",
+      "variant": "default",
+      "fields": {
+        "detail": "2 unattended entries already taken, cap is 2"
+      },
+      "expect": "Declined: 2 unattended entries already taken, cap is 2. The desk is done for the day."
     }
   ]
 }

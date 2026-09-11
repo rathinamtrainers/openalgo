@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import Integer, String, Text, create_engine, select
+from sqlalchemy import Boolean, Integer, String, Text, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -28,6 +28,7 @@ from .errors import MirrorUnavailable
 logger = logging.getLogger(__name__)
 
 ORDER_MODE_SEMI_AUTO = "semi_auto"
+ORDER_MODE_AUTO = "auto"
 
 PENDING = "pending"
 APPROVED = "approved"
@@ -66,6 +67,15 @@ class PendingOrderRow(MirrorBase):
     rejected_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     broker_order_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     broker_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class PlatformSettingsRow(MirrorBase):
+    """OpenAlgo's single-row settings table. Only the analyze-mode flag is read."""
+
+    __tablename__ = "settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    analyze_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 @dataclass(frozen=True)
@@ -148,19 +158,42 @@ class OpenAlgoMirror:
             raise MirrorUnavailable(f"no api_keys row for user {self._user!r}")
         return str(found)
 
-    def health(self) -> GateHealth:
-        """Whether OpenAlgo will queue an order rather than place it."""
+    def analyze_mode(self) -> bool:
+        """True when OpenAlgo is in analyze (sandbox) mode. Raises rather than guessing."""
+        if not self._path.exists():
+            raise MirrorUnavailable(f"{self._path} does not exist")
+        try:
+            with self._session_scope() as session:
+                statement = select(PlatformSettingsRow.analyze_mode).limit(1)
+                found = session.execute(statement).scalars().first()
+        except SQLAlchemyError as exc:
+            raise MirrorUnavailable(
+                f"{self._path}: could not read settings ({exc.__class__.__name__})"
+            ) from exc
+        return bool(found)
+
+    def health(self, expected: str = ORDER_MODE_SEMI_AUTO) -> GateHealth:
+        """Whether OpenAlgo's order mode matches the mode this desk is configured for."""
         try:
             mode = self.order_mode()
         except MirrorUnavailable as exc:
             return GateHealth(False, None, str(exc))
-        if mode != ORDER_MODE_SEMI_AUTO:
+        if mode != expected:
+            if expected == ORDER_MODE_AUTO:
+                return GateHealth(
+                    False,
+                    mode,
+                    f"OpenAlgo order mode is {mode!r}, not {ORDER_MODE_AUTO!r}: "
+                    "an unattended entry would be queued for a click nobody will give",
+                )
             return GateHealth(
                 False,
                 mode,
                 f"OpenAlgo order mode is {mode!r}, not {ORDER_MODE_SEMI_AUTO!r}: "
                 "an order would reach the broker without a human approval",
             )
+        if expected == ORDER_MODE_AUTO:
+            return GateHealth(True, mode, "auto order mode is active — unattended entries place directly")
         return GateHealth(True, mode, "semi-auto approval gate is active")
 
     def pending_order(self, pending_order_id: int) -> PendingOrder | None:

@@ -18,6 +18,7 @@ from .approval_watcher import ApprovalWatcher
 from .config import IST, Settings
 from .errors import JournalWriteError, McpUnavailable, ModelCallFailed, PromptNotFound
 from .execution_client import ExecutionClient
+from .exit_executor import ExitExecutor
 from .graph import TickDeps
 from .journal import Journal
 from .mcp_toolbox import McpToolbox
@@ -25,6 +26,7 @@ from .observability import Redactor, configure_logging, configure_tracing
 from .openalgo_client import OpenAlgoClient
 from .openalgo_mirror import OpenAlgoMirror
 from .options_strategist import build_options_strategist
+from .position_monitor import PositionMonitor
 from .prompt_registry import PromptRegistry
 from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
@@ -62,10 +64,21 @@ class StrikeDeskService:
         self._mirror: OpenAlgoMirror | None = None
         self._execution: ExecutionClient | None = None
         self._gate: ApprovalGate | None = None
+        self._monitor: PositionMonitor | None = None
         if settings.execution_enabled:
             self._mirror = OpenAlgoMirror(settings)
             self._execution = ExecutionClient(settings)
             self._gate = ApprovalGate(settings, self._journal, self._mirror, self._execution)
+            if settings.monitor_enabled:
+                executor = ExitExecutor(
+                    settings,
+                    self._execution,
+                    self._client,
+                    f"{settings.order_strategy_prefix}-{settings.index_symbol}",
+                )
+                self._monitor = PositionMonitor(
+                    settings, self._journal, self._client, executor, self._mirror
+                )
 
         self._checkpoint_conn = sqlite3.connect(
             str(settings.checkpoint_path), check_same_thread=False
@@ -82,6 +95,8 @@ class StrikeDeskService:
             span_processor=self._span_processor,
             checkpointer=checkpointer,
             gate=self._gate,
+            monitor=self._monitor,
+            mirror=self._mirror,
         )
         self._runner = TickRunner(deps, SessionGate(self._client, settings))
         self._watcher: ApprovalWatcher | None = None
@@ -92,6 +107,7 @@ class StrikeDeskService:
                 self._mirror,
                 self._execution,
                 self._runner.resume_approval,
+                monitor=self._monitor,
             )
         self._scheduler = BackgroundScheduler(timezone=IST)
         self._stop = threading.Event()
@@ -200,6 +216,8 @@ class StrikeDeskService:
                 misfire_grace_time=30,
             )
         self._scheduler.start()
+        if self._monitor is not None:
+            self._monitor.start()
         signal.signal(signal.SIGTERM, self._handle_stop)
         signal.signal(signal.SIGINT, self._handle_stop)
         # SIGUSR1 is POSIX-only; on Windows tick-now is unavailable via signals.
@@ -217,6 +235,8 @@ class StrikeDeskService:
 
     def shutdown(self) -> None:
         logger.info("strike-desk shutting down")
+        if self._monitor is not None:
+            self._monitor.close()
         try:
             self._scheduler.shutdown(wait=True)
         except Exception:  # noqa: BLE001

@@ -20,6 +20,7 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/funds",
         "/api/v1/positionbook",
         "/api/v1/market/timings",
+        "/api/v1/quotes",
     }
 )
 
@@ -111,4 +112,11 @@ class OpenAlgoClient:
         data = self._post("/api/v1/market/timings", {"date": day.isoformat()}).get("data") or []
         if not isinstance(data, list):
             raise OpenAlgoError("/api/v1/market/timings: 'data' was not a list")
+        return data
+
+    def quotes(self, symbol: str, exchange: str) -> dict[str, Any]:
+        """One symbol's snapshot. The monitor's fallback when the tick feed goes quiet."""
+        data = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange}).get("data")
+        if not isinstance(data, dict):
+            raise OpenAlgoError("/api/v1/quotes: 'data' was not an object")
         return data

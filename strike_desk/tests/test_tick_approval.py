@@ -10,8 +10,8 @@ from strike_desk.graph import (
     OUTCOME_DECLINE,
     OUTCOME_ENTER,
     OUTCOME_HOLD,
-    REASON_APPROVAL_GATE_UNAVAILABLE,
     REASON_APPROVAL_PENDING,
+    REASON_AUTONOMY_MODE_MISMATCH,
 )
 from strike_desk.journal import APPROVAL_APPROVED, APPROVAL_PENDING
 from strike_desk.specialists import ROLE_REGIME, ROLE_STRATEGIST
@@ -163,7 +163,7 @@ def test_auto_mode_declines_before_a_token_is_spent(entering_desk, journal, open
 
     decision = journal.list_decisions(today)[0]
     assert decision.outcome == OUTCOME_DECLINE
-    assert decision.reason_code == REASON_APPROVAL_GATE_UNAVAILABLE
+    assert decision.reason_code == REASON_AUTONOMY_MODE_MISMATCH
     assert journal.list_regime_reads(today) == []
     assert journal.list_approvals(today) == []
 

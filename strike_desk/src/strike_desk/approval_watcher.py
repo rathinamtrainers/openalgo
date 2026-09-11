@@ -75,12 +75,14 @@ class ApprovalWatcher:
         mirror: OpenAlgoMirror,
         client: ExecutionClient,
         resume: ResumeCallback,
+        monitor: Any | None = None,
     ) -> None:
         self._settings = settings
         self._journal = journal
         self._mirror = mirror
         self._client = client
         self._resume = resume
+        self._monitor = monitor
         self._tracer = get_tracer()
         self._awaiting_broker_id: dict[str, int] = {}
 
@@ -342,18 +344,21 @@ class ApprovalWatcher:
 
             if status == order.order_status:
                 continue
-            self._append_order_state(order, status, average_price, data)
+            order_id = self._append_order_state(order, status, average_price, data)
+            if status == "complete" and self._monitor is not None and order_id:
+                self._monitor.notify_fill(order_id)
 
     def _append_order_state(
         self, order: Any, status: str, average_price: float | None, raw: dict[str, Any]
-    ) -> None:
+    ) -> str | None:
         """One more row for the same order, at its new state."""
         import json
         import uuid
 
+        order_id = str(uuid.uuid4())
         try:
             self._journal.record_order(
-                order_id=str(uuid.uuid4()),
+                order_id=order_id,
                 approval_id=order.approval_id,
                 tick_id=order.tick_id,
                 trace_id=order.trace_id,
@@ -375,5 +380,7 @@ class ApprovalWatcher:
                 raw_json=json.dumps(raw, default=str, sort_keys=True),
                 schema_version=SCHEMA_VERSION,
             )
+            return order_id
         except Exception:  # noqa: BLE001 — bookkeeping must never kill the scheduler thread
             logger.exception("could not append order state %s for %s", status, order.order_id)
+            return None

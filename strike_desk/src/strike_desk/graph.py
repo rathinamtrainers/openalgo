@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from datetime import date as date_cls
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -15,14 +16,18 @@ from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from .approval_gate import ApprovalGate, Resolution, TickContext, settle_approval
+from .autonomy import AutonomyVerdict
+from .autonomy import evaluate as autonomy_evaluate
 from .book_state import read_book_state
 from .config import IST, Settings
 from .decline_taxonomy import describe, render
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
+from .exit_executor import exit_path_status
 from .grounding import ProposalSubmission
 from .journal import APPROVAL_PENDING, SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
+from .openalgo_mirror import OpenAlgoMirror
 from .options_strategist import (
     STATUS_DEGRADED as STRATEGY_DEGRADED,
 )
@@ -62,6 +67,7 @@ from .risk_officer import (
 from .risk_officer import (
     adjudicate as adjudicate_proposal,
 )
+from .session import engage_kill_switch
 from .specialists import (
     ROLE_REGIME,
     ROLE_RISK,
@@ -96,6 +102,11 @@ REASON_RISK_CLEARED = "risk-cleared"
 REASON_APPROVAL_PENDING = "approval-pending"
 REASON_APPROVAL_QUEUE_STALE = "approval-queue-stale"
 REASON_APPROVAL_GATE_UNAVAILABLE = "approval-gate-unavailable"
+REASON_EXIT_PATH_GATED = "exit-path-gated"
+REASON_AUTONOMY_MODE_MISMATCH = "autonomy-mode-mismatch"
+REASON_MONITOR_UNAVAILABLE = "monitor-unavailable"
+REASON_DAILY_LOSS_CAP = "daily-loss-cap"
+REASON_DAILY_TRADE_CAP = "daily-trade-cap"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -130,6 +141,8 @@ class TickState(TypedDict, total=False):
     verdict_id: str | None
     approval_pending: dict[str, Any] | None
     gate_unavailable: str | None
+    exit_path_gated: str | None
+    autonomy_blocked: AutonomyVerdict | None
     approval: dict[str, Any] | None
     resolution: dict[str, Any] | None
 
@@ -144,6 +157,8 @@ class TickDeps:
     span_processor: JournalSpanProcessor
     checkpointer: Any
     gate: ApprovalGate | None = None
+    monitor: Any | None = None
+    mirror: OpenAlgoMirror | None = None
 
 
 def _rationale(state: TickState) -> str | None:
@@ -219,12 +234,32 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             ),
         )
 
+    blocked = state.get("autonomy_blocked")
+    if blocked is not None:
+        reason = blocked.reason if not isinstance(blocked, dict) else blocked.get("reason")
+        detail = blocked.detail if not isinstance(blocked, dict) else blocked.get("detail") or ""
+        if reason == REASON_DAILY_LOSS_CAP:
+            engage_kill_switch(settings, detail or "unattended daily loss cap")
+        return (
+            OUTCOME_DECLINE,
+            str(reason),
+            render(str(reason), max_chars=cap, detail=detail),
+        )
+
     gate_detail = state.get("gate_unavailable")
     if gate_detail:
         return (
             OUTCOME_DECLINE,
             REASON_APPROVAL_GATE_UNAVAILABLE,
             render(REASON_APPROVAL_GATE_UNAVAILABLE, max_chars=cap, detail=str(gate_detail)),
+        )
+
+    exit_detail = state.get("exit_path_gated")
+    if exit_detail:
+        return (
+            OUTCOME_DECLINE,
+            REASON_EXIT_PATH_GATED,
+            render(REASON_EXIT_PATH_GATED, max_chars=cap, detail=str(exit_detail)),
         )
 
     stop = state.get("session_stop")
@@ -660,7 +695,27 @@ def build_tick_graph(deps: TickDeps) -> Any:
                                 "stale": stale,
                             },
                         }
+                    if deps.settings.execution_enabled:
+                        if deps.mirror is not None:
+                            verdict = autonomy_evaluate(
+                                deps.settings,
+                                deps.mirror,
+                                deps.journal,
+                                deps.monitor,
+                                date_cls.fromisoformat(state["trading_day"]),
+                            )
+                            span.set_attribute("autonomy.mode", deps.settings.autonomy)
+                            span.set_attribute("autonomy.ok", verdict.ok)
+                            if not verdict.ok:
+                                return {"book": snapshot, "autonomy_blocked": verdict}
+                        if deps.monitor is not None:
+                            status = exit_path_status(deps.monitor.mirror)
+                            span.set_attribute("exit_path.ok", status.ok)
+                            if not status.ok:
+                                return {"book": snapshot, "exit_path_gated": status.detail}
                     if deps.settings.execution_enabled and deps.gate is not None:
+                        if deps.settings.unattended:
+                            return {"book": snapshot}
                         health = deps.gate.health()
                         span.set_attribute("approval.gate_ok", health.ok)
                         if not health.ok:
@@ -684,6 +739,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
         if book.get("open_positions"):
             return "decide"
         if state.get("approval_pending") or state.get("gate_unavailable"):
+            return "decide"
+        if state.get("exit_path_gated") or state.get("autonomy_blocked"):
             return "decide"
         return "decide" if state.get("session_stop") else "consult"
 
@@ -951,6 +1008,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
         return "await" if approval.get("status") == APPROVAL_PENDING else "end"
 
     def await_approval(state: TickState) -> dict[str, Any]:
+        if deps.settings.unattended:
+            return {"approval": state.get("approval")}
         # Nothing may precede this call: a resume re-runs the node from its first line.
         approval = state.get("approval") or {}
         resolution = interrupt(

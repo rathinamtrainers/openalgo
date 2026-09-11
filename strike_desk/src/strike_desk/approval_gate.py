@@ -15,9 +15,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
+from .autonomy import check_mode, required_order_mode
 from .config import Settings
 from .errors import (
     AlreadyJournalled,
+    AutonomyMismatch,
+    ExecutionFailed,
     InvalidOrderPayload,
     JournalWriteError,
     MirrorUnavailable,
@@ -27,6 +30,7 @@ from .errors import (
 from .execution_client import ExecutionClient
 from .journal import (
     APPROVAL_APPROVED,
+    APPROVAL_AUTO_APPROVED,
     APPROVAL_DEFECTS,
     APPROVAL_GATE_BYPASSED,
     APPROVAL_GATE_UNAVAILABLE,
@@ -333,7 +337,7 @@ class ApprovalGate:
 
     def health(self) -> GateHealth:
         """Whether a submission is allowed to be attempted at all."""
-        return self._mirror.health()
+        return self._mirror.health(expected=required_order_mode(self._settings))
 
     def submit(self, context: TickContext) -> SubmitResult:
         """Queue one cleared intent for approval, or journal exactly why it was not."""
@@ -345,13 +349,13 @@ class ApprovalGate:
         except InvalidOrderPayload as exc:
             return self._refuse_before_intent(context, APPROVAL_SUBMIT_FAILED, str(exc), now)
 
-        health = self.health()
-        if not health.ok:
-            self._record(intent, APPROVAL_GATE_UNAVAILABLE, health.detail, response={})
+        verdict = check_mode(self._settings, self._mirror)
+        if not verdict.ok:
+            self._record(intent, APPROVAL_GATE_UNAVAILABLE, verdict.detail, response={})
             return SubmitResult(
                 intent.approval_id,
                 APPROVAL_GATE_UNAVAILABLE,
-                health.detail,
+                verdict.detail,
                 quantity=intent.quantity,
                 limit_price=intent.limit_price,
                 symbol=intent.symbol,
@@ -367,6 +371,79 @@ class ApprovalGate:
                 intent.approval_id,
                 APPROVAL_SUBMIT_FAILED,
                 detail,
+                quantity=intent.quantity,
+                limit_price=intent.limit_price,
+                symbol=intent.symbol,
+            )
+
+        pending_id = receipt.pending_order_id
+        broker_id = receipt.broker_order_id
+        if self._settings.unattended:
+            if pending_id is not None or receipt.queued:
+                detail = f"unattended mode but OpenAlgo queued the order as pending {pending_id}"
+                engage_kill_switch(self._settings, "unattended submission was queued for approval")
+                self._record(
+                    intent,
+                    APPROVAL_GATE_BYPASSED,
+                    detail,
+                    response=receipt.raw,
+                    pending_order_id=pending_id,
+                )
+                raise AutonomyMismatch(detail)
+            if broker_id is None:
+                detail = "unattended submission returned no order id"
+                self._record(intent, APPROVAL_SUBMIT_FAILED, detail, response=receipt.raw)
+                raise ExecutionFailed(detail)
+            self._record(
+                intent,
+                APPROVAL_AUTO_APPROVED,
+                f"unattended entry placed as order {broker_id}",
+                response=receipt.raw,
+                broker_order_id=broker_id,
+                approved_by="strike-desk",
+            )
+            logger.warning(
+                "unattended entry: %s x%d at %s — stop %s target %s time-stop %s — %s",
+                intent.symbol,
+                intent.quantity,
+                intent.limit_price,
+                (context.proposal or {}).get("stop_price"),
+                (context.proposal or {}).get("target_price"),
+                (context.proposal or {}).get("time_stop_ist"),
+                (context.proposal or {}).get("rationale") or intent.tick_id,
+            )
+            try:
+                self._journal.record_order(
+                    order_id=str(uuid.uuid4()),
+                    approval_id=intent.approval_id,
+                    tick_id=intent.tick_id,
+                    trace_id=intent.trace_id,
+                    created_at_utc=datetime.now(tz=UTC),
+                    trading_day=intent.trading_day,
+                    pending_order_id=None,
+                    broker_order_id=broker_id,
+                    symbol=intent.symbol,
+                    exchange=intent.exchange,
+                    action=intent.action,
+                    product=intent.product,
+                    price_type=PRICE_TYPE_LIMIT,
+                    limit_price=intent.limit_price,
+                    lots=intent.lots,
+                    lot_size=intent.lot_size,
+                    quantity=intent.quantity,
+                    order_status="complete",
+                    average_price=intent.limit_price,
+                    raw_json=json.dumps(receipt.raw, default=str, sort_keys=True),
+                    schema_version=SCHEMA_VERSION,
+                )
+            except AlreadyJournalled:
+                logger.info(
+                    "unattended order for approval %s already journalled", intent.approval_id
+                )
+            return SubmitResult(
+                intent.approval_id,
+                APPROVAL_AUTO_APPROVED,
+                "placed without a human approval",
                 quantity=intent.quantity,
                 limit_price=intent.limit_price,
                 symbol=intent.symbol,
@@ -514,6 +591,7 @@ class ApprovalGate:
         response: dict[str, Any],
         pending_order_id: int | None = None,
         broker_order_id: str | None = None,
+        approved_by: str | None = None,
     ) -> None:
         """Append one approval row for an intent that was built."""
         self._journal.record_approval(
@@ -541,7 +619,7 @@ class ApprovalGate:
             strategy_tag=intent.strategy,
             deadline_utc=intent.deadline_utc,
             wait_seconds=0.0,
-            approved_by=None,
+            approved_by=approved_by,
             resolved_at_ist=None,
             broker_order_id=broker_order_id,
             withdrawal=None if status == APPROVAL_PENDING else WITHDRAWAL_NOT_QUEUED,

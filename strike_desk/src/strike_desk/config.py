@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import time
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -138,6 +139,26 @@ class Settings(BaseSettings):
     approval_poll_seconds: int = Field(default=5, ge=1, le=60)
     fill_deadline_seconds: int = Field(default=300, ge=30, le=3600)
 
+    # --- The position monitor ------------------------------------------------
+    monitor_enabled: bool = True
+    ws_url: str = "ws://127.0.0.1:8765"
+    ws_open_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    monitor_poll_seconds: float = Field(default=1.0, gt=0, le=10)
+    quote_poll_seconds: float = Field(default=2.0, gt=0, le=30)
+    feed_stale_seconds: float = Field(default=15.0, gt=0, le=300)
+    feed_blackout_seconds: float = Field(default=90.0, gt=0, le=1800)
+    reconcile_interval_seconds: float = Field(default=30.0, gt=0, le=600)
+    session_exit_deadline: str = "15:10"
+    exit_latency_budget_ms: int = Field(default=1500, ge=100, le=30000)
+    exit_max_attempts: int = Field(default=3, ge=1, le=10)
+    exit_retry_seconds: float = Field(default=2.0, gt=0, le=60)
+
+    # --- Autonomy (iteration 07) --------------------------------------------
+    autonomy: Literal["attended", "unattended"] = "unattended"
+    monitor_heartbeat_max_age_seconds: float = Field(default=30.0, gt=0, le=600)
+    unattended_daily_loss_cap: float = Field(default=6000.0, gt=0)
+    unattended_max_trades_per_day: int = Field(default=3, ge=1, le=20)
+
     # --- MCP toolbox --------------------------------------------------------
     mcp_python: Path = Path("/opt/openalgo/.venv/bin/python")
     mcp_server_script: Path = Path("/opt/openalgo/mcp/mcpserver.py")
@@ -183,6 +204,19 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_time_stop(cls, value: str) -> str:
         time.fromisoformat(value)
+        return value
+
+    @field_validator("session_exit_deadline")
+    @classmethod
+    def _validate_exit_deadline(cls, value: str) -> str:
+        time.fromisoformat(value)
+        return value
+
+    @field_validator("ws_url")
+    @classmethod
+    def _validate_ws_url(cls, value: str) -> str:
+        if not value.startswith(("ws://", "wss://")):
+            raise ValueError("ws_url must start with ws:// or wss://")
         return value
 
     @field_validator("order_product")
@@ -250,6 +284,14 @@ class Settings(BaseSettings):
     @property
     def expiry_cutoff_time(self) -> time:
         return time.fromisoformat(self.expiry_cutoff)
+
+    @property
+    def session_exit_deadline_time(self) -> time:
+        return time.fromisoformat(self.session_exit_deadline)
+
+    @property
+    def unattended(self) -> bool:
+        return self.autonomy == "unattended"
 
     @property
     def directional_regime_set(self) -> frozenset[str]:

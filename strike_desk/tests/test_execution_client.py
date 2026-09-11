@@ -21,7 +21,7 @@ PAYLOAD = {
 
 def test_only_three_paths_are_reachable(execution_client):
     """AC-5: refused before a socket is opened, so no route needs to be mocked."""
-    for path in ("/api/v1/closeposition", "/api/v1/positionbook", "/api/v1/modifyorder"):
+    for path in ("/api/v1/placesmartorder", "/api/v1/positionbook", "/api/v1/modifyorder"):
         with pytest.raises(ExecutionPathViolation):
             execution_client._request(path, {}, retries=0)  # noqa: SLF001
 

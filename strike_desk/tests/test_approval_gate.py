@@ -9,6 +9,7 @@ import pytest
 
 from strike_desk.approval_gate import (
     WITHDRAWAL_NOT_QUEUED,
+    ApprovalGate,
     Resolution,
     align_price,
     build_intent,
@@ -111,6 +112,25 @@ def test_auto_mode_stops_the_submission_before_the_wire(
     assert result.status == APPROVAL_GATE_UNAVAILABLE
     row = journal.list_approvals(today)[0]
     assert row.status == APPROVAL_GATE_UNAVAILABLE and row.defect is True
+
+
+def test_unattended_gate_health_requires_auto(
+    execution_settings, journal, mirror, execution_client, openalgo_db
+):
+    attended = ApprovalGate(execution_settings, journal, mirror, execution_client)
+    assert attended.health().ok is True
+
+    unattended = ApprovalGate(
+        execution_settings.model_copy(update={"autonomy": "unattended"}),
+        journal,
+        mirror,
+        execution_client,
+    )
+    assert unattended.health().ok is False
+
+    set_order_mode(openalgo_db, "auto")
+    assert unattended.health().ok is True
+    assert attended.health().ok is False
 
 
 def test_a_bypassed_gate_engages_the_kill_switch(

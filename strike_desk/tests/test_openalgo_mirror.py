@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from strike_desk.errors import MirrorUnavailable
-from strike_desk.openalgo_mirror import OpenAlgoMirror
+from strike_desk.openalgo_mirror import ORDER_MODE_AUTO, OpenAlgoMirror
 
 from .approval_fixtures import (
     USER,
@@ -28,6 +28,19 @@ def test_semi_auto_is_the_only_healthy_mode(mirror, openalgo_db):
     assert health.ok is False
     assert health.order_mode == "auto"
     assert "without a human approval" in health.detail
+
+
+def test_auto_is_healthy_when_unattended_expects_it(mirror, openalgo_db):
+    set_order_mode(openalgo_db, "auto")
+    health = mirror.health(expected=ORDER_MODE_AUTO)
+    assert health.ok is True
+    assert health.order_mode == "auto"
+    assert "unattended" in health.detail
+
+    set_order_mode(openalgo_db, "semi_auto")
+    health = mirror.health(expected=ORDER_MODE_AUTO)
+    assert health.ok is False
+    assert "queued for a click" in health.detail
 
 
 def test_a_missing_database_is_unhealthy_not_a_crash(execution_settings):

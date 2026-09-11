@@ -104,6 +104,7 @@ def settings(tmp_path) -> Settings:
         # Neutralised so integration tests exercise the graph, not the calendar.
         no_trade_windows="00:00-00:01",
         expiry_cutoff="23:59",
+        autonomy="attended",
     )
 
 
@@ -599,6 +600,7 @@ def execution_settings(settings: Settings, openalgo_db: Path) -> Settings:
             "approval_deadline_seconds": 300,
             "approval_poll_seconds": 1,
             "fill_deadline_seconds": 300,
+            "autonomy": "attended",
         }
     )
 
@@ -630,7 +632,7 @@ def gate(execution_settings, journal, mirror, execution_client):
 
 @pytest.fixture
 def execution_deps(
-    execution_settings, client, journal, registry, tracing, prompts, gate
+    execution_settings, client, journal, registry, tracing, prompts, gate, mirror
 ) -> TickDeps:
     import sqlite3
 
@@ -648,6 +650,7 @@ def execution_deps(
         span_processor=tracing,
         checkpointer=checkpointer,
         gate=gate,
+        mirror=mirror,
     )
     connection.close()
 
@@ -655,3 +658,43 @@ def execution_deps(
 @pytest.fixture
 def execution_runner(execution_deps: TickDeps) -> TickRunner:
     return TickRunner(execution_deps, SessionGate(execution_deps.client, execution_deps.settings))
+
+
+@pytest.fixture
+def monitor_settings(tmp_path) -> Settings:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return Settings(
+        # Pin the URL so a developer .env cannot send the client past the respx mocks.
+        openalgo_base_url="http://127.0.0.1:5000",
+        openalgo_api_key="test-key-0123456789",
+        openalgo_user="tester",
+        openalgo_db_path=tmp_path / "openalgo.db",
+        state_dir=state_dir,
+        execution_enabled=True,
+        monitor_enabled=True,
+        monitor_poll_seconds=0.05,
+        exit_retry_seconds=0.01,
+        fill_deadline_seconds=30,
+        feed_stale_seconds=5.0,
+        feed_blackout_seconds=10.0,
+        reconcile_interval_seconds=0.05,
+        # Neutralise a local .env tick budget that would fail the specialist-timeout fit check.
+        tick_budget_seconds=90.0,
+        specialist_timeout_seconds=25.0,
+        strategist_timeout_seconds=35.0,
+    )
+
+
+@pytest.fixture
+def seeded_flat_loss(journal):
+    from tests.position_fixtures import seed_flat_loss
+
+    return seed_flat_loss(journal)
+
+
+@pytest.fixture
+def seeded_two_entries(journal):
+    from tests.position_fixtures import seed_two_entries
+
+    return seed_two_entries(journal)

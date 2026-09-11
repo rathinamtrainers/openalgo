@@ -132,7 +132,7 @@ def test_the_artifact_moves_when_the_taxonomy_moves():
     assert TAXONOMY_ARTIFACT == f"{TAXONOMY_VERSION}+{TAXONOMY_DIGEST}"
     assert len(TAXONOMY_DIGEST) == 12
     assert compute_digest(ENTRIES[1:]) != TAXONOMY_DIGEST
-    assert TAXONOMY_VERSION == "dt-4"
+    assert TAXONOMY_VERSION == "dt-5"
 
 
 #: Every code dt-1 and dt-2 shipped, with the class it shipped with. These may never change.
