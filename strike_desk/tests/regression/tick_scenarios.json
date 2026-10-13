@@ -306,6 +306,45 @@
         }
       },
       "expect": {"outcome": "decline", "reason_code": "daily-trade-cap"}
+    },
+    {
+      "id": "REG-27",
+      "note": "120m close is between the EMA bands — EMA book waits",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 1.0,
+        "ema_no_signal": true,
+        "ema_signal": {"side": null, "close": 25000.0, "ema_high": 25100.0, "ema_low": 24800.0}
+      },
+      "expect": {"outcome": "decline", "reason_code": "ema-no-signal"}
+    },
+    {
+      "id": "REG-28",
+      "note": "EMA book already holds a lot — opposite band is the exit",
+      "settings": {"playbook_mode": "ema120"},
+      "state": {
+        "book": {"open_positions": [{"symbol": "NIFTY30SEP2625000CE"}]}
+      },
+      "expect": {"outcome": "hold", "reason_code": "ema-in-trade"}
+    },
+    {
+      "id": "REG-29",
+      "note": "overlay trending but ADX too weak to buy premium",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "trend_snapshot": {
+          "daily_plus_di": 12.4,
+          "daily_minus_di": 18.1,
+          "daily_adx": 18.2,
+          "ten_plus_di": 14.0,
+          "ten_minus_di": 20.0,
+          "ten_adx": 22.0
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-weak-trend"}
     }
   ]
 }

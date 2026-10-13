@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from strike_desk.config import IST, Settings, get_settings
-from strike_desk.journal import POSITION_FLAT, SCHEMA_VERSION, Journal
+from strike_desk.journal import POSITION_ARMED, POSITION_FLAT, SCHEMA_VERSION, Journal
 from strike_desk.levels import ExitLevels
 
 STRATEGY = "strike-desk-NIFTY"
@@ -43,6 +43,7 @@ def seed_chain(
     time_stop_ist: str = "14:45",
     quantity: int = 75,
     symbol: str = SYMBOL,
+    rationale: str = "seeded by the test fixtures for the position monitor",
 ) -> dict[str, str]:
     """Write the proposal, approval and order rows one adoption needs, and return the ids."""
     now = datetime.now(tz=UTC)
@@ -82,7 +83,7 @@ def seed_chain(
         stop_price=stop,
         target_price=target,
         time_stop_ist=time_stop_ist,
-        rationale="seeded by the test fixtures for the position monitor",
+        rationale=rationale,
         evidence_json="[]",
         playbook_artifact="pb-1",
         playbook_verdict="pass",
@@ -165,6 +166,43 @@ def seed_chain(
         "order_id": order_id,
         "tick_id": tick_id,
     }
+
+
+def seed_armed_position(
+    journal: Journal,
+    *,
+    symbol: str = SYMBOL,
+    trading_day: str = SEED_DAY,
+    quantity: int = 75,
+) -> str:
+    """A live journal row the isolated overlay book still claims."""
+    position_id = str(uuid.uuid4())
+    journal.record_position_state(
+        position_id=position_id,
+        state=POSITION_ARMED,
+        order_id=None,
+        approval_id=None,
+        proposal_id=None,
+        tick_id=None,
+        trace_id="0" * 32,
+        created_at_utc=datetime.now(tz=UTC),
+        trading_day=trading_day,
+        symbol=symbol,
+        exchange="NFO",
+        product="MIS",
+        quantity=quantity,
+        entry_price=102.5,
+        stop_price=80.0,
+        target_price=140.0,
+        time_stop_utc=datetime.now(tz=UTC) + timedelta(hours=2),
+        theta_per_day=-4.2,
+        exit_reason=None,
+        realised_pnl=None,
+        detail="seeded armed",
+        defect=False,
+        schema_version=SCHEMA_VERSION,
+    )
+    return position_id
 
 
 def seed_flat_loss(journal: Journal, *, realised: float = -600.0, day: str = SEED_DAY) -> str:

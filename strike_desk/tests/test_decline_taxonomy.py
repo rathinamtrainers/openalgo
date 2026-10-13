@@ -132,7 +132,7 @@ def test_the_artifact_moves_when_the_taxonomy_moves():
     assert TAXONOMY_ARTIFACT == f"{TAXONOMY_VERSION}+{TAXONOMY_DIGEST}"
     assert len(TAXONOMY_DIGEST) == 12
     assert compute_digest(ENTRIES[1:]) != TAXONOMY_DIGEST
-    assert TAXONOMY_VERSION == "dt-5"
+    assert TAXONOMY_VERSION == "dt-6"
 
 
 #: Every code dt-1 and dt-2 shipped, with the class it shipped with. These may never change.
@@ -153,6 +153,9 @@ FROZEN_CLASSES = {
     "risk-input-unavailable": ("risk", "degraded"),
     "risk-veto": ("risk", "routine"),
     "risk-cleared": ("risk", "routine"),
+    "ema-no-signal": ("regime", "routine"),
+    "ema-in-trade": ("book", "routine"),
+    "regime-weak-trend": ("regime", "routine"),
 }
 
 

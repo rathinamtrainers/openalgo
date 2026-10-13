@@ -89,7 +89,7 @@ def test_the_tick_declines_when_the_exit_path_is_gated(monitor_settings, journal
     status = exit_path_status(Gated())
     assert not status.ok
     entry = entry_for("exit-path-gated")
-    assert TAXONOMY_VERSION == "dt-5"
+    assert TAXONOMY_VERSION == "dt-6"
     assert entry.outcome == "decline" and entry.disposition == "defect"
 
 

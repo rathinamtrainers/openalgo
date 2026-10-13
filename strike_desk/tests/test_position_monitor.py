@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-import respx
 from freezegun import freeze_time
 
 from strike_desk.execution_client import ExecutionClient
@@ -52,13 +51,6 @@ def _no_real_feed(monkeypatch):
         return FakeFeed(tick(110.0))
 
     _patch_price_feed(monkeypatch, factory)
-
-
-@pytest.fixture
-def oa_http():
-    """One router for the whole test, including monitor construction and teardown."""
-    with respx.mock(base_url=BASE, assert_all_called=False) as router:
-        yield router
 
 
 class FakeMirror:

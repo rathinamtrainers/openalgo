@@ -21,7 +21,8 @@ from .autonomy import evaluate as autonomy_evaluate
 from .book_state import read_book_state
 from .config import IST, Settings
 from .decline_taxonomy import describe, render
-from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
+from .ema120 import read_signal
+from .errors import BookStateUnavailable, OpenAlgoError, SpecialistTimeout, SpecialistUnavailable
 from .exit_executor import exit_path_status
 from .grounding import ProposalSubmission
 from .journal import APPROVAL_PENDING, SCHEMA_VERSION, Journal
@@ -76,6 +77,7 @@ from .specialists import (
     SpecialistRequest,
     SpecialistResult,
 )
+from .trend_strength import assess_trend_strength
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,9 @@ REASON_AUTONOMY_MODE_MISMATCH = "autonomy-mode-mismatch"
 REASON_MONITOR_UNAVAILABLE = "monitor-unavailable"
 REASON_DAILY_LOSS_CAP = "daily-loss-cap"
 REASON_DAILY_TRADE_CAP = "daily-trade-cap"
+REASON_EMA_NO_SIGNAL = "ema-no-signal"
+REASON_EMA_IN_TRADE = "ema-in-trade"
+REASON_REGIME_WEAK_TREND = "regime-weak-trend"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -124,6 +129,7 @@ class TickState(TypedDict, total=False):
     regime_label: str | None
     regime_confidence: float | None
     regime_rationale: str | None
+    trend_snapshot: dict[str, float | None] | None
     regime_data_error: str | None
     specialist_error: dict[str, str] | None
     model_versions: list[str]
@@ -145,6 +151,8 @@ class TickState(TypedDict, total=False):
     autonomy_blocked: AutonomyVerdict | None
     approval: dict[str, Any] | None
     resolution: dict[str, Any] | None
+    ema_signal: dict[str, Any] | None
+    ema_no_signal: bool
 
 
 @dataclass
@@ -165,6 +173,15 @@ def _rationale(state: TickState) -> str | None:
     """The analyst's own sentence, when this tick had one."""
     text = (state.get("regime_rationale") or "").strip()
     return text or None
+
+
+def _strength_block(state: TickState, settings: Settings) -> str | None:
+    """None when the tick never attached a snapshot, or when it clears the floors."""
+    snapshot = state.get("trend_snapshot")
+    if not snapshot:
+        return None
+    verdict = assess_trend_strength(snapshot, settings)
+    return None if verdict.ok else verdict.detail
 
 
 def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str]:
@@ -197,6 +214,13 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
     book = state.get("book") or {}
     positions = book.get("open_positions") or []
     if positions:
+        symbols = ", ".join(str(position.get("symbol", "?")) for position in positions)
+        if settings.ema120:
+            return (
+                OUTCOME_HOLD,
+                REASON_EMA_IN_TRADE,
+                render(REASON_EMA_IN_TRADE, max_chars=cap, symbols=symbols),
+            )
         return (
             OUTCOME_HOLD,
             REASON_POSITION_OPEN,
@@ -205,7 +229,7 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 max_chars=cap,
                 count=len(positions),
                 index=settings.index_symbol,
-                symbols=", ".join(str(position.get("symbol", "?")) for position in positions),
+                symbols=symbols,
             ),
         )
 
@@ -306,6 +330,25 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             render(REASON_SPECIALIST_UNAVAILABLE, max_chars=cap, role=role, detail=detail),
         )
 
+    if state.get("ema_no_signal") or (
+        settings.ema120
+        and not (state.get("ema_signal") or {}).get("side")
+        and state.get("regime_label") is not None
+    ):
+        signal = state.get("ema_signal") or {}
+        return (
+            OUTCOME_DECLINE,
+            REASON_EMA_NO_SIGNAL,
+            render(
+                REASON_EMA_NO_SIGNAL,
+                max_chars=cap,
+                detail=(
+                    f"close {signal.get('close', '?')} high {signal.get('ema_high', '?')} "
+                    f"low {signal.get('ema_low', '?')}"
+                ),
+            ),
+        )
+
     if state.get("regime_label") is None:
         return (
             OUTCOME_DECLINE,
@@ -342,6 +385,19 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 label=label,
                 confidence=f"{confidence:.2f}",
                 floor=f"{settings.min_regime_confidence:.2f}",
+            ),
+        )
+
+    blocked = None if settings.ema120 else _strength_block(state, settings)
+    if blocked:
+        return (
+            OUTCOME_DECLINE,
+            REASON_REGIME_WEAK_TREND,
+            render(
+                REASON_REGIME_WEAK_TREND,
+                max_chars=cap,
+                rationale=_rationale(state),
+                detail=blocked,
             ),
         )
 
@@ -531,6 +587,7 @@ def _record_read(deps: TickDeps, state: TickState, result: SpecialistResult) -> 
             "regime_label": label,
             "regime_confidence": confidence,
             "regime_rationale": str(payload.get("rationale", "")),
+            "trend_snapshot": payload.get("trend_snapshot"),
         }
     if status == STATUS_UNGROUNDED:
         return {
@@ -550,11 +607,15 @@ def _wants_a_contract(state: TickState, settings: Settings) -> bool:
         return False
     if state.get("regime_data_error") or state.get("specialist_error"):
         return False
+    if settings.ema120:
+        return (state.get("ema_signal") or {}).get("side") in {"long", "short"}
     label = state.get("regime_label")
     confidence = state.get("regime_confidence") or 0.0
     if label is None or label not in TRADEABLE_REGIMES:
         return False
     if confidence < settings.min_regime_confidence:
+        return False
+    if _strength_block(state, settings):
         return False
     return label in settings.directional_regime_set
 
@@ -752,6 +813,37 @@ def build_tick_graph(deps: TickDeps) -> Any:
             if _over_budget(state):
                 span.set_attribute("tick.budget_exceeded", True)
                 return {"budget_exceeded": True}
+            if deps.settings.ema120:
+                try:
+                    signal = read_signal(deps.client, deps.settings)
+                except OpenAlgoError as exc:
+                    span.set_attribute("specialist.outcome", "ema120-data")
+                    return {"regime_data_error": str(exc)}
+                payload = signal.as_dict()
+                span.set_attribute("ema120.side", str(signal.side or "none"))
+                span.set_attribute("ema120.close", signal.close)
+                if signal.side is None:
+                    return {
+                        "ema_signal": payload,
+                        "ema_no_signal": True,
+                        "regime_label": "trending",
+                        "regime_confidence": 1.0,
+                        "regime_rationale": (
+                            f"120m close {signal.close:.2f} is between EMA high "
+                            f"{signal.ema_high:.2f} and low {signal.ema_low:.2f}"
+                        ),
+                    }
+                side_word = "bullish" if signal.side == "long" else "bearish"
+                return {
+                    "ema_signal": payload,
+                    "ema_no_signal": False,
+                    "regime_label": "trending",
+                    "regime_confidence": 1.0,
+                    "regime_rationale": (
+                        f"{side_word} 120m EMA close {signal.close:.2f} vs high "
+                        f"{signal.ema_high:.2f} low {signal.ema_low:.2f}"
+                    ),
+                }
 
             request = SpecialistRequest(
                 tick_id=state["tick_id"],
@@ -810,7 +902,10 @@ def build_tick_graph(deps: TickDeps) -> Any:
                         "label": state.get("regime_label"),
                         "confidence": state.get("regime_confidence"),
                         "rationale": state.get("regime_rationale"),
+                        "trend_snapshot": state.get("trend_snapshot"),
                     },
+                    "ema120": state.get("ema_signal"),
+                    "playbook_mode": deps.settings.playbook_mode,
                 },
             )
             try:

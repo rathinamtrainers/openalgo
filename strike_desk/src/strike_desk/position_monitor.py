@@ -19,6 +19,8 @@ from typing import Any
 from opentelemetry.trace import Span
 
 from .config import IST, Settings
+from .ema120 import band_exit
+from .ema120 import parse_trailer as parse_ema_trailer
 from .errors import (
     AlreadyJournalled,
     JournalWriteError,
@@ -32,7 +34,9 @@ from .journal import (
     EXIT_FILLED,
     EXIT_LEVELS_UNAVAILABLE,
     EXIT_MANUAL,
+    EXIT_STOP,
     EXIT_SUBMITTED,
+    EXIT_TIME_STOP,
     ORDER_TERMINAL,
     POSITION_ADOPTED,
     POSITION_ARMED,
@@ -48,6 +52,7 @@ from .openalgo_client import OpenAlgoClient
 from .openalgo_mirror import OpenAlgoMirror
 from .price_feed import SOURCE_NONE, SOURCE_QUOTES, PriceFeed, Tick
 from .session import engage_kill_switch
+from .slots import isolation_active, lot_tag, owns_strategy_tag
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,7 @@ class ManagedPosition:
     entry_price: float
     levels: ExitLevels
     theta_per_day: float | None
+    ema_exits: Any = None
     attempts: int = 0
 
 
@@ -190,6 +196,8 @@ class PositionMonitor:
         self._drain_adoptions()
         if self._position is None:
             self._adopt_unadopted_orders()
+        if self._position is None:
+            self._adopt_or_flatten_book()
             return
         self._reconcile_if_due()
         if self._position is None:
@@ -204,7 +212,8 @@ class PositionMonitor:
             if self._position is not None:
                 logger.error(
                     "order %s filled while position %s is still managed — not adopting a second",
-                    order_id, self._position.position_id,
+                    order_id,
+                    self._position.position_id,
                 )
                 continue
             self._adopt(order_id)
@@ -258,10 +267,21 @@ class PositionMonitor:
 
         now = datetime.now(tz=UTC)
         day = _trading_day(now)
+        ema_exits = parse_ema_trailer(getattr(proposal, "rationale", None))
+        session_deadline = self._settings.session_exit_deadline_time
+        stop_day = date.fromisoformat(day)
+        stop_ist = proposal.time_stop_ist
+        if ema_exits is not None:
+            try:
+                stop_day = date.fromisoformat(str(proposal.expiry))
+            except (TypeError, ValueError):
+                stop_day = date.fromisoformat(day)
+            stop_ist = self._settings.expiry_cutoff
+            session_deadline = self._settings.expiry_cutoff_time
         time_stop, time_stop_reason = resolve_time_stop(
-            proposal.time_stop_ist,
-            self._settings.session_exit_deadline_time,
-            date.fromisoformat(day),
+            stop_ist,
+            session_deadline,
+            stop_day,
         )
         levels = ExitLevels(
             stop_price=float(proposal.stop_price or 0.0),
@@ -274,7 +294,8 @@ class PositionMonitor:
         if quantity <= 0:
             logger.warning(
                 "order %s is complete but the broker reports no position in %s — nothing to adopt",
-                order_id, record.symbol,
+                order_id,
+                record.symbol,
             )
             return
 
@@ -293,6 +314,7 @@ class PositionMonitor:
             entry_price=entry_price or float(record.average_price or 0.0),
             levels=levels,
             theta_per_day=proposal.theta_per_day,
+            ema_exits=ema_exits,
         )
         self._write_state(position, POSITION_ADOPTED, detail=f"adopted from order {order_id}")
         span.set_attribute("position.id", position.position_id)
@@ -318,8 +340,11 @@ class PositionMonitor:
         )
         logger.info(
             "managing %s x %s at %.2f — stop %.2f target %.2f time-stop %s",
-            position.quantity, position.symbol, position.entry_price,
-            levels.stop_price, levels.target_price,
+            position.quantity,
+            position.symbol,
+            position.entry_price,
+            levels.stop_price,
+            levels.target_price,
             levels.time_stop_utc.astimezone(IST).strftime("%H:%M IST"),
         )
 
@@ -407,14 +432,90 @@ class PositionMonitor:
             if blackout_for >= self._settings.feed_blackout_seconds:
                 logger.critical(
                     "no usable price for %s in %.0fs — exiting at market",
-                    position.symbol, blackout_for,
+                    position.symbol,
+                    blackout_for,
                 )
                 self._fire_exit(ExitTrigger(EXIT_FEED_BLACKOUT, None, None), tick)
                 return
+        if position.ema_exits is not None:
+            trigger = self._ema_trigger(position, tick, now)
+            if trigger is None:
+                return
+            self._fire_exit(trigger, tick)
+            return
         trigger = evaluate(position.levels, tick.price if tick else None, now)
         if trigger is None:
             return
         self._fire_exit(trigger, tick)
+
+    def _ema_trigger(
+        self, position: ManagedPosition, tick: Tick | None, now: datetime
+    ) -> ExitTrigger | None:
+        """Index vs stored bands. Time-stop only on the expiry cutoff, never 15:00."""
+        if now >= position.levels.time_stop_utc:
+            return ExitTrigger(EXIT_TIME_STOP, None, tick.price if tick else None)
+        high = low = ltp = None
+        try:
+            quote = self._client.quotes(
+                self._settings.index_symbol, self._settings.index_spot_exchange
+            )
+            ltp = _as_float(quote.get("ltp"))
+            high = _as_float(quote.get("high"))
+            low = _as_float(quote.get("low"))
+        except OpenAlgoError:
+            return None
+        if not band_exit(position.ema_exits, high=high, low=low, ltp=ltp):
+            return None
+        observed = ltp if ltp is not None else (tick.price if tick else None)
+        return ExitTrigger(EXIT_STOP, None, observed)
+
+    def _adopt_or_flatten_book(self) -> None:
+        """Ignore other-slot lots when isolation is on; flatten this slot's unmanaged fill."""
+        try:
+            raw = self._client.positionbook()
+        except OpenAlgoError:
+            logger.exception("could not read the OpenAlgo book for fill recovery")
+            return
+        now_ist = datetime.now(tz=IST)
+        if self._settings.ema120:
+            after_time_stop = (
+                now_ist.weekday() == self._settings.expiry_weekday
+                and now_ist.time() >= self._settings.expiry_cutoff_time
+            )
+        else:
+            after_time_stop = (now_ist.hour, now_ist.minute) >= (15, 0)
+        day = _trading_day(datetime.now(tz=UTC))
+        live = self._journal.live_symbols(day)
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").strip()
+            try:
+                quantity = int(float(str(row.get("quantity") or 0) or 0))
+            except (TypeError, ValueError):
+                continue
+            if not symbol or quantity <= 0 or symbol.upper() in live:
+                continue
+            owned = owns_strategy_tag(self._settings, lot_tag(row))
+            if isolation_active(self._settings) and not owned:
+                continue
+            if after_time_stop:
+                logger.error(
+                    "unmanaged %s is still open after the slot time-stop — flattening",
+                    symbol,
+                )
+                self._flatten_unmanaged(symbol, quantity, reason="time-stop after unmanaged fill")
+
+    def _flatten_unmanaged(self, symbol: str, quantity: int, *, reason: str) -> None:
+        """Square off an OpenAlgo long this slot owns but never adopted."""
+        del reason
+        try:
+            attempt = self._executor.fire(symbol, self._settings.option_exchange, quantity)
+        except OpenAlgoError:
+            logger.exception("could not flatten unmanaged %s", symbol)
+            return
+        if attempt.status != EXIT_SUBMITTED:
+            logger.error("flatten of unmanaged %s did not submit: %s", symbol, attempt.detail)
 
     def _reconcile_if_due(self) -> None:
         now = datetime.now(tz=UTC).timestamp()
@@ -432,7 +533,9 @@ class PositionMonitor:
                 if quantity != position.quantity:
                     logger.warning(
                         "position %s quantity moved %d -> %d at the broker; adopting the broker",
-                        position.position_id, position.quantity, quantity,
+                        position.position_id,
+                        position.quantity,
+                        quantity,
                     )
                     position.quantity = quantity
                 return
@@ -441,7 +544,8 @@ class PositionMonitor:
                 position.position_id,
             )
             self._write_state(
-                position, POSITION_STOOD_DOWN,
+                position,
+                POSITION_STOOD_DOWN,
                 detail="closed outside the desk; reconciled from the position book",
                 exit_reason=EXIT_MANUAL,
             )
@@ -455,7 +559,8 @@ class PositionMonitor:
             return
         triggered_at = datetime.now(tz=UTC)
         self._write_state(
-            position, POSITION_EXITING,
+            position,
+            POSITION_EXITING,
             detail=f"{trigger.reason} at {trigger.observed_price}",
             exit_reason=trigger.reason,
         )
@@ -468,8 +573,10 @@ class PositionMonitor:
                 position.attempts = attempt_number
                 attempt = self._executor.fire(position.symbol, position.exchange, position.quantity)
                 latency_ms = int(
-                    ((attempt.submitted_at_utc or datetime.now(tz=UTC)) - triggered_at
-                     ).total_seconds() * 1000
+                    (
+                        (attempt.submitted_at_utc or datetime.now(tz=UTC)) - triggered_at
+                    ).total_seconds()
+                    * 1000
                 )
                 span.set_attribute("exit.attempt", attempt_number)
                 span.set_attribute("exit.latency_ms", latency_ms)
@@ -477,13 +584,22 @@ class PositionMonitor:
                 span.set_attribute("exit.status", attempt.status)
                 exit_price, broker_order_id = self._settle_attempt(attempt, position)
                 self._record_exit(
-                    position, trigger, attempt, attempt_number, triggered_at, latency_ms,
-                    tick, exit_price, broker_order_id,
+                    position,
+                    trigger,
+                    attempt,
+                    attempt_number,
+                    triggered_at,
+                    latency_ms,
+                    tick,
+                    exit_price,
+                    broker_order_id,
                 )
                 if latency_ms > self._settings.exit_latency_budget_ms:
                     logger.warning(
                         "exit latency %dms exceeded the %dms budget for position %s",
-                        latency_ms, self._settings.exit_latency_budget_ms, position.position_id,
+                        latency_ms,
+                        self._settings.exit_latency_budget_ms,
+                        position.position_id,
                     )
                 if attempt.status == EXIT_SUBMITTED:
                     self._finish(position, trigger, exit_price)
@@ -562,12 +678,16 @@ class PositionMonitor:
                 raw_json=json.dumps(attempt.raw, default=str, sort_keys=True)[:8000],
             )
         except AlreadyJournalled:
-            logger.info("exit attempt %d for %s was already journalled",
-                        attempt_number, position.position_id)
+            logger.info(
+                "exit attempt %d for %s was already journalled",
+                attempt_number,
+                position.position_id,
+            )
         except JournalWriteError:
             logger.critical(
                 "could not journal exit attempt %d for %s — the order was still sent",
-                attempt_number, position.position_id,
+                attempt_number,
+                position.position_id,
             )
 
     def _finish(
@@ -579,14 +699,16 @@ class PositionMonitor:
             else None
         )
         self._write_state(
-            position, POSITION_FLAT,
+            position,
+            POSITION_FLAT,
             detail=f"exited on {trigger.reason}",
             exit_reason=trigger.reason,
             realised_pnl=realised,
         )
         logger.info(
             "position %s is flat on %s (realised %s)",
-            position.position_id, trigger.reason,
+            position.position_id,
+            trigger.reason,
             "unknown" if realised is None else f"{realised:.2f}",
         )
         self._stand_down()
@@ -596,10 +718,14 @@ class PositionMonitor:
         logger.critical(
             "EXIT FAILED after %d attempts: %d x %s is still open on a %s trigger — close it by "
             "hand now; OpenAlgo auto square-off remains the backstop",
-            position.attempts, position.quantity, position.symbol, trigger.reason,
+            position.attempts,
+            position.quantity,
+            position.symbol,
+            trigger.reason,
         )
         self._write_state(
-            position, POSITION_ORPHANED,
+            position,
+            POSITION_ORPHANED,
             detail=f"exit failed after {position.attempts} attempts on {trigger.reason}",
             exit_reason=trigger.reason,
             defect=True,

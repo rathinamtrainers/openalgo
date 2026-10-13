@@ -21,6 +21,7 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/positionbook",
         "/api/v1/market/timings",
         "/api/v1/quotes",
+        "/api/v1/history",
     }
 )
 
@@ -119,4 +120,27 @@ class OpenAlgoClient:
         data = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange}).get("data")
         if not isinstance(data, dict):
             raise OpenAlgoError("/api/v1/quotes: 'data' was not an object")
+        return data
+
+    def history(
+        self,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, Any] | list[Any]:
+        """OHLCV window. The EMA120 book reads closed 120-minute bars from this."""
+        data = self._post(
+            "/api/v1/history",
+            {
+                "symbol": symbol,
+                "exchange": exchange,
+                "interval": interval,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        ).get("data")
+        if data is None:
+            raise OpenAlgoError("/api/v1/history: 'data' was missing")
         return data

@@ -7,6 +7,7 @@ import os
 import signal
 import sqlite3
 import threading
+from dataclasses import dataclass
 from types import FrameType
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,6 +32,7 @@ from .prompt_registry import PromptRegistry
 from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
 from .session import SessionGate, engage_kill_switch
+from .slots import bind_slot, resolve_slot_ids
 from .specialists import SpecialistRegistry, shutdown_executor
 
 logger = logging.getLogger(__name__)
@@ -38,11 +40,27 @@ logger = logging.getLogger(__name__)
 MAX_CONSECUTIVE_JOURNAL_FAILURES = 3
 
 
+@dataclass
+class SlotRuntime:
+    """One named book inside the host process."""
+
+    slot_id: str
+    settings: Settings
+    journal: Journal
+    runner: TickRunner
+    checkpoint_conn: sqlite3.Connection
+    gate: ApprovalGate | None = None
+    monitor: PositionMonitor | None = None
+    watcher: ApprovalWatcher | None = None
+    journal_failures: int = 0
+
+
 class StrikeDeskService:
-    """The long-running desk process."""
+    """The long-running desk process. One host, one or more strategy slots."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._host_settings = settings
         settings.state_dir.mkdir(parents=True, exist_ok=True)
 
         secrets = [settings.openalgo_api_key.get_secret_value()]
@@ -50,10 +68,6 @@ class StrikeDeskService:
             secrets.append(settings.anthropic_api_key.get_secret_value())
         redactor = Redactor(secrets)
         configure_logging(settings, redactor)
-
-        self._journal = Journal(settings.db_path)
-        self._journal.create_schema()
-        self._provider, self._span_processor = configure_tracing(settings, self._journal, redactor)
 
         self._client = OpenAlgoClient(settings)
         self._prompts = PromptRegistry.load(settings.prompts_dir)
@@ -63,56 +77,97 @@ class StrikeDeskService:
 
         self._mirror: OpenAlgoMirror | None = None
         self._execution: ExecutionClient | None = None
-        self._gate: ApprovalGate | None = None
-        self._monitor: PositionMonitor | None = None
         if settings.execution_enabled:
             self._mirror = OpenAlgoMirror(settings)
             self._execution = ExecutionClient(settings)
-            self._gate = ApprovalGate(settings, self._journal, self._mirror, self._execution)
-            if settings.monitor_enabled:
-                executor = ExitExecutor(
-                    settings,
-                    self._execution,
-                    self._client,
-                    f"{settings.order_strategy_prefix}-{settings.index_symbol}",
-                )
-                self._monitor = PositionMonitor(
-                    settings, self._journal, self._client, executor, self._mirror
-                )
 
-        self._checkpoint_conn = sqlite3.connect(
-            str(settings.checkpoint_path), check_same_thread=False
-        )
-        checkpointer = SqliteSaver(self._checkpoint_conn)
-        checkpointer.setup()
+        self._slots: list[SlotRuntime] = []
+        self._span_processor = None
+        self._provider = None
+        for index, slot_id in enumerate(resolve_slot_ids(settings)):
+            self._slots.append(self._build_slot(slot_id, redactor, index == 0))
 
-        deps = TickDeps(
-            settings=settings,
-            client=self._client,
-            journal=self._journal,
-            registry=self.registry,
-            prompts=self._prompts,
-            span_processor=self._span_processor,
-            checkpointer=checkpointer,
-            gate=self._gate,
-            monitor=self._monitor,
-            mirror=self._mirror,
-        )
-        self._runner = TickRunner(deps, SessionGate(self._client, settings))
-        self._watcher: ApprovalWatcher | None = None
-        if self._gate is not None and self._mirror is not None and self._execution is not None:
-            self._watcher = ApprovalWatcher(
-                settings,
-                self._journal,
-                self._mirror,
-                self._execution,
-                self._runner.resume_approval,
-                monitor=self._monitor,
-            )
+        head = self._slots[0]
+        self._journal = head.journal
+        self._gate = head.gate
+        self._monitor = head.monitor
+        self._runner = head.runner
+        self._watcher = head.watcher
+        self._checkpoint_conn = head.checkpoint_conn
+
         self._scheduler = BackgroundScheduler(timezone=IST)
         self._stop = threading.Event()
         self._manual = threading.Event()
         self._journal_failures = 0
+
+    def _build_slot(self, slot_id: str, redactor: Redactor, first: bool) -> SlotRuntime:
+        slot = bind_slot(self._host_settings, slot_id)
+        slot.state_dir.mkdir(parents=True, exist_ok=True)
+        journal = Journal(slot.db_path)
+        journal.create_schema()
+        if first:
+            self._provider, self._span_processor = configure_tracing(
+                self._host_settings, journal, redactor
+            )
+
+        gate: ApprovalGate | None = None
+        monitor: PositionMonitor | None = None
+        if self._host_settings.execution_enabled:
+            assert self._mirror is not None and self._execution is not None
+            gate = ApprovalGate(slot, journal, self._mirror, self._execution)
+            if slot.monitor_enabled:
+                executor = ExitExecutor(
+                    slot,
+                    self._execution,
+                    self._client,
+                    f"{slot.order_strategy_prefix}-{slot.index_symbol}",
+                )
+                monitor = PositionMonitor(slot, journal, self._client, executor, self._mirror)
+
+        checkpoint_conn = sqlite3.connect(str(slot.checkpoint_path), check_same_thread=False)
+        checkpointer = SqliteSaver(checkpoint_conn)
+        checkpointer.setup()
+
+        deps = TickDeps(
+            settings=slot,
+            client=self._client,
+            journal=journal,
+            registry=self.registry,
+            prompts=self._prompts,
+            span_processor=self._span_processor,
+            checkpointer=checkpointer,
+            gate=gate,
+            monitor=monitor,
+            mirror=self._mirror,
+        )
+        runner = TickRunner(deps, SessionGate(self._client, slot))
+        watcher: ApprovalWatcher | None = None
+        if gate is not None and self._mirror is not None and self._execution is not None:
+            watcher = ApprovalWatcher(
+                slot,
+                journal,
+                self._mirror,
+                self._execution,
+                runner.resume_approval,
+                monitor=monitor,
+            )
+        logger.info(
+            "slot %s ready: mode=%s prefix=%s state=%s",
+            slot_id,
+            slot.playbook_mode,
+            slot.order_strategy_prefix,
+            slot.state_dir,
+        )
+        return SlotRuntime(
+            slot_id=slot_id,
+            settings=slot,
+            journal=journal,
+            runner=runner,
+            checkpoint_conn=checkpoint_conn,
+            gate=gate,
+            monitor=monitor,
+            watcher=watcher,
+        )
 
     def _register_specialists(self) -> None:
         """Stand up the reasoning plane, or run without it and decline every tick."""
@@ -143,32 +198,42 @@ class StrikeDeskService:
         for specialist in specialists:
             self.registry.register(specialist)
 
-    def _safe_tick(self, trigger: str) -> None:
+    def _safe_tick(self, trigger: str, slot_id: str | None = None) -> None:
         """Never let one bad tick kill the daemon — but never let it hide, either."""
+        targets = [item for item in self._slots if slot_id is None or item.slot_id == slot_id]
+        for runtime in targets:
+            self._safe_slot_tick(runtime, trigger)
+
+    def _safe_slot_tick(self, runtime: SlotRuntime, trigger: str) -> None:
         try:
-            self._runner.run_tick(trigger)
+            runtime.runner.run_tick(trigger)
         except JournalWriteError:
-            self._journal_failures += 1
+            runtime.journal_failures += 1
+            self._journal_failures = runtime.journal_failures
             logger.critical(
-                "journal write failed (%d consecutive) — the tick failed closed",
-                self._journal_failures,
+                "journal write failed on slot %s (%d consecutive) — the tick failed closed",
+                runtime.slot_id,
+                runtime.journal_failures,
             )
-            if self._journal_failures >= MAX_CONSECUTIVE_JOURNAL_FAILURES:
+            if runtime.journal_failures >= MAX_CONSECUTIVE_JOURNAL_FAILURES:
                 self.engage_kill_switch("journal unwritable — desk stopped automatically")
         except Exception:  # noqa: BLE001 — the scheduler thread must survive
-            logger.exception("trigger %s failed", trigger)
+            logger.exception("trigger %s failed on slot %s", trigger, runtime.slot_id)
         else:
-            self._journal_failures = 0
+            runtime.journal_failures = 0
 
     def engage_kill_switch(self, reason: str) -> None:
-        engage_kill_switch(self._settings, reason)
+        engage_kill_switch(self._host_settings, reason)
 
-    def _poll_approvals(self) -> None:
+    def _poll_approvals(self, slot_id: str) -> None:
         """Never let one bad poll kill the scheduler thread."""
+        runtime = next((item for item in self._slots if item.slot_id == slot_id), None)
+        if runtime is None or runtime.watcher is None:
+            return
         try:
-            self._watcher.poll_once()  # type: ignore[union-attr]
+            runtime.watcher.poll_once()
         except Exception:  # noqa: BLE001
-            logger.exception("approval watch failed")
+            logger.exception("approval watch failed on slot %s", slot_id)
 
     def _handle_stop(self, _signum: int, _frame: FrameType | None) -> None:
         self._stop.set()
@@ -178,49 +243,54 @@ class StrikeDeskService:
 
     def start(self) -> None:
         self._client.ping()
+        names = ",".join(item.slot_id for item in self._slots)
         logger.info(
-            "strike-desk starting: index=%s cadence=%ss prompts=%s roles=%s model=%s",
+            "strike-desk starting: index=%s slots=%s cadence=%ss prompts=%s roles=%s model=%s",
             self._settings.index_symbol,
+            names,
             self._settings.tick_interval_seconds,
             self._prompts.set_version,
             self.registry.registered_roles() or "(none)",
             self._settings.regime_model,
         )
-        self._settings.pid_path.write_text(str(os.getpid()), encoding="utf-8")
-        self._scheduler.add_job(
-            self._safe_tick,
-            IntervalTrigger(seconds=self._settings.tick_interval_seconds),
-            args=("schedule",),
-            id="decision-tick",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-        )
-        if self._gate is not None:
-            health = self._gate.health()
-            if health.ok:
-                logger.info("approval gate: %s", health.detail)
-            else:
-                logger.critical(
-                    "approval gate is NOT usable: %s — the desk will decline every tick "
-                    "with approval-gate-unavailable until this is fixed",
-                    health.detail,
-                )
-        if self._watcher is not None:
+        self._host_settings.pid_path.write_text(str(os.getpid()), encoding="utf-8")
+        for runtime in self._slots:
             self._scheduler.add_job(
-                self._poll_approvals,
-                IntervalTrigger(seconds=self._settings.approval_poll_seconds),
-                id="approval-watch",
+                self._safe_tick,
+                IntervalTrigger(seconds=runtime.settings.tick_interval_seconds),
+                args=("schedule", runtime.slot_id),
+                id=f"decision-tick-{runtime.slot_id}",
                 max_instances=1,
                 coalesce=True,
                 misfire_grace_time=30,
             )
+            if runtime.gate is not None:
+                health = runtime.gate.health()
+                if health.ok:
+                    logger.info("approval gate [%s]: %s", runtime.slot_id, health.detail)
+                else:
+                    logger.critical(
+                        "approval gate [%s] is NOT usable: %s — that slot will decline "
+                        "with approval-gate-unavailable until this is fixed",
+                        runtime.slot_id,
+                        health.detail,
+                    )
+            if runtime.watcher is not None:
+                self._scheduler.add_job(
+                    self._poll_approvals,
+                    IntervalTrigger(seconds=runtime.settings.approval_poll_seconds),
+                    args=(runtime.slot_id,),
+                    id=f"approval-watch-{runtime.slot_id}",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=30,
+                )
         self._scheduler.start()
-        if self._monitor is not None:
-            self._monitor.start()
+        for runtime in self._slots:
+            if runtime.monitor is not None:
+                runtime.monitor.start()
         signal.signal(signal.SIGTERM, self._handle_stop)
         signal.signal(signal.SIGINT, self._handle_stop)
-        # SIGUSR1 is POSIX-only; on Windows tick-now is unavailable via signals.
         if hasattr(signal, "SIGUSR1"):
             signal.signal(signal.SIGUSR1, self._handle_manual)
 
@@ -235,8 +305,9 @@ class StrikeDeskService:
 
     def shutdown(self) -> None:
         logger.info("strike-desk shutting down")
-        if self._monitor is not None:
-            self._monitor.close()
+        for runtime in self._slots:
+            if runtime.monitor is not None:
+                runtime.monitor.close()
         try:
             self._scheduler.shutdown(wait=True)
         except Exception:  # noqa: BLE001
@@ -244,14 +315,16 @@ class StrikeDeskService:
         shutdown_executor()
         if self._toolbox is not None:
             self._toolbox.close()
-        self._provider.shutdown()
+        if self._provider is not None:
+            self._provider.shutdown()
         self._client.close()
         if self._execution is not None:
             self._execution.close()
         if self._mirror is not None:
             self._mirror.close()
-        try:
-            self._checkpoint_conn.close()
-        finally:
-            self._journal.close()
-        self._settings.pid_path.unlink(missing_ok=True)
+        for runtime in self._slots:
+            try:
+                runtime.checkpoint_conn.close()
+            finally:
+                runtime.journal.close()
+        self._host_settings.pid_path.unlink(missing_ok=True)

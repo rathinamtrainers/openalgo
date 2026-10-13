@@ -388,9 +388,7 @@ class PositionRow(Base):
     entry_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    time_stop_utc: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    time_stop_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     theta_per_day: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
     realised_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -913,8 +911,7 @@ class Journal:
                 session.add(PositionRow(**fields))
         except IntegrityError as exc:
             raise AlreadyJournalled(
-                f"position {fields.get('position_id')} is already at state "
-                f"{fields.get('state')}"
+                f"position {fields.get('position_id')} is already at state {fields.get('state')}"
             ) from exc
         except SQLAlchemyError as exc:
             raise JournalWriteError(
@@ -929,12 +926,41 @@ class Journal:
                 session.add(ExitRow(**fields))
         except IntegrityError as exc:
             raise AlreadyJournalled(
-                f"position {fields.get('position_id')} already has attempt "
-                f"{fields.get('attempt')}"
+                f"position {fields.get('position_id')} already has attempt {fields.get('attempt')}"
             ) from exc
         except SQLAlchemyError as exc:
             raise JournalWriteError(f"could not append exit: {exc.__class__.__name__}") from exc
         return str(fields["exit_id"])
+
+    def live_symbols(self, trading_day: str) -> frozenset[str]:
+        """Symbols the monitor currently has adopted, armed, or is exiting.
+
+        Append-only rows keep the adopted/armed states after a flatten, so a
+        position_id that later went terminal is excluded — same rule as live_position.
+        """
+        with self.session_scope() as session:
+            terminal = select(PositionRow.position_id).where(
+                PositionRow.trading_day == trading_day,
+                PositionRow.state.in_(tuple(POSITION_TERMINAL)),
+            )
+            rows = session.execute(
+                select(PositionRow.symbol).where(
+                    PositionRow.trading_day == trading_day,
+                    PositionRow.state.in_(tuple(POSITION_LIVE)),
+                    PositionRow.position_id.not_in(terminal),
+                )
+            ).scalars()
+            return frozenset(str(symbol).strip().upper() for symbol in rows if symbol)
+
+    def latest_proposed_contract(self, trading_day: str, symbol: str) -> Proposal | None:
+        """The newest playbook-pass proposal for this tradable symbol today."""
+        target = symbol.strip().upper()
+        for row in reversed(list(self.list_proposals(trading_day))):
+            if (row.symbol or "").strip().upper() != target:
+                continue
+            if row.status == "proposed" and row.stop_price and row.target_price:
+                return row
+        return None
 
     def live_position(self) -> PositionRow | None:
         """The most recent non-terminal position, or None when the book is flat."""
@@ -961,9 +987,7 @@ class Journal:
 
     def position_for_order(self, order_id: str) -> PositionRow | None:
         with self.session_scope() as session:
-            statement = (
-                select(PositionRow).where(PositionRow.order_id == order_id).limit(1)
-            )
+            statement = select(PositionRow).where(PositionRow.order_id == order_id).limit(1)
             return session.execute(statement).scalars().first()
 
     def exits_for_position(self, position_id: str) -> Sequence[ExitRow]:

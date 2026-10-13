@@ -126,6 +126,18 @@ def tracing(settings: Settings, journal: Journal):
 
 
 @pytest.fixture
+def oa_http():
+    """HTTP mock pinned to the monitor settings URL.
+
+    ``monitor_settings`` hard-wires ``http://127.0.0.1:5000`` so a developer
+    ``.env`` cannot leak past respx. Slot and monitor tests share this fixture
+    so a missing ``oa_http`` cannot fail collection again.
+    """
+    with respx.mock(base_url="http://127.0.0.1:5000", assert_all_called=False) as router:
+        yield router
+
+
+@pytest.fixture
 def openalgo():
     """A scripted OpenAlgo: open all day, flat book, healthy funds."""
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as router:

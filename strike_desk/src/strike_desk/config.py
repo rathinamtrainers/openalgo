@@ -76,6 +76,10 @@ class Settings(BaseSettings):
 
     # --- Supervisor policy --------------------------------------------------
     min_regime_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Wilder: ADX 25 = trend present. Overlay only; the EMA120 book skips this gate.
+    trend_strength_daily_adx_min: float = Field(default=25.0, ge=0.0, le=100.0)
+    trend_strength_di_spread_min: float = Field(default=5.0, ge=0.0, le=100.0)
+    trend_strength_ten_adx_min: float = Field(default=20.0, ge=0.0, le=100.0)
     directional_regimes: str = "trending"
     reason_text_max_chars: int = Field(default=400, ge=120, le=1000)
 
@@ -117,6 +121,14 @@ class Settings(BaseSettings):
     playbook_max_days_to_expiry: int = Field(default=10, ge=1, le=120)
     playbook_theta_budget_rupees: float = Field(default=1500.0, gt=0.0, le=1_000_000.0)
     playbook_time_stop: str = "15:00"
+    # overlay = today's ATM + ADX desk. ema120 = 120m 21-EMA NRML book (opt-in).
+    playbook_mode: Literal["overlay", "ema120"] = "overlay"
+    ema_length: int = Field(default=21, ge=2, le=200)
+    ema_interval: int = Field(default=120, ge=5, le=1440)
+    # One host, many books. Default is today's single overlay desk.
+    slots: str = "overlay"
+    strategy_id: str = "overlay"
+    host_state_dir: Path | None = None
 
     # --- Risk Officer (control plane) ---------------------------------------
     risk_daily_loss_cap_pct: float = Field(default=2.0, gt=0.0, le=100.0)
@@ -199,6 +211,24 @@ class Settings(BaseSettings):
         if unknown:
             raise ValueError(f"not tradeable regimes: {', '.join(unknown)}")
         return value
+
+    @field_validator("slots")
+    @classmethod
+    def _validate_slots(cls, value: str) -> str:
+        from .slots import parse_slot_ids
+
+        parse_slot_ids(value)
+        return value
+
+    @field_validator("strategy_id")
+    @classmethod
+    def _validate_strategy_id(cls, value: str) -> str:
+        from .slots import KNOWN_SLOTS
+
+        slot = value.strip().lower()
+        if slot not in KNOWN_SLOTS:
+            raise ValueError(f"strategy_id must be one of {', '.join(sorted(KNOWN_SLOTS))}")
+        return slot
 
     @field_validator("playbook_time_stop")
     @classmethod
@@ -294,6 +324,10 @@ class Settings(BaseSettings):
         return self.autonomy == "unattended"
 
     @property
+    def ema120(self) -> bool:
+        return self.playbook_mode == "ema120"
+
+    @property
     def directional_regime_set(self) -> frozenset[str]:
         return frozenset(
             piece.strip() for piece in self.directional_regimes.split(",") if piece.strip()
@@ -319,7 +353,7 @@ class Settings(BaseSettings):
 
     @property
     def kill_switch_path(self) -> Path:
-        return self.state_dir / "KILL"
+        return (self.host_state_dir or self.state_dir) / "KILL"
 
     @property
     def heartbeat_path(self) -> Path:

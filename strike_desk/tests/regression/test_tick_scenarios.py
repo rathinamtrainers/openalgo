@@ -15,6 +15,8 @@ SUITE = json.loads((Path(__file__).parent / "tick_scenarios.json").read_text(enc
 @pytest.mark.parametrize("scenario", SUITE["scenarios"], ids=lambda s: s["id"])
 def test_frozen_scenario(settings, scenario):
     settings.min_regime_confidence = SUITE["min_regime_confidence"]
+    for key, value in (scenario.get("settings") or {}).items():
+        setattr(settings, key, value)
     outcome, reason_code, reason_text = _decide_outcome(scenario["state"], settings)
     assert outcome == scenario["expect"]["outcome"], scenario["note"]
     assert reason_code == scenario["expect"]["reason_code"], scenario["note"]

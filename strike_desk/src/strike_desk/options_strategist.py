@@ -17,6 +17,7 @@ from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from .config import IST, Settings
+from .ema120 import format_trailer as format_ema_trailer
 from .errors import SpecialistTimeout
 from .grounding import (
     EvidenceLedger,
@@ -60,6 +61,33 @@ def _interceptor(name: str, schema: type, description: str) -> StructuredTool:
     return StructuredTool.from_function(
         func=_intercepted, name=name, args_schema=schema, description=description
     )
+
+
+def direction_from_regime(request: SpecialistRequest) -> tuple[str, str]:
+    """EMA120 side selects CE/PE; otherwise a bearish rationale is a put, else a call."""
+    ema = request.book.get("ema120") if isinstance(request.book, dict) else None
+    if isinstance(ema, dict) and ema.get("side") == "long":
+        return "bullish", "CE"
+    if isinstance(ema, dict) and ema.get("side") == "short":
+        return "bearish", "PE"
+    rationale = str((request.book.get("regime") or {}).get("rationale") or "").strip().lower()
+    if rationale.startswith("bearish"):
+        return "bearish", "PE"
+    return "bullish", "CE"
+
+
+def _stamp_ema120(
+    proposal: ProposalSubmission, request: SpecialistRequest, playbook: Playbook
+) -> ProposalSubmission:
+    """Force the EMA trailer and expiry-cutoff time-stop onto a live proposal."""
+    ema = request.book.get("ema120") if isinstance(request.book, dict) else None
+    if not isinstance(ema, dict) or ema.get("side") not in {"long", "short"}:
+        return proposal
+    trailer = format_ema_trailer(str(ema["side"]), float(ema["ema_high"]), float(ema["ema_low"]))
+    rationale = proposal.rationale or ""
+    if "[ema120]" not in rationale:
+        rationale = f"{rationale} {trailer}".strip()
+    return proposal.model_copy(update={"rationale": rationale, "time_stop_ist": playbook.time_stop})
 
 
 def submission_tools() -> list[StructuredTool]:
@@ -287,7 +315,14 @@ class OptionsStrategist:
                     rejected += 1
 
         return self._finish(
-            submitted, ledger, now_ist, model_calls, input_tokens, output_tokens, rejected
+            submitted,
+            ledger,
+            now_ist,
+            model_calls,
+            input_tokens,
+            output_tokens,
+            rejected,
+            request,
         )
 
     async def _execute(
@@ -398,6 +433,7 @@ class OptionsStrategist:
         input_tokens: int,
         output_tokens: int,
         rejected: int,
+        request: SpecialistRequest,
     ) -> ProposalOutcome:
         base = self._base(ledger, model_calls, input_tokens, output_tokens, rejected)
 
@@ -451,6 +487,7 @@ class OptionsStrategist:
 
         try:
             proposal = ProposalSubmission.model_validate(args)
+            proposal = _stamp_ema120(proposal, request, self._playbook)
         except ValidationError as exc:
             return ProposalOutcome(
                 status=STATUS_UNGROUNDED,
