@@ -1,7 +1,6 @@
 import csv
 import io
 import json
-
 from datetime import datetime, timedelta
 
 import pytz
@@ -19,6 +18,14 @@ from flask import (
 from sqlalchemy import desc, func
 
 from database.analyzer_db import AnalyzerLog, db_session
+from sandbox.round_trips import (
+    attach_running_totals,
+    attach_trips_to_requests,
+    drop_entry_rows_when_closed,
+    pair_round_trips,
+    serialize_trip,
+    summarize_round_trips,
+)
 from utils.api_analyzer import get_analyzer_stats
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -26,6 +33,94 @@ from utils.session import check_session_validity
 logger = get_logger(__name__)
 
 analyzer_bp = Blueprint("analyzer_bp", __name__, url_prefix="/analyzer")
+
+
+def _extract_fill_price(request_data, response_data):
+    """Best fill/LTP available on an analyzer log (request first, then response)."""
+    blobs = []
+    if isinstance(response_data, dict):
+        blobs.append(response_data)
+        data = response_data.get("data")
+        if isinstance(data, dict):
+            blobs.append(data)
+    if isinstance(request_data, dict):
+        blobs.append(request_data)
+    for blob in blobs:
+        for key in ("average_price", "price", "ltp"):
+            raw = blob.get(key)
+            try:
+                price = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                return round(price, 2)
+    return None
+
+
+def _date_bounds(start_date=None, end_date=None):
+    """Resolve inclusive date bounds; default to today IST when both are empty."""
+    ist = pytz.timezone("Asia/Kolkata")
+    if isinstance(start_date, str) and start_date:
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+    if isinstance(end_date, str) and end_date:
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if not start_date and not end_date:
+        today_ist = datetime.now(ist).date()
+        start_date = today_ist
+        end_date = today_ist
+    return start_date, end_date
+
+
+def get_sandbox_round_trips(start_date=None, end_date=None):
+    """FIFO round-trips from sandbox fills for the analyzer date filter."""
+    try:
+        from datetime import time as dt_time
+
+        from database.sandbox_db import SandboxTrades
+        from database.token_db import get_symbol_info
+
+        start_date, end_date = _date_bounds(start_date, end_date)
+        query = SandboxTrades.query
+        if start_date:
+            query = query.filter(
+                SandboxTrades.trade_timestamp >= datetime.combine(start_date, dt_time.min)
+            )
+        if end_date:
+            query = query.filter(
+                SandboxTrades.trade_timestamp <= datetime.combine(end_date, dt_time.max)
+            )
+        rows = query.order_by(SandboxTrades.trade_timestamp.asc()).all()
+        fills = [
+            {
+                "symbol": row.symbol,
+                "exchange": row.exchange,
+                "product": row.product,
+                "action": row.action,
+                "quantity": row.quantity,
+                "price": float(row.price),
+                "timestamp": row.trade_timestamp,
+                "tradeid": row.tradeid,
+            }
+            for row in rows
+        ]
+        trips = pair_round_trips(fills)
+        serialized = []
+        for trip in trips:
+            contract_value = 1.0
+            try:
+                info = get_symbol_info(trip.get("symbol"), trip.get("exchange"))
+                if info and info.contract_value:
+                    contract_value = float(info.contract_value)
+            except Exception:
+                contract_value = 1.0
+            serialized.append(serialize_trip(trip, contract_value=contract_value))
+        serialized = attach_running_totals(serialized)
+        serialized.sort(key=lambda item: item.get("exit_time") or item.get("entry_time") or "")
+        serialized.reverse()
+        return serialized
+    except Exception:
+        logger.exception("Error building sandbox round-trips for analyzer")
+        return []
 
 
 def format_request(req, ist):
@@ -65,10 +160,25 @@ def format_request(req, ist):
                     "quantity": request_data.get("quantity", 0),
                     "price_type": request_data.get("pricetype", "Unknown"),
                     "product_type": request_data.get("product", "Unknown"),
+                    "fill_price": _extract_fill_price(request_data, response_data),
                 }
             )
             if req.api_type == "placesmartorder":
                 formatted_request["position_size"] = request_data.get("position_size", 0)
+        elif req.api_type == "closeposition":
+            response_blob = response_data if isinstance(response_data, dict) else {}
+            formatted_request.update(
+                {
+                    "symbol": request_data.get("symbol") or response_blob.get("symbol") or "",
+                    "exchange": request_data.get("exchange") or response_blob.get("exchange") or "",
+                    "action": request_data.get("action") or "CLOSE",
+                    "quantity": request_data.get("quantity") or 0,
+                    "product_type": request_data.get("product")
+                    or request_data.get("product_type")
+                    or "",
+                    "fill_price": _extract_fill_price(request_data, response_data),
+                }
+            )
         elif req.api_type == "cancelorder":
             formatted_request.update({"orderid": request_data.get("orderid", "Unknown")})
 
@@ -126,17 +236,62 @@ def get_filtered_requests(start_date=None, end_date=None):
             if formatted:
                 requests.append(formatted)
 
+        try:
+            attach_trips_to_requests(requests, get_sandbox_round_trips(start_date, end_date))
+            requests = drop_entry_rows_when_closed(requests)
+        except Exception:
+            logger.exception("Error attaching round-trips to analyzer requests")
+
         return requests
     except Exception as e:
         logger.exception(f"Error getting filtered requests: {e}")
         return []
 
 
-def generate_csv(requests):
+def generate_csv(requests, trade_stats=None):
     """Generate CSV from analyzer requests"""
     try:
         output = io.StringIO()
         writer = csv.writer(output)
+
+        if trade_stats:
+            writer.writerow(["Trade performance"])
+            writer.writerow(["Metric", "Value"])
+            summary_rows = [
+                ("Closed trades", trade_stats.get("trades")),
+                ("Open trades", trade_stats.get("open_trades")),
+                ("Cumulative P&L (INR)", trade_stats.get("net_pnl")),
+                ("Cumulative RoI %", trade_stats.get("roi_percent")),
+                ("Premium deployed", trade_stats.get("total_premium")),
+                ("Winning", trade_stats.get("winning")),
+                ("Losing", trade_stats.get("losing")),
+                ("Even", trade_stats.get("even")),
+                ("Win rate %", trade_stats.get("win_rate")),
+                ("Gross profit", trade_stats.get("gross_profit")),
+                ("Gross loss", trade_stats.get("gross_loss")),
+                ("Average win", trade_stats.get("avg_win")),
+                ("Average loss", trade_stats.get("avg_loss")),
+                ("Expectancy", trade_stats.get("expectancy")),
+                ("Average RoI %", trade_stats.get("avg_roi_percent")),
+                (
+                    "Profit factor",
+                    "∞"
+                    if trade_stats.get("profit_factor_infinite")
+                    else trade_stats.get("profit_factor"),
+                ),
+                ("Best trade", trade_stats.get("best_trade")),
+                ("Worst trade", trade_stats.get("worst_trade")),
+                ("Max consecutive wins", trade_stats.get("max_consecutive_wins")),
+                ("Max consecutive losses", trade_stats.get("max_consecutive_losses")),
+                ("Max drawdown (INR)", trade_stats.get("max_drawdown")),
+                ("Max drawdown %", trade_stats.get("max_drawdown_pct")),
+                ("PE trades", trade_stats.get("pe_trades")),
+                ("PE P&L", trade_stats.get("pe_pnl")),
+                ("CE trades", trade_stats.get("ce_trades")),
+                ("CE P&L", trade_stats.get("ce_pnl")),
+            ]
+            writer.writerows(summary_rows)
+            writer.writerow([])
 
         # Write headers
         headers = [
@@ -144,9 +299,16 @@ def generate_csv(requests):
             "API Type",
             "Source",
             "Symbol",
+            "Strike",
             "Exchange",
             "Action",
             "Quantity",
+            "Entry Time",
+            "Entry LTP",
+            "Exit Time",
+            "Exit LTP",
+            "P&L",
+            "% RoI",
             "Price Type",
             "Product Type",
             "Status",
@@ -161,9 +323,16 @@ def generate_csv(requests):
                 req["api_type"],
                 req["source"],
                 req.get("symbol", ""),
+                f"{req.get('strike') or ''} {req.get('option_type') or ''}".strip(),
                 req.get("exchange", ""),
                 req.get("action", ""),
-                req.get("quantity", ""),
+                req.get("traded_quantity") or req.get("quantity", ""),
+                req.get("entry_time", ""),
+                req.get("entry_price", ""),
+                req.get("exit_time", ""),
+                req.get("exit_price", ""),
+                req.get("trade_pnl", ""),
+                req.get("roi_percent", ""),
                 req.get("price_type", ""),
                 req.get("product_type", ""),
                 "Error" if req["analysis"]["issues"] else "Success",
@@ -251,6 +420,7 @@ def api_get_data():
 
         # Get filtered requests
         requests_data = get_filtered_requests(start_date, end_date)
+        trades = get_sandbox_round_trips(start_date, end_date)
 
         # Transform stats for React frontend
         stats_transformed = {
@@ -265,7 +435,15 @@ def api_get_data():
         }
 
         return jsonify(
-            {"status": "success", "data": {"stats": stats_transformed, "requests": requests_data}}
+            {
+                "status": "success",
+                "data": {
+                    "stats": stats_transformed,
+                    "requests": requests_data,
+                    "trades": trades,
+                    "trade_stats": summarize_round_trips(trades),
+                },
+            }
         )
     except Exception as e:
         logger.exception(f"Error getting analyzer data: {str(e)}")
@@ -341,9 +519,10 @@ def export_requests():
 
         # Get filtered requests
         requests = get_filtered_requests(start_date, end_date)
+        trades = get_sandbox_round_trips(start_date, end_date)
 
         # Generate CSV
-        csv_data = generate_csv(requests)
+        csv_data = generate_csv(requests, summarize_round_trips(trades))
 
         # Create the response
         output = Response(csv_data, mimetype="text/csv")

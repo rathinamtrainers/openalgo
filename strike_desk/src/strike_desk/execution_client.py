@@ -82,7 +82,7 @@ class ExecutionClient:
         self._api_key = settings.openalgo_api_key.get_secret_value()
         self._client = httpx.Client(
             base_url=settings.openalgo_base_url.rstrip("/"),
-            timeout=httpx.Timeout(settings.openalgo_timeout_seconds),
+            timeout=httpx.Timeout(settings.openalgo_execution_timeout_seconds),
             limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
             headers={"User-Agent": "strike-desk-execution/0.6"},
         )

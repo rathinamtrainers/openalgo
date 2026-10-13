@@ -879,8 +879,8 @@ class TelegramBotService:
             )
         else:
             await update.message.reply_text(
-                f"Welcome to OpenAlgo Bot, {user.first_name}! 🚀\n\n"
-                "To get started, link your OpenAlgo account:\n"
+                f"Welcome to ZeroTouchAlgo Bot, {user.first_name}! 🚀\n\n"
+                "To get started, link your ZeroTouchAlgo account:\n"
                 "`/link <api_key> <host_url>`\n\n"
                 "Example:\n"
                 "`/link your_api_key_here http://127.0.0.1:5000`\n\n"
@@ -898,7 +898,7 @@ class TelegramBotService:
 📚 *Available Commands:*
 
 *Account Management:*
-/link `<api_key> <host_url>` - Link your OpenAlgo account
+/link `<api_key> <host_url>` - Link your ZeroTouchAlgo account
 /unlink - Unlink your account
 /status - Check connection status
 
@@ -1106,7 +1106,7 @@ class TelegramBotService:
             )
         else:
             await update.message.reply_text(
-                "❌ No linked account found.\nUse /link to connect your OpenAlgo account.",
+                "❌ No linked account found.\nUse /link to connect your ZeroTouchAlgo account.",
                 parse_mode=ParseMode.MARKDOWN,
             )
 
@@ -1128,7 +1128,7 @@ class TelegramBotService:
         # Get orderbook using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1256,7 +1256,7 @@ class TelegramBotService:
         # Get tradebook using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1344,7 +1344,7 @@ class TelegramBotService:
         # Get positions using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1440,7 +1440,7 @@ class TelegramBotService:
         # Get holdings using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1541,7 +1541,7 @@ class TelegramBotService:
         # Get funds using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1601,7 +1601,7 @@ class TelegramBotService:
         # Get P&L from funds using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1644,7 +1644,7 @@ class TelegramBotService:
         # Get quote using SDK
         client = self._get_sdk_client(user.id)
         if not client:
-            await update.message.reply_text("❌ Failed to connect to OpenAlgo")
+            await update.message.reply_text("❌ Failed to connect to ZeroTouchAlgo")
             return
 
         loop = asyncio.get_event_loop()
@@ -1845,7 +1845,7 @@ class TelegramBotService:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            "📱 *OpenAlgo Trading Menu*\nSelect an option below:",
+            "📱 *ZeroTouchAlgo Trading Menu*\nSelect an option below:",
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -2190,7 +2190,7 @@ class TelegramBotService:
 
             client = self._get_sdk_client(user.id)
             if not client:
-                await query.edit_message_text("❌ Failed to connect to OpenAlgo")
+                await query.edit_message_text("❌ Failed to connect to ZeroTouchAlgo")
                 return
 
             await query.edit_message_text("⏳ Closing all positions...")
@@ -2230,7 +2230,7 @@ class TelegramBotService:
 
             client = self._get_sdk_client(user.id)
             if not client:
-                await query.edit_message_text("❌ Failed to connect to OpenAlgo")
+                await query.edit_message_text("❌ Failed to connect to ZeroTouchAlgo")
                 return
 
             await query.edit_message_text("⏳ Closing all positions and stopping strategies...")
@@ -2468,7 +2468,7 @@ class TelegramBotService:
 
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 await query.edit_message_text(
-                    f"📱 *OpenAlgo Trading Menu*\nSelect an option below:\n_Updated: {timestamp}_",
+                    f"📱 *ZeroTouchAlgo Trading Menu*\nSelect an option below:\n_Updated: {timestamp}_",
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.MARKDOWN,
                 )
@@ -2489,7 +2489,7 @@ class TelegramBotService:
 
         client = self._get_sdk_client(user.id)
         if not client:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Failed to connect to OpenAlgo")
+            await context.bot.send_message(chat_id=chat_id, text="❌ Failed to connect to ZeroTouchAlgo")
             return
 
         # Map callback data to API calls and formatters

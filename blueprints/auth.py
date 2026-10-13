@@ -282,10 +282,8 @@ def login():
             session.clear()
 
         if "user" in session:
-            logger.info("[LOGIN] User in session but not logged_in, redirecting to /broker")
-            return jsonify(
-                {"status": "success", "message": "Already logged in", "redirect": "/broker"}
-            ), 200
+            logger.info("[LOGIN] User in session but broker is not connected")
+            return jsonify({"status": "success", "message": "Already logged in"}), 200
 
         username = request.form["username"]
         password = request.form["password"]
@@ -324,7 +322,7 @@ def login():
                 return resumed
 
             # No valid broker session — redirect to broker login
-            logger.info("[LOGIN] No valid broker session, redirecting to /broker")
+            logger.info("[LOGIN] No valid broker session; OpenAlgo sign-in stands")
             from database.auth_db import log_login_attempt
             log_login_attempt(username, ip, ua, status="success", login_type="password")
             return jsonify({"status": "success"}), 200
@@ -1056,7 +1054,7 @@ def get_app_info():
     """Return app information including version for React SPA."""
     from utils.version import get_version
 
-    return jsonify({"status": "success", "version": get_version(), "name": "OpenAlgo"})
+    return jsonify({"status": "success", "version": get_version(), "name": "ZeroTouchAlgo"})
 
 
 @auth_bp.route("/analyzer-mode", methods=["GET"])
@@ -1222,6 +1220,51 @@ def get_dashboard_data():
 
     except Exception as e:
         logger.exception(f"Error fetching dashboard data: {e}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+
+
+@auth_bp.route("/positions-data", methods=["GET"])
+@check_session_validity
+def get_positions_data():
+    """Return the session user's position book for the React Positions page."""
+    if "user" not in session:
+        return jsonify({"status": "error", "message": "Not authenticated"}), 401
+
+    if not session.get("logged_in"):
+        return jsonify(
+            {
+                "status": "error",
+                "code": "BROKER_SESSION_EXPIRED",
+                "message": "Broker not connected - please connect your broker",
+            }
+        ), 401
+
+    broker = session.get("broker")
+    if not broker:
+        return jsonify({"status": "error", "message": "Broker not set in session"}), 400
+
+    try:
+        from services.positionbook_service import get_positionbook_for_session
+
+        success, response, status_code = get_positionbook_for_session(session["user"], broker)
+        if not success:
+            return jsonify(
+                {
+                    "status": "error",
+                    "code": response.get("code"),
+                    "message": response.get("message", "Failed to get positions"),
+                }
+            ), status_code
+
+        return jsonify(
+            {
+                "status": "success",
+                "data": response.get("data", []),
+                "mode": response.get("mode"),
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Error fetching positions data: {e}")
         return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 

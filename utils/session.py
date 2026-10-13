@@ -276,29 +276,52 @@ def revoke_user_tokens(revoke_db_tokens=True):
             logger.exception(f"Error revoking tokens during auto-expiry for user {username}: {e}")
 
 
+def _expects_json(request):
+    """True for fetch/XHR. A password-only session must get 401, not a document redirect."""
+    accept = request.headers.get("Accept") or ""
+    if request.path.startswith("/api/") or request.path.startswith("/btc/"):
+        return True
+    if "application/json" in accept:
+        return True
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return True
+    if request.is_json or (request.content_type or "").startswith("application/json"):
+        return True
+    if accept.strip() in ("*/*", ""):
+        mode = request.headers.get("Sec-Fetch-Mode") or ""
+        if mode and mode != "navigate":
+            return True
+    return False
+
+
 def check_session_validity(f):
     """Decorator to check session validity before executing route"""
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not is_session_valid():
-            # Revoke tokens before clearing session
+            from flask import jsonify, request
+
+            # OpenAlgo password sign-in does not set logged_in until the broker
+            # connects. That state is valid (broker picker, BTC desk). Touching a
+            # broker-only route must not revoke tokens or wipe the sign-in.
+            if not session.get("logged_in"):
+                if _expects_json(request):
+                    return jsonify(
+                        {
+                            "status": "error",
+                            "error": "broker_required",
+                            "message": "Broker session required.",
+                        }
+                    ), 401
+                return redirect("/broker")
+
+            # Broker session was present and has expired.
             revoke_user_tokens()
             session.clear()
 
-            # Check if this is an AJAX/fetch request
-            from flask import jsonify, request
-
-            is_ajax = (
-                request.headers.get("X-Requested-With") == "XMLHttpRequest"
-                or request.headers.get("Accept", "").startswith("application/json")
-                or request.content_type == "application/json"
-                or request.is_json
-            )
-
-            if is_ajax:
-                # Return JSON response for AJAX requests instead of redirect
-                # This prevents consuming rate limits on the login endpoint
+            if _expects_json(request):
+                # JSON instead of a redirect, so a fetch does not consume the login rate limit.
                 logger.info("Invalid session detected - returning 401 for AJAX request")
                 return jsonify(
                     {

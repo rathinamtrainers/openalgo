@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenAlgo — refresh the Zerodha broker session before the IST desk
+After=network-online.target openalgo.service
+Wants=network-online.target
+Requires=openalgo.service
+
+[Service]
+Type=oneshot
+User=openalgo
+Group=openalgo
+WorkingDirectory=/opt/openalgo/current
+Environment=TZ=Asia/Kolkata
+Environment=OPENALGO_ENV=/opt/openalgo/current/.env
+Environment=ZERODHA_LOGIN_ENV=/etc/openalgo/zerodha-login.env
+Environment=PYTHONPATH=/opt/openalgo/current
+ExecStart=/opt/openalgo/current/.venv/bin/python /opt/openalgo/current/services/zerodha_session_refresh.py
+Nice=10

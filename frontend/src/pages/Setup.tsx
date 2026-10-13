@@ -7,6 +7,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
+import { APP_NAME } from '@/config/branding'
 import { cn } from '@/lib/utils'
 import { showToast } from '@/utils/toast'
 
@@ -150,7 +151,8 @@ export default function Setup() {
   )
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center py-12 px-4">
+    <div className="app-shell flex items-center justify-center py-12 px-4">
+      <div className="app-atmosphere" aria-hidden />
       <div className="container max-w-6xl">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-16 items-center">
           {/* Left side content */}
@@ -160,7 +162,7 @@ export default function Setup() {
                 Initial <span className="text-primary">Setup</span>
               </h1>
               <p className="text-lg lg:text-xl text-muted-foreground leading-relaxed">
-                Welcome to OpenAlgo! Create your administrator account to get started with
+                Welcome to {APP_NAME}! Create your administrator account to get started with
                 algorithmic trading. This account will have full access to manage the platform.
               </p>
             </div>

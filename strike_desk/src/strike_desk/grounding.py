@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -21,6 +23,48 @@ TRADEABLE_LABELS = frozenset({"trending", "range-bound"})
 _NUMBER = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 
 
+def unwrap_tool_output(raw: str) -> str:
+    """Return the inner MCP text. LangChain records ``[{'type': 'text', 'text': '...'}]``."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    payload: Any = None
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        try:
+            payload = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError):
+            return text
+    if isinstance(payload, list) and payload:
+        first = payload[0]
+        if isinstance(first, dict) and first.get("text") is not None:
+            return str(first["text"])
+    if (
+        isinstance(payload, dict)
+        and payload.get("text") is not None
+        and "indicators" not in payload
+    ):
+        return str(payload["text"])
+    return text
+
+
+def tool_output_ok(raw: str) -> bool:
+    """False when the tool raised, returned an Error string, or a JSON status=error body."""
+    text = unwrap_tool_output(raw).lstrip()
+    if not text:
+        return False
+    if text.lower().startswith("error"):
+        return False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return True
+    if isinstance(data, dict) and str(data.get("status") or "").lower() == "error":
+        return False
+    return True
+
+
 class EvidenceItem(BaseModel):
     """One data point the agent claims to have read, and where it came from."""
 
@@ -35,7 +79,12 @@ class RegimeSubmission(BaseModel):
     label: Literal["trending", "range-bound", "high-volatility", "event-driven", "unknown"] = Field(
         description="The regime this index is in right now."
     )
-    confidence: float = Field(ge=0.0, le=1.0, description="0-1 confidence in the label.")
+    confidence: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="0-1 confidence in the label. Default 0.40 if the model omits it.",
+    )
     rationale: str = Field(
         min_length=10,
         description="One sentence a trader can read back in a month. No confidence value in it.",
@@ -150,6 +199,14 @@ class EvidenceLedger:
         return [raw for raw in _NUMBER.findall(text) if not _matches(raw, self._numbers)]
 
 
+def _ledger_tool_name(raw: str) -> str:
+    """Haiku often writes 'get_quote (INDIAVIX, NSE_INDEX)'; the ledger only has 'get_quote'."""
+    name = (raw or "").strip()
+    if "(" in name:
+        name = name.split("(", 1)[0]
+    return name.strip()
+
+
 def validate_submission(
     submission: RegimeSubmission, ledger: EvidenceLedger, max_rationale_chars: int
 ) -> str | None:
@@ -161,7 +218,11 @@ def validate_submission(
         )
 
     unknown_tools = sorted(
-        {item.tool for item in submission.evidence} - set(ledger._tools)  # noqa: SLF001
+        {
+            _ledger_tool_name(item.tool)
+            for item in submission.evidence
+            if _ledger_tool_name(item.tool) not in ledger._tools  # noqa: SLF001
+        }
     )
     if unknown_tools:
         return f"evidence cites tools that returned nothing this read: {', '.join(unknown_tools)}"

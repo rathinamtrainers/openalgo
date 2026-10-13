@@ -9,6 +9,7 @@ import {
 import { Check, ChevronsUpDown } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { oiProfileApi } from '@/api/oi-profile'
+import { APP_NAME } from '@/config/branding'
 import {
   type StraddleChartData,
   type StraddleDataPoint,
@@ -260,7 +261,7 @@ export default function StraddleChart() {
     // Watermark
     const watermark = document.createElement('div')
     watermark.style.cssText = `position:absolute;z-index:2;font-family:Arial,sans-serif;font-size:48px;font-weight:bold;user-select:none;pointer-events:none;color:${colors.watermark}`
-    watermark.textContent = 'OpenAlgo'
+    watermark.textContent = APP_NAME
     container.appendChild(watermark)
     watermarkRef.current = watermark
     setTimeout(() => {

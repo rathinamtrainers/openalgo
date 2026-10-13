@@ -306,7 +306,7 @@ def test_message():
         wa_user = get_whatsapp_user_by_username(username)
         if wa_user:
             target_jid = wa_user["whatsapp_jid"]
-            test_msg = "*Test from OpenAlgo*\nYour WhatsApp integration is working."
+            test_msg = "*Test from ZeroTouchAlgo*\nYour WhatsApp integration is working."
         else:
             all_users = get_all_whatsapp_users()
             if not all_users:
@@ -321,7 +321,7 @@ def test_message():
                 ), 404
             target_jid = all_users[0]["whatsapp_jid"]
             test_msg = (
-                f"*Test from OpenAlgo (admin: {username})*\n"
+                f"*Test from ZeroTouchAlgo (admin: {username})*\n"
                 "Your WhatsApp integration is working."
             )
 

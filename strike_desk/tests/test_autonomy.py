@@ -56,16 +56,17 @@ def test_an_unreadable_mirror_blocks_rather_than_guesses(monitor_settings):
 
 
 @pytest.mark.parametrize(
-    ("monitor", "ok"),
+    ("alive", "age_seconds", "ok"),
     [
-        (None, False),
-        (_Monitor(False, 0), False),
-        (_Monitor(True, 900), False),
-        (_Monitor(True, 1), True),
+        (None, 0, False),
+        (False, 0, False),
+        (True, 900, False),
+        (True, 1, True),
     ],
 )
-def test_the_dead_man_switch(monitor_settings, monitor, ok):
+def test_the_dead_man_switch(monitor_settings, alive, age_seconds, ok):
     settings = monitor_settings.model_copy(update={"autonomy": "unattended"})
+    monitor = None if alive is None else _Monitor(alive, age_seconds)
     verdict = autonomy.check_monitor(settings, monitor, datetime.now(UTC))
     assert verdict.ok is ok
 

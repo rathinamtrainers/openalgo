@@ -156,6 +156,27 @@ export const tradingApi = {
   },
 
   /**
+   * Session position book for the Positions page.
+   * Uses the signed-in user, not a persisted API key from another instance.
+   */
+  getSessionPositions: async (): Promise<ApiResponse<Position[]>> => {
+    const response = await fetch('/auth/positions-data', {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+    const body = (await response.json().catch(() => null)) as ApiResponse<Position[]> | null
+    if (!response.ok || !body) {
+      return {
+        status: 'error',
+        message:
+          (body && 'message' in body && typeof body.message === 'string' && body.message) ||
+          `Failed to fetch positions (${response.status})`,
+      }
+    }
+    return body
+  },
+
+  /**
    * Get order book
    */
   getOrders: async (

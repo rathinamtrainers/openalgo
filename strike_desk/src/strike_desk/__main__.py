@@ -83,9 +83,7 @@ def _cmd_position(settings: Settings, args: argparse.Namespace) -> int:
                 "levels": {
                     "stop_price": row.stop_price,
                     "target_price": row.target_price,
-                    "time_stop_utc": (
-                        row.time_stop_utc.isoformat() if row.time_stop_utc else None
-                    ),
+                    "time_stop_utc": (row.time_stop_utc.isoformat() if row.time_stop_utc else None),
                     "time_stop_reason": "time-stop",
                 },
                 "last_price": None,
@@ -184,6 +182,12 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
             print(f"outstanding      : {len(journal.open_approvals())}")
         print(f"strategist model : {settings.strategist_model}")
         print(f"directional      : {settings.directional_regimes}")
+        print(
+            "strength         : "
+            f"daily ADX {settings.trend_strength_daily_adx_min:g} / "
+            f"DI spread {settings.trend_strength_di_spread_min:g} / "
+            f"10m ADX {settings.trend_strength_ten_adx_min:g}"
+        )
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
         if killed:
             reason = settings.kill_switch_path.read_text(encoding="utf-8").strip()

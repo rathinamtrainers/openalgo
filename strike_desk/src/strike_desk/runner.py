@@ -78,7 +78,7 @@ class TickRunner:
             root.set_attribute("strike_desk.trading_day", trading_day)
             root.set_attribute("strike_desk.prompt_set_version", self._deps.prompts.set_version)
 
-            verdict = self._gate.evaluate(now_ist)
+            verdict = self._gate.evaluate(now_ist, trigger=trigger)
             root.set_attribute("gate.allowed", verdict.allowed)
             if not verdict.allowed:
                 root.set_attribute("tick.skipped", True)

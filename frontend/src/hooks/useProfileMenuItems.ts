@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { profileMenuItems } from '@/config/navigation'
+import { useAuthStore } from '@/stores/authStore'
 import { useBrokerStore } from '@/stores/brokerStore'
 
 /**
@@ -12,14 +13,15 @@ import { useBrokerStore } from '@/stores/brokerStore'
  */
 export function useProfileMenuItems() {
   const { capabilities, isLoaded, fetchCapabilities } = useBrokerStore()
+  const brokerConnected = useAuthStore((state) => Boolean(state.user?.isLoggedIn && state.user?.broker))
 
-  // Standalone layouts can mount without the main app shell having fetched
-  // capabilities yet — fetch on demand so gating never runs on stale null.
+  // Capabilities describe the connected broker. Fetching them before that
+  // session exists hits a broker-only route and used to wipe the OpenAlgo sign-in.
   useEffect(() => {
-    if (!isLoaded) {
+    if (brokerConnected && !isLoaded) {
       fetchCapabilities()
     }
-  }, [isLoaded, fetchCapabilities])
+  }, [brokerConnected, isLoaded, fetchCapabilities])
 
   return profileMenuItems.filter((item) => {
     if (item.href === '/leverage') return capabilities?.leverage_config === true

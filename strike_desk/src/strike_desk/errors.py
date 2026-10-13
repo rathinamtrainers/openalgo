@@ -57,6 +57,10 @@ class McpUnavailable(StrikeDeskError):
     """The OpenAlgo MCP server could not be started, reached, or trusted."""
 
 
+class McpSessionClosed(StrikeDeskError):
+    """The MCP stdio session is listed as up, but tool calls already failed closed."""
+
+
 class ModelCallFailed(StrikeDeskError):
     """The model provider refused, errored, or was not configured."""
 

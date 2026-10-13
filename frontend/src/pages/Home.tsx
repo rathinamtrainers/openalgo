@@ -1,13 +1,9 @@
 import {
   ArrowRight,
-  BookOpen,
   Bot,
-  ClipboardList,
   Download,
-  HelpCircle,
   LogIn,
   Menu,
-  MessageCircle,
   Moon,
   Sparkles,
   Sun,
@@ -15,7 +11,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Footer } from '@/components/layout/Footer'
+import { APP_NAME } from '@/config/branding'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -51,18 +47,13 @@ export default function Home() {
   const { mode, toggleMode } = useThemeStore()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
-  const navLinks = [
-    { href: '/', label: 'Home', internal: true },
-    { href: '/faq', label: 'FAQ', internal: true },
-    { href: 'https://openalgo.in/discord', label: 'Community', internal: false },
-    { href: 'https://openalgo.in/roadmap', label: 'Roadmap', internal: false },
-    { href: 'https://docs.openalgo.in', label: 'Docs', internal: false },
-  ]
+  const navLinks = [{ href: '/', label: 'Home', internal: true }]
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="app-shell flex flex-col">
+      <div className="app-atmosphere" aria-hidden />
       {/* Navbar */}
-      <header className="sticky top-0 z-30 h-16 w-full border-b bg-background/90 backdrop-blur">
+      <header className="glass-nav sticky top-0 z-30 h-16 w-full border-b">
         <nav className="container mx-auto px-4 flex h-full items-center justify-between">
           {/* Logo */}
           <div className="flex items-center gap-2">
@@ -79,8 +70,8 @@ export default function Home() {
                   <SheetDescription>Main navigation and quick access links</SheetDescription>
                 </SheetHeader>
                 <div className="flex items-center gap-2 mb-8">
-                  <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-                  <span className="text-xl font-semibold">OpenAlgo</span>
+                  <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+                  <span className="text-xl font-semibold">{APP_NAME}</span>
                 </div>
                 <div className="flex flex-col gap-2">
                   <Link
@@ -105,14 +96,6 @@ export default function Home() {
                     Home
                   </Link>
                   <Link
-                    to="/faq"
-                    className="flex items-center gap-2 px-4 py-2 rounded-md hover:bg-accent"
-                    onClick={() => setMobileMenuOpen(false)}
-                  >
-                    <HelpCircle className="h-5 w-5" />
-                    FAQ
-                  </Link>
-                  <Link
                     to="/download"
                     className="flex items-center gap-2 px-4 py-2 rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
                     onClick={() => setMobileMenuOpen(false)}
@@ -120,40 +103,13 @@ export default function Home() {
                     <Download className="h-5 w-5" />
                     Download
                   </Link>
-                  <a
-                    href="https://openalgo.in/discord"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-2 rounded-md hover:bg-accent"
-                  >
-                    <MessageCircle className="h-5 w-5" />
-                    Community
-                  </a>
-                  <a
-                    href="https://openalgo.in/roadmap"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-2 rounded-md hover:bg-accent"
-                  >
-                    <ClipboardList className="h-5 w-5" />
-                    Roadmap
-                  </a>
-                  <a
-                    href="https://docs.openalgo.in"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 px-4 py-2 rounded-md hover:bg-accent"
-                  >
-                    <BookOpen className="h-5 w-5" />
-                    Docs
-                  </a>
                 </div>
               </SheetContent>
             </Sheet>
 
             <Link to="/" className="flex items-center gap-2">
-              <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-              <span className="text-xl font-bold hidden sm:inline">OpenAlgo</span>
+              <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+              <span className="text-xl font-bold hidden sm:inline">{APP_NAME}</span>
             </Link>
           </div>
 
@@ -278,7 +234,7 @@ export default function Home() {
                   </div>
                   <div>
                     <h3 className="text-xl font-bold flex items-center gap-2">
-                      OpenAlgo MCP
+                      {APP_NAME} MCP
                       <ArrowRight className="h-5 w-5 transition-transform group-hover:translate-x-0.5" />
                     </h3>
                     <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mt-1">
@@ -287,7 +243,7 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="text-sm text-muted-foreground leading-relaxed">
-                  Connect your OpenAlgo account to Claude, Cursor, Windsurf, or ChatGPT. Place
+                  Connect your {APP_NAME} account to Claude, Cursor, Windsurf, or ChatGPT. Place
                   orders, check positions, and pull live prices by simply asking - no dashboards, no
                   clicks.
                 </p>
@@ -317,7 +273,7 @@ export default function Home() {
                   </div>
                   <div>
                     <h3 className="text-xl font-bold flex items-center gap-2">
-                      OpenAlgo Skills
+                      {APP_NAME} Skills
                       <ArrowRight className="h-5 w-5 transition-transform group-hover:translate-x-0.5" />
                     </h3>
                     <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mt-1">
@@ -347,9 +303,6 @@ export default function Home() {
           </div>
         </section>
       </main>
-
-      {/* Footer */}
-      <Footer />
     </div>
   )
 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from .config import IST, Settings
 from .errors import OpenAlgoError
@@ -83,15 +83,18 @@ class SessionGate:
             candidate -= timedelta(days=1)
         return None
 
-    def evaluate(self, now: datetime) -> GateVerdict:
+    def evaluate(self, now: datetime, trigger: str = "") -> GateVerdict:
         """Apply every gate in order and return the first one that blocks."""
-        kill_path = self._settings.kill_switch_path
-        if kill_path.exists():
-            try:
-                detail = kill_path.read_text(encoding="utf-8").strip()[:200]
-            except OSError:
-                detail = ""
-            return GateVerdict(False, KILL_SWITCH, detail or "kill switch engaged")
+        for kill_path in (
+            self._settings.host_kill_switch_path,
+            self._settings.kill_switch_path,
+        ):
+            if kill_path.exists():
+                try:
+                    detail = kill_path.read_text(encoding="utf-8").strip()[:200]
+                except OSError:
+                    detail = ""
+                return GateVerdict(False, KILL_SWITCH, detail or "kill switch engaged")
 
         try:
             window = self.trading_window(now.date())
@@ -116,6 +119,8 @@ class SessionGate:
 
         for window_start, window_end in self._settings.no_trade_window_times:
             if window_start <= now.time() < window_end:
+                if trigger == "fade-tag" and now.time() >= time(9, 21) and now.time() < time(15, 0):
+                    continue
                 return GateVerdict(
                     False,
                     NO_TRADE_WINDOW,

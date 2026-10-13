@@ -337,6 +337,53 @@
         "detail": "2 unattended entries already taken, cap is 2"
       },
       "expect": "Declined: 2 unattended entries already taken, cap is 2. The desk is done for the day."
+    },
+    {
+      "id": "GD-34",
+      "code": "specialist-no-submit",
+      "variant": "default",
+      "fields": {
+        "role": "strategist",
+        "detail": "no submission after 6 model rounds"
+      },
+      "expect": "Declined: the 'strategist' specialist finished its rounds without submitting a contract (no submission after 6 model rounds). That is not an unread option chain."
+    },
+    {
+      "id": "GD-35",
+      "code": "regime-weak-trend",
+      "variant": "default",
+      "fields": {
+        "detail": "daily ADX 18.2 is below the 25 floor"
+      },
+      "expect": "Declined: trending but not strong enough to buy premium (daily ADX 18.2 is below the 25 floor). A side without strength is a decaying long."
+    },
+    {
+      "id": "GD-36",
+      "code": "position-unmanaged",
+      "variant": "default",
+      "fields": {
+        "symbols": "NIFTY06OCT2622800PE",
+        "detail": "no armed journal position"
+      },
+      "expect": "Declined: NIFTY06OCT2622800PE is open at the broker but Strike Desk is not managing it (no armed journal position). That is not a routine hold."
+    },
+    {
+      "id": "GD-37",
+      "code": "ema-no-signal",
+      "variant": "default",
+      "fields": {
+        "detail": "close 24900.0 high 25010.0 low 24820.0"
+      },
+      "expect": "Declined: the last closed 120-minute bar is between the 21-EMA bands (close 24900.0 high 25010.0 low 24820.0). The EMA book waits for a close through a band."
+    },
+    {
+      "id": "GD-38",
+      "code": "ema-in-trade",
+      "variant": "default",
+      "fields": {
+        "symbols": "NIFTY13OCT2624800CE"
+      },
+      "expect": "Held: the EMA book is already in NIFTY13OCT2624800CE. The opposite band is the exit; this tick does not add."
     }
   ]
 }

@@ -19,6 +19,7 @@ from strike_desk.approval_gate import (
 from strike_desk.errors import InvalidOrderPayload, UnpriceableBand
 from strike_desk.journal import (
     APPROVAL_APPROVED,
+    APPROVAL_AUTO_APPROVED,
     APPROVAL_GATE_BYPASSED,
     APPROVAL_GATE_UNAVAILABLE,
     APPROVAL_PENDING,
@@ -223,3 +224,46 @@ def test_a_rejection_writes_no_order_row(gate, journal, openalgo, today):
         "1" * 32,
     )
     assert journal.orders_for_approval(submitted.approval_id) == []
+
+
+def test_a_place_timeout_is_recovered_when_the_book_is_long(
+    execution_settings, journal, mirror, execution_client, client, openalgo, today
+):
+    from tests.chain_fixtures import SYMBOL
+
+    gate = ApprovalGate(
+        execution_settings, journal, mirror, execution_client, reader=client
+    )
+    place = openalgo.post("/api/v1/placeorder").mock(side_effect=httpx.ReadTimeout("timed out"))
+    openalgo.post("/api/v1/positionbook").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": [{"symbol": SYMBOL, "quantity": 75, "average_price": 192.0}],
+            },
+        )
+    )
+    result = gate.submit(cleared_context())
+    assert place.call_count == 1
+    assert result.status == APPROVAL_AUTO_APPROVED
+    assert "recovered" in result.detail
+    rows = journal.list_approvals(today)
+    assert rows[-1].status == APPROVAL_AUTO_APPROVED
+    assert journal.orders_for_approval(result.approval_id)[0].order_status == "complete"
+
+
+def test_a_place_timeout_stays_failed_when_the_book_is_flat(
+    execution_settings, journal, mirror, execution_client, client, openalgo, today
+):
+    gate = ApprovalGate(
+        execution_settings, journal, mirror, execution_client, reader=client
+    )
+    place = openalgo.post("/api/v1/placeorder").mock(side_effect=httpx.ReadTimeout("timed out"))
+    openalgo.post("/api/v1/positionbook").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": []})
+    )
+    result = gate.submit(cleared_context())
+    assert place.call_count == 1
+    assert result.status == APPROVAL_SUBMIT_FAILED
+    assert journal.orders_for_approval(result.approval_id) == []

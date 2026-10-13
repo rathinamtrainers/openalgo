@@ -1,7 +1,6 @@
 import {
   BarChart3,
   Bell,
-  BookOpen,
   ClipboardList,
   Code2,
   Database,
@@ -69,6 +68,7 @@ export const profileMenuItems: NavItem[] = [
   { href: '/holdings', label: 'Holdings', icon: ClipboardList },
   { href: '/flow', label: 'Flow Editor', icon: Workflow },
   { href: '/scalping', label: 'Scalping', icon: Zap },
+  { href: '/btc', label: 'BTC Desk', icon: Zap },
   { href: '/python', label: 'Python Strategies', icon: Code2 },
   { href: '/pnl-tracker', label: 'PnL Tracker', icon: BarChart3 },
   { href: '/historify', label: 'Historify', icon: Database },
@@ -77,11 +77,6 @@ export const profileMenuItems: NavItem[] = [
   { href: '/leverage', label: 'Leverage', icon: Gauge },
   { href: '/admin', label: 'Admin', icon: Settings },
 ]
-
-// External links
-export const externalLinks = {
-  docs: { href: 'https://docs.openalgo.in', label: 'Docs', icon: BookOpen },
-}
 
 // Shared utility to check if a route is active
 // Uses startsWith for routes with nested pages (like /strategy/*)

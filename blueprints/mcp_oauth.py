@@ -488,7 +488,7 @@ _CONSENT_TEMPLATE = """\
     third-party origin via Referer.
   -->
   <meta name="referrer" content="same-origin">
-  <title>Authorize {{ client_name }} — OpenAlgo</title>
+  <title>Authorize {{ client_name }} — ZeroTouchAlgo</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; background: #f9fafb;
            color: #111827; margin: 0; padding: 0; min-height: 100vh; display: flex;
@@ -551,7 +551,7 @@ _CONSENT_TEMPLATE = """\
 <body>
   <div class="card">
     <h1>Authorize {{ client_name }}</h1>
-    <p>This MCP client is requesting access to your OpenAlgo install.</p>
+    <p>This MCP client is requesting access to your ZeroTouchAlgo install.</p>
 
     <div class="scopes-label">Scopes requested:</div>
     <ul class="scopes">

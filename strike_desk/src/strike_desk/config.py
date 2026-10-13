@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     openalgo_base_url: str = "http://127.0.0.1:5000"
     openalgo_api_key: SecretStr
     openalgo_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    # Place/close can outlive a quote. Never used to retry placeorder.
+    openalgo_execution_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
     openalgo_retries: int = Field(default=2, ge=0, le=5)
 
     # --- Book ---------------------------------------------------------------
@@ -76,6 +78,11 @@ class Settings(BaseSettings):
 
     # --- Supervisor policy --------------------------------------------------
     min_regime_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    # Wilder: ADX 25 = trend present. 20 is emerging (too weak for long premium).
+    # 35 would have blocked the 28 Sep 2026 daily ADX 33.5 fill that later went green.
+    trend_strength_daily_adx_min: float = Field(default=25.0, ge=0.0, le=100.0)
+    trend_strength_di_spread_min: float = Field(default=5.0, ge=0.0, le=100.0)
+    trend_strength_ten_adx_min: float = Field(default=20.0, ge=0.0, le=100.0)
     directional_regimes: str = "trending"
     reason_text_max_chars: int = Field(default=400, ge=120, le=1000)
 
@@ -84,6 +91,12 @@ class Settings(BaseSettings):
 
     # --- Regime Analyst (reasoning plane) -----------------------------------
     anthropic_api_key: SecretStr | None = None
+    regime_provider: str = "haiku"
+    jev_api_key: SecretStr | None = None
+    jev_model: str = "typesafe/jev-1.13"
+    jev_decisions_url: str = "https://openrouter.ai/api/alpha/decisions"
+    jev_price_in_per_mtok: float = Field(default=0.042, ge=0.0, le=1000.0)
+    jev_price_out_per_mtok: float = Field(default=0.0, ge=0.0, le=1000.0)
     regime_model: str = "claude-haiku-4-5"
     regime_temperature: float = Field(default=0.0, ge=0.0, le=1.0)
     regime_max_output_tokens: int = Field(default=1200, ge=256, le=8192)
@@ -117,6 +130,14 @@ class Settings(BaseSettings):
     playbook_max_days_to_expiry: int = Field(default=10, ge=1, le=120)
     playbook_theta_budget_rupees: float = Field(default=1500.0, gt=0.0, le=1_000_000.0)
     playbook_time_stop: str = "15:00"
+    # overlay = today's ATM + ADX desk. ema120 = 120m 21-EMA NRML book (opt-in).
+    playbook_mode: Literal["overlay", "ema120"] = "overlay"
+    ema_length: int = Field(default=21, ge=2, le=200)
+    ema_interval: int = Field(default=120, ge=5, le=1440)
+    # One host, many books. Default is today's single overlay desk.
+    slots: str = "overlay"
+    strategy_id: str = "overlay"
+    host_state_dir: Path | None = None
 
     # --- Risk Officer (control plane) ---------------------------------------
     risk_daily_loss_cap_pct: float = Field(default=2.0, gt=0.0, le=100.0)
@@ -149,9 +170,20 @@ class Settings(BaseSettings):
     feed_blackout_seconds: float = Field(default=90.0, gt=0, le=1800)
     reconcile_interval_seconds: float = Field(default=30.0, gt=0, le=600)
     session_exit_deadline: str = "15:10"
+    ltp_fade_enabled: bool = True
+    ltp_fade_watch_seconds: float = Field(default=15.0, gt=0, le=300)
     exit_latency_budget_ms: int = Field(default=1500, ge=100, le=30000)
     exit_max_attempts: int = Field(default=3, ge=1, le=10)
     exit_retry_seconds: float = Field(default=2.0, gt=0, le=60)
+
+    # --- Tradetron fan-out (parallel to OpenAlgo; never blocks the desk) ---
+    # Off until a token is set. Official webhook only — never put sid= on the
+    # URL or in the body (200 Ok with sid still leaves SID counters at 0).
+    tradetron_webhook_enabled: bool = False
+    tradetron_webhook_url: str = "https://api.tradetron.tech/api"
+    tradetron_webhook_token: SecretStr = SecretStr("")
+    tradetron_index_token: str = "NIFTY50"
+    tradetron_webhook_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
 
     # --- Autonomy (iteration 07) --------------------------------------------
     autonomy: Literal["attended", "unattended"] = "unattended"
@@ -187,6 +219,14 @@ class Settings(BaseSettings):
         time.fromisoformat(value)
         return value
 
+    @field_validator("regime_provider")
+    @classmethod
+    def _validate_regime_provider(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in {"haiku", "jev"}:
+            raise ValueError("regime_provider must be haiku or jev")
+        return provider
+
     @field_validator("directional_regimes")
     @classmethod
     def _validate_directional(cls, value: str) -> str:
@@ -199,6 +239,24 @@ class Settings(BaseSettings):
         if unknown:
             raise ValueError(f"not tradeable regimes: {', '.join(unknown)}")
         return value
+
+    @field_validator("slots")
+    @classmethod
+    def _validate_slots(cls, value: str) -> str:
+        from .slots import parse_slot_ids
+
+        parse_slot_ids(value)
+        return value
+
+    @field_validator("strategy_id")
+    @classmethod
+    def _validate_strategy_id(cls, value: str) -> str:
+        from .slots import KNOWN_SLOTS
+
+        slot = value.strip().lower()
+        if slot not in KNOWN_SLOTS:
+            raise ValueError(f"strategy_id must be one of {', '.join(sorted(KNOWN_SLOTS))}")
+        return slot
 
     @field_validator("playbook_time_stop")
     @classmethod
@@ -294,6 +352,10 @@ class Settings(BaseSettings):
         return self.autonomy == "unattended"
 
     @property
+    def ema120(self) -> bool:
+        return self.playbook_mode == "ema120"
+
+    @property
     def directional_regime_set(self) -> frozenset[str]:
         return frozenset(
             piece.strip() for piece in self.directional_regimes.split(",") if piece.strip()
@@ -320,6 +382,10 @@ class Settings(BaseSettings):
     @property
     def kill_switch_path(self) -> Path:
         return self.state_dir / "KILL"
+
+    @property
+    def host_kill_switch_path(self) -> Path:
+        return (self.host_state_dir or self.state_dir) / "KILL"
 
     @property
     def heartbeat_path(self) -> Path:

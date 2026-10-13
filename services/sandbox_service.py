@@ -224,6 +224,26 @@ def sandbox_get_order_status(
         )
 
 
+def sandbox_get_positions_for_user(
+    user_id: str,
+) -> tuple[bool, dict[str, Any], int]:
+    """Sandbox book for a signed-in user. No API key required."""
+    try:
+        position_manager = PositionManager(user_id)
+        return position_manager.get_open_positions(update_mtm=True)
+    except Exception as e:
+        logger.exception(f"Error in sandbox_get_positions_for_user: {e}")
+        return (
+            False,
+            {
+                "status": "error",
+                "message": f"Error getting positions: {str(e)}",
+                "mode": "analyze",
+            },
+            500,
+        )
+
+
 def sandbox_get_positions(
     api_key: str, original_data: dict[str, Any]
 ) -> tuple[bool, dict[str, Any], int]:
@@ -233,10 +253,7 @@ def sandbox_get_positions(
         if not user_id:
             return False, {"status": "error", "message": "Invalid API key", "mode": "analyze"}, 403
 
-        position_manager = PositionManager(user_id)
-        success, response, status_code = position_manager.get_open_positions(update_mtm=True)
-
-        return success, response, status_code
+        return sandbox_get_positions_for_user(user_id)
 
     except Exception as e:
         logger.exception(f"Error in sandbox_get_positions: {e}")

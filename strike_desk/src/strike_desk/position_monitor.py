@@ -13,12 +13,14 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from opentelemetry.trace import Span
 
 from .config import IST, Settings
+from .ema120 import band_exit
+from .ema120 import parse_trailer as parse_ema_trailer
 from .errors import (
     AlreadyJournalled,
     JournalWriteError,
@@ -27,12 +29,17 @@ from .errors import (
     StrikeDeskError,
 )
 from .exit_executor import ExitExecutor, exit_path_status
+from .fill_recovery import long_option_lots
 from .journal import (
+    APPROVAL_AUTO_APPROVED,
     EXIT_FEED_BLACKOUT,
     EXIT_FILLED,
     EXIT_LEVELS_UNAVAILABLE,
     EXIT_MANUAL,
+    EXIT_STOP,
     EXIT_SUBMITTED,
+    EXIT_TARGET,
+    EXIT_TIME_STOP,
     ORDER_TERMINAL,
     POSITION_ADOPTED,
     POSITION_ARMED,
@@ -40,14 +47,18 @@ from .journal import (
     POSITION_FLAT,
     POSITION_ORPHANED,
     POSITION_STOOD_DOWN,
+    SCHEMA_VERSION,
     Journal,
 )
 from .levels import ExitLevels, ExitTrigger, evaluate, resolve_time_stop
+from .ltp_fade.exits import fade_exit_reason, parse_trailer
 from .observability import get_tracer
 from .openalgo_client import OpenAlgoClient
 from .openalgo_mirror import OpenAlgoMirror
 from .price_feed import SOURCE_NONE, SOURCE_QUOTES, PriceFeed, Tick
 from .session import engage_kill_switch
+from .slots import isolation_active, lot_tag, owns_strategy_tag
+from .tradetron_signal import notify_tradetron
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +81,8 @@ class ManagedPosition:
     entry_price: float
     levels: ExitLevels
     theta_per_day: float | None
+    fade_exits: Any = None
+    ema_exits: Any = None
     attempts: int = 0
 
 
@@ -189,7 +202,11 @@ class PositionMonitor:
         self._heartbeat_utc = datetime.now(UTC)
         self._drain_adoptions()
         if self._position is None:
+            self._resume_live_from_journal()
+        if self._position is None:
             self._adopt_unadopted_orders()
+        if self._position is None:
+            self._adopt_or_flatten_book()
             return
         self._reconcile_if_due()
         if self._position is None:
@@ -222,6 +239,86 @@ class PositionMonitor:
             if self._position is not None:
                 return
 
+    def _resume_live_from_journal(self) -> None:
+        """Rebuild the in-memory book after a process restart.
+
+        Adoption writes adopted/armed rows and then skips that order on the next
+        start. Fill recovery also skips symbols already in ``live_symbols``.
+        Without this path a weekday restart leaves a live qty with no time-stop.
+        """
+        row = self._journal.live_position()
+        if row is None:
+            return
+        quantity, entry_price = self._broker_position(row.symbol)
+        if quantity <= 0:
+            logger.warning(
+                "journal is still live for %s but the book is flat — not resuming",
+                row.symbol,
+            )
+            return
+        if row.stop_price is None or row.target_price is None or row.time_stop_utc is None:
+            logger.error(
+                "live journal row %s is missing levels — not resuming",
+                row.position_id,
+            )
+            return
+        time_stop = row.time_stop_utc
+        if time_stop.tzinfo is None:
+            time_stop = time_stop.replace(tzinfo=UTC)
+        try:
+            levels = ExitLevels(
+                stop_price=float(row.stop_price),
+                target_price=float(row.target_price),
+                time_stop_utc=time_stop,
+                time_stop_reason=EXIT_TIME_STOP,
+            )
+        except LevelsUnavailable:
+            logger.exception("could not rebuild levels for %s", row.position_id)
+            return
+        fade_exits = None
+        ema_exits = None
+        if row.proposal_id:
+            proposal = self._journal.proposal(row.proposal_id)
+            if proposal is not None:
+                rationale = getattr(proposal, "rationale", None)
+                fade_exits = parse_trailer(rationale)
+                ema_exits = parse_ema_trailer(rationale)
+        position = ManagedPosition(
+            position_id=row.position_id,
+            order_id=row.order_id,
+            approval_id=row.approval_id,
+            proposal_id=row.proposal_id,
+            tick_id=row.tick_id,
+            trace_id=row.trace_id,
+            trading_day=row.trading_day,
+            symbol=row.symbol,
+            exchange=row.exchange,
+            product=row.product,
+            quantity=quantity,
+            entry_price=entry_price or float(row.entry_price or 0.0),
+            levels=levels,
+            theta_per_day=row.theta_per_day,
+            fade_exits=fade_exits,
+            ema_exits=ema_exits,
+            attempts=len(self._journal.exits_for_position(row.position_id)),
+        )
+        feed = PriceFeed(self._settings, position.symbol, position.exchange)
+        feed.start()
+        armed = feed.wait_for_first_tick(timeout=self._settings.feed_stale_seconds)
+        with self._lock:
+            self._feed = feed
+            self._position = position
+        self._blackout_since = None if armed else datetime.now(tz=UTC)
+        logger.info(
+            "resumed managing %s x %s at %.2f — stop %.2f target %.2f time-stop %s",
+            position.quantity,
+            position.symbol,
+            position.entry_price,
+            levels.stop_price,
+            levels.target_price,
+            levels.time_stop_utc.astimezone(IST).strftime("%H:%M IST"),
+        )
+
     # --- adoption ----------------------------------------------------------
 
     def _adopt(self, order_id: str) -> None:
@@ -253,15 +350,30 @@ class PositionMonitor:
             approval = self._journal.approval_row(record.approval_id, "auto-approved")
         proposal_id = approval.proposal_id if approval is not None else None
         proposal = self._journal.proposal(proposal_id) if proposal_id else None
+        now = datetime.now(tz=UTC)
+        day = _trading_day(now)
+        if proposal is None:
+            proposal = self._journal.latest_proposed_contract(day, record.symbol)
         if proposal is None:
             raise LevelsUnavailable(f"no proposal behind order {order_id}")
 
-        now = datetime.now(tz=UTC)
-        day = _trading_day(now)
+        fade_exits = parse_trailer(getattr(proposal, "rationale", None))
+        ema_exits = parse_ema_trailer(getattr(proposal, "rationale", None))
+        session_deadline = self._settings.session_exit_deadline_time
+        deadline = fade_exits.flatten if fade_exits is not None else session_deadline
+        stop_day = date.fromisoformat(day)
+        stop_ist = proposal.time_stop_ist
+        if ema_exits is not None:
+            try:
+                stop_day = date.fromisoformat(str(proposal.expiry))
+            except (TypeError, ValueError):
+                stop_day = date.fromisoformat(day)
+            stop_ist = self._settings.expiry_cutoff
+            deadline = self._settings.expiry_cutoff_time
         time_stop, time_stop_reason = resolve_time_stop(
-            proposal.time_stop_ist,
-            self._settings.session_exit_deadline_time,
-            date.fromisoformat(day),
+            stop_ist,
+            deadline,
+            stop_day,
         )
         levels = ExitLevels(
             stop_price=float(proposal.stop_price or 0.0),
@@ -293,6 +405,8 @@ class PositionMonitor:
             entry_price=entry_price or float(record.average_price or 0.0),
             levels=levels,
             theta_per_day=proposal.theta_per_day,
+            fade_exits=fade_exits,
+            ema_exits=ema_exits,
         )
         self._write_state(position, POSITION_ADOPTED, detail=f"adopted from order {order_id}")
         span.set_attribute("position.id", position.position_id)
@@ -411,10 +525,71 @@ class PositionMonitor:
                 )
                 self._fire_exit(ExitTrigger(EXIT_FEED_BLACKOUT, None, None), tick)
                 return
+        if position.ema_exits is not None:
+            trigger = self._ema_trigger(position, tick, now)
+            if trigger is None:
+                return
+            self._fire_exit(trigger, tick)
+            return
         trigger = evaluate(position.levels, tick.price if tick else None, now)
+        if position.fade_exits is not None:
+            fade_trigger = self._fade_trigger(position, tick, now)
+            if fade_trigger is not None:
+                trigger = fade_trigger
         if trigger is None:
             return
         self._fire_exit(trigger, tick)
+
+    def _ema_trigger(
+        self, position: ManagedPosition, tick: Tick | None, now: datetime
+    ) -> ExitTrigger | None:
+        """Index vs stored bands. Time-stop only on the expiry cutoff, never 15:00."""
+        if now >= position.levels.time_stop_utc:
+            return ExitTrigger(EXIT_TIME_STOP, None, tick.price if tick else None)
+        high = low = ltp = None
+        try:
+            quote = self._client.quotes(
+                self._settings.index_symbol, self._settings.index_spot_exchange
+            )
+            ltp = _as_float(quote.get("ltp"))
+            high = _as_float(quote.get("high"))
+            low = _as_float(quote.get("low"))
+        except OpenAlgoError:
+            return None
+        if not band_exit(position.ema_exits, high=high, low=low, ltp=ltp):
+            return None
+        observed = ltp if ltp is not None else (tick.price if tick else None)
+        return ExitTrigger(EXIT_STOP, None, observed)
+
+    def _fade_trigger(
+        self, position: ManagedPosition, tick: Tick | None, now: datetime
+    ) -> ExitTrigger | None:
+        if position.fade_exits is None:
+            return None
+        spot = None
+        try:
+            quote = self._client.quotes(
+                self._settings.index_symbol, self._settings.index_spot_exchange
+            )
+            spot = _as_float(quote.get("ltp"))
+        except OpenAlgoError:
+            spot = None
+        reason = fade_exit_reason(
+            now.astimezone(IST),
+            spot,
+            tick.price if tick else None,
+            position.entry_price,
+            position.fade_exits,
+        )
+        if reason is None:
+            return None
+        mapped = {
+            "eod": EXIT_TIME_STOP,
+            "premium_sl": EXIT_STOP,
+            "target": EXIT_TARGET,
+            "level_stop": EXIT_STOP,
+        }[reason]
+        return ExitTrigger(mapped, None, tick.price if tick else spot)
 
     def _reconcile_if_due(self) -> None:
         now = datetime.now(tz=UTC).timestamp()
@@ -486,6 +661,7 @@ class PositionMonitor:
                         latency_ms, self._settings.exit_latency_budget_ms, position.position_id,
                     )
                 if attempt.status == EXIT_SUBMITTED:
+                    notify_tradetron(self._settings, position.symbol, "exit")
                     self._finish(position, trigger, exit_price)
                     return
                 self._stop.wait(self._settings.exit_retry_seconds)
@@ -659,6 +835,161 @@ class PositionMonitor:
         if feed is not None:
             feed.close()
         self._feed = None
+
+    def _adopt_or_flatten_book(self) -> None:
+        """Adopt a broker fill the journal missed, or flatten it after the time-stop.
+
+        A placeorder timeout can fill at OpenAlgo with no complete order row. Before
+        15:00 IST the desk adopts from today's playbook-pass proposal. After 15:00 it
+        flattens even if it never owned the row.
+        """
+        try:
+            raw = self._client.positionbook()
+        except OpenAlgoError:
+            logger.exception("could not read the OpenAlgo book for fill recovery")
+            return
+        lots = long_option_lots(raw, index_symbol=self._settings.index_symbol)
+        if not lots:
+            return
+        now_ist = datetime.now(tz=IST)
+        if self._settings.ema120:
+            after_time_stop = (
+                now_ist.weekday() == self._settings.expiry_weekday
+                and now_ist.time() >= self._settings.expiry_cutoff_time
+            )
+        else:
+            after_time_stop = (now_ist.hour, now_ist.minute) >= (15, 0)
+        day = _trading_day(datetime.now(tz=UTC))
+        live = self._journal.live_symbols(day)
+        for row in lots:
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol or symbol.upper() in live:
+                continue
+            proposal = self._journal.latest_proposed_contract(day, symbol)
+            owned = owns_strategy_tag(self._settings, lot_tag(row)) or proposal is not None
+            if isolation_active(self._settings) and not owned:
+                continue
+            if after_time_stop:
+                logger.error(
+                    "unmanaged %s is still open after 15:00 IST — flattening",
+                    symbol,
+                )
+                self._flatten_unmanaged(symbol, reason="time-stop after unmanaged fill")
+                continue
+            if proposal is None:
+                logger.error(
+                    "unmanaged %s is open and there is no today's proposal to adopt",
+                    symbol,
+                )
+                continue
+            self._journal_recovered_fill(proposal, row)
+
+    def _journal_recovered_fill(self, proposal: Any, row: dict[str, Any]) -> None:
+        """Write auto-approved + complete order for a missed fill, then adopt it."""
+        symbol = str(proposal.symbol or row.get("symbol") or "").strip()
+        quantity = int(_as_float(row.get("quantity")) or proposal.quantity or 0)
+        if quantity <= 0:
+            return
+        average = _as_float(row.get("average_price")) or _as_float(row.get("ltp")) or 0.0
+        if average <= 0:
+            average = float(proposal.entry_price_high or proposal.entry_price_low or 0.0)
+        if average <= 0:
+            return
+        tick_id = str(proposal.tick_id or "")
+        trace_id = str(proposal.trace_id or "0" * 32)
+        day = str(proposal.trading_day or _trading_day(datetime.now(tz=UTC)))
+        broker_id = str(
+            row.get("orderid") or row.get("broker_order_id") or "recovered-timeout"
+        )
+        approval_id = str(uuid.uuid4())
+        order_id = str(uuid.uuid4())
+        now = datetime.now(tz=UTC)
+        logger.warning(
+            "adopting unmanaged fill %s qty %s from today's proposal %s",
+            symbol,
+            quantity,
+            proposal.proposal_id,
+        )
+        try:
+            self._journal.record_approval(
+                approval_id=approval_id,
+                status=APPROVAL_AUTO_APPROVED,
+                tick_id=tick_id,
+                trace_id=trace_id,
+                tick_trace_id=trace_id,
+                proposal_id=proposal.proposal_id,
+                verdict_id=None,
+                created_at_utc=now,
+                trading_day=day,
+                index_symbol=str(proposal.index_symbol or self._settings.index_symbol),
+                symbol=symbol,
+                exchange=str(row.get("exchange") or self._settings.option_exchange),
+                action="BUY",
+                product=str(row.get("product") or self._settings.order_product),
+                lots=int(proposal.lots or 1),
+                lot_size=int(proposal.lot_size or quantity),
+                quantity=quantity,
+                limit_price=average,
+                band_low=float(proposal.entry_price_low or average),
+                band_high=float(proposal.entry_price_high or average),
+                pending_order_id=None,
+                strategy_tag=(
+                    f"{self._settings.order_strategy_prefix}-{self._settings.index_symbol}"
+                ),
+                deadline_utc=now + timedelta(minutes=1),
+                wait_seconds=0.0,
+                approved_by="strike-desk",
+                resolved_at_ist=None,
+                broker_order_id=broker_id,
+                withdrawal=None,
+                detail="fill recovered from the OpenAlgo book",
+                payload_json=json.dumps({"recovered": True, "symbol": symbol}, sort_keys=True),
+                response_json=json.dumps(
+                    {"recovered": True, "row": row}, default=str, sort_keys=True
+                ),
+                defect=False,
+                schema_version=SCHEMA_VERSION,
+            )
+            self._journal.record_order(
+                order_id=order_id,
+                approval_id=approval_id,
+                tick_id=tick_id,
+                trace_id=trace_id,
+                created_at_utc=now,
+                trading_day=day,
+                pending_order_id=None,
+                broker_order_id=broker_id,
+                symbol=symbol,
+                exchange=str(row.get("exchange") or self._settings.option_exchange),
+                action="BUY",
+                product=str(row.get("product") or self._settings.order_product),
+                price_type="LIMIT",
+                limit_price=average,
+                lots=int(proposal.lots or 1),
+                lot_size=int(proposal.lot_size or quantity),
+                quantity=quantity,
+                order_status="complete",
+                average_price=average,
+                raw_json=json.dumps({"recovered": True, "row": row}, default=str, sort_keys=True),
+                schema_version=SCHEMA_VERSION,
+            )
+        except AlreadyJournalled:
+            logger.warning("recovered fill for %s was already journalled", symbol)
+            return
+        except JournalWriteError:
+            logger.exception("could not journal recovered fill for %s", symbol)
+            return
+        self._adopt(order_id)
+
+    def _flatten_unmanaged(self, symbol: str, *, reason: str) -> None:
+        """Square off an OpenAlgo long the journal never adopted."""
+        try:
+            attempt = self._executor.flatten_symbol(symbol, reason=reason)
+        except OpenAlgoError:
+            logger.exception("could not flatten unmanaged %s", symbol)
+            return
+        if attempt.status != EXIT_SUBMITTED:
+            logger.error("flatten of unmanaged %s did not submit: %s", symbol, attempt.detail)
 
     def _stand_down(self) -> None:
         self._close_feed()

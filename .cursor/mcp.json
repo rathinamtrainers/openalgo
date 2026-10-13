@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "openalgo": {
+      "command": "C:\\Users\\Admin\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\uv.exe",
+      "args": ["run", "python", "mcp/cursor_stdio.py"],
+      "cwd": "D:\\ATZ\\zerotouchalgo RT\\openalgo"
+    }
+  }
+}

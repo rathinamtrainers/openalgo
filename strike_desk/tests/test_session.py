@@ -76,6 +76,16 @@ def test_window_boundaries(settings, clock, blocked_by):
     assert verdict.blocked_by == blocked_by
 
 
+def test_fade_tag_may_enter_after_0921_inside_opening_blackout(settings):
+    gate, settings = gate_for(settings, {WEDNESDAY})
+    settings.expiry_cutoff = "23:59"
+    with freeze_time("2026-07-22 09:22:00+05:30"):
+        blocked = gate.evaluate(datetime.now(tz=IST), trigger="schedule")
+        allowed = gate.evaluate(datetime.now(tz=IST), trigger="fade-tag")
+    assert blocked.blocked_by == NO_TRADE_WINDOW
+    assert allowed.allowed is True
+
+
 def test_holiday_is_market_closed(settings):
     gate, _ = gate_for(settings, set())
     with freeze_time("2026-07-22 11:00:00+05:30"):

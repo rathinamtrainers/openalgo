@@ -33,7 +33,7 @@ def serve_react_app():
         return (
             """
         <html>
-        <head><title>OpenAlgo - Frontend Not Available</title></head>
+        <head><title>ZeroTouchAlgo - Frontend Not Available</title></head>
         <body style="font-family: system-ui; padding: 40px; max-width: 600px; margin: 0 auto;">
             <h1>Frontend Not Built</h1>
             <p>The React frontend is not available. To build it:</p>
@@ -270,6 +270,12 @@ def react_oiprofile():
 # Arbitrage - Futures calendar-spread scanner
 @react_bp.route("/arbitrage")
 def react_arbitrage():
+    return serve_react_app()
+
+
+# BTC option desk - Delta India OTM bid monitor
+@react_bp.route("/btc")
+def react_btc_desk():
     return serve_react_app()
 
 

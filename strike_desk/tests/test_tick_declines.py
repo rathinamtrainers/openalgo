@@ -8,6 +8,7 @@ import httpx
 
 from strike_desk.decline_taxonomy import describe, known_codes
 from tests.conftest import StubSpecialist, position
+from tests.position_fixtures import seed_armed_position
 
 
 def only_decision(journal, today):
@@ -37,6 +38,7 @@ def test_a_declining_tick_records_its_class_and_stamps_the_span(runner, journal,
 
 
 def test_a_hold_is_classified_as_a_routine_book_outcome(runner, journal, openalgo, today):
+    seed_armed_position(journal, symbol="NIFTY28JUL2624500CE", trading_day=today)
     openalgo.post("/api/v1/positionbook").mock(
         return_value=httpx.Response(200, json={"status": "success", "data": [position()]})
     )

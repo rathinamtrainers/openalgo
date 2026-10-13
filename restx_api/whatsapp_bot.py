@@ -49,7 +49,7 @@ notify_model = api.model(
             description="If true, send to the paired device's own number (the operator).",
         ),
         "username": fields.String(
-            description="OpenAlgo username — resolves to that user's linked WhatsApp number."
+            description="ZeroTouchAlgo username — resolves to that user's linked WhatsApp number."
         ),
         "phone": fields.String(
             description="Single E.164 digit string to message directly (e.g. 919876543210)."
@@ -125,7 +125,7 @@ class WhatsAppNotify(Resource):
                         "status": "error",
                         "message": (
                             "WhatsApp is not paired or not connected. Pair the device "
-                            "first from the /whatsapp page in OpenAlgo before sending."
+                            "first from the /whatsapp page in ZeroTouchAlgo before sending."
                         ),
                     }
                 ),

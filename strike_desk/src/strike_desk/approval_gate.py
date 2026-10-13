@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from .errors import (
     UnpriceableBand,
 )
 from .execution_client import ExecutionClient
+from .fill_recovery import is_place_timeout, matching_long
 from .journal import (
     APPROVAL_APPROVED,
     APPROVAL_AUTO_APPROVED,
@@ -41,8 +43,10 @@ from .journal import (
     SCHEMA_VERSION,
     Journal,
 )
+from .openalgo_client import OpenAlgoClient
 from .openalgo_mirror import GateHealth, OpenAlgoMirror
 from .session import engage_kill_switch
+from .tradetron_signal import notify_tradetron
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +85,7 @@ def align_price(band_low: float, band_high: float, tick: float) -> float:
 
 
 def strategy_tag(settings: Settings, tick_id: str) -> str:
-    """The label the Action Center shows the trader, tying the click to the tick."""
+    """The label the Action Center shows the trader, tying the click to the slot."""
     return f"{settings.order_strategy_prefix}:{tick_id[:8]}"
 
 
@@ -162,7 +166,7 @@ def build_intent(context: TickContext, settings: Settings, now_utc: datetime) ->
         symbol=symbol,
         exchange=settings.option_exchange,
         action=ACTION_BUY,
-        product=settings.order_product,
+        product="NRML" if settings.ema120 else settings.order_product,
         lots=lots,
         lot_size=lot_size,
         quantity=lots * lot_size,
@@ -329,11 +333,13 @@ class ApprovalGate:
         journal: Journal,
         mirror: OpenAlgoMirror,
         client: ExecutionClient,
+        reader: OpenAlgoClient | None = None,
     ) -> None:
         self._settings = settings
         self._journal = journal
         self._mirror = mirror
         self._client = client
+        self._reader = reader
 
     def health(self) -> GateHealth:
         """Whether a submission is allowed to be attempted at all."""
@@ -362,8 +368,17 @@ class ApprovalGate:
             )
 
         try:
+            started = time.monotonic()
             receipt = self._client.place_order(intent.payload())
+            logger.info(
+                "placeorder for %s returned in %.0fms",
+                intent.symbol,
+                (time.monotonic() - started) * 1000,
+            )
         except (OpenAlgoError, InvalidOrderPayload, MirrorUnavailable) as exc:
+            recovered = self._recover_timeout_fill(intent, exc)
+            if recovered is not None:
+                return recovered
             detail = f"{type(exc).__name__}: {exc}"
             logger.error("placement for tick %s failed: %s", intent.tick_id, detail)
             self._record(intent, APPROVAL_SUBMIT_FAILED, detail, response={})
@@ -440,6 +455,7 @@ class ApprovalGate:
                 logger.info(
                     "unattended order for approval %s already journalled", intent.approval_id
                 )
+            notify_tradetron(self._settings, intent.symbol, "entry")
             return SubmitResult(
                 intent.approval_id,
                 APPROVAL_AUTO_APPROVED,
@@ -538,6 +554,90 @@ class ApprovalGate:
             logger.exception("could not journal the failed submission for tick %s", context.tick_id)
             return SubmitResult(str(uuid.uuid4()), APPROVAL_SUBMIT_FAILED, detail)
 
+    def _recover_timeout_fill(self, intent: OrderIntent, exc: Exception) -> SubmitResult | None:
+        """If placeorder timed out, look at the book before calling it a miss.
+
+        A timeout is not a missed fill. OpenAlgo may still have posted the order.
+        Never retry the place. Read the book; if the intended long is open, journal
+        it as auto-approved and complete so the Position Monitor can adopt it.
+        """
+        if not is_place_timeout(exc) or self._reader is None:
+            return None
+        logger.error(
+            "placeorder timed out for %s; checking the book before submit-failed",
+            intent.symbol,
+        )
+        try:
+            book = self._reader.positionbook()
+        except OpenAlgoError:
+            logger.exception("could not read positionbook after place timeout")
+            return None
+        row = matching_long(book, intent.symbol)
+        if row is None:
+            logger.error(
+                "placeorder timed out for %s and the book is still flat",
+                intent.symbol,
+            )
+            return None
+        broker_id = str(
+            row.get("orderid") or row.get("broker_order_id") or "recovered-timeout"
+        )
+        logger.warning(
+            "placeorder timed out but %s is open at the broker — journaling the fill",
+            intent.symbol,
+        )
+        try:
+            average = float(row.get("average_price") or row.get("ltp") or intent.limit_price)
+        except (TypeError, ValueError):
+            average = intent.limit_price
+        detail = "placeorder timed out; fill recovered from the OpenAlgo book"
+        try:
+            self._record(
+                intent,
+                APPROVAL_AUTO_APPROVED,
+                detail,
+                response={"recovered": True, "row": row, "broker_order_id": broker_id},
+                broker_order_id=broker_id,
+                approved_by="strike-desk",
+            )
+            self._journal.record_order(
+                order_id=str(uuid.uuid4()),
+                approval_id=intent.approval_id,
+                tick_id=intent.tick_id,
+                trace_id=intent.trace_id,
+                created_at_utc=datetime.now(tz=UTC),
+                trading_day=intent.trading_day,
+                pending_order_id=None,
+                broker_order_id=broker_id,
+                symbol=intent.symbol,
+                exchange=intent.exchange,
+                action=intent.action,
+                product=intent.product,
+                price_type=PRICE_TYPE_LIMIT,
+                limit_price=intent.limit_price,
+                lots=intent.lots,
+                lot_size=intent.lot_size,
+                quantity=intent.quantity,
+                order_status="complete",
+                average_price=average,
+                raw_json=json.dumps({"recovered": True, "row": row}, default=str, sort_keys=True),
+                schema_version=SCHEMA_VERSION,
+            )
+        except AlreadyJournalled:
+            logger.info("recovered fill for approval %s was already journalled", intent.approval_id)
+        except JournalWriteError:
+            logger.exception("could not journal recovered fill for %s", intent.symbol)
+            return None
+        notify_tradetron(self._settings, intent.symbol, "entry")
+        return SubmitResult(
+            intent.approval_id,
+            APPROVAL_AUTO_APPROVED,
+            detail,
+            quantity=intent.quantity,
+            limit_price=intent.limit_price,
+            symbol=intent.symbol,
+        )
+
     def _refuse_before_intent(
         self, context: TickContext, status: str, detail: str, now: datetime
     ) -> SubmitResult:
@@ -559,7 +659,7 @@ class ApprovalGate:
             symbol=str(proposal.get("symbol") or ""),
             exchange=self._settings.option_exchange,
             action=ACTION_BUY,
-            product=self._settings.order_product,
+            product="NRML" if self._settings.ema120 else self._settings.order_product,
             lots=int((context.risk or {}).get("lots_cleared") or 0),
             lot_size=int(proposal.get("lot_size") or 0),
             quantity=0,

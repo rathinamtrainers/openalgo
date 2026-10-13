@@ -101,27 +101,48 @@ function parseSymbol(symbol: string, exchange: string) {
   return { underlying: symbol, expiry: null, strike: null, optionType: null }
 }
 
+function formatTradeClock(ts?: string | null): string {
+  if (!ts) return '—'
+  const match = ts.match(/(\d{2}:\d{2}:\d{2})/)
+  return match ? match[1] : ts
+}
+
+function strikeLabel(position: Position, parsed: ReturnType<typeof parseSymbol>): string | null {
+  const strike = position.strike || parsed.strike
+  const optionType = position.option_type || parsed.optionType
+  if (strike && optionType) return `${strike} ${optionType}`
+  if (optionType) return optionType
+  return null
+}
+
 function calculatePnlPercent(position: Position): number {
-  const avgPrice = Number(position.average_price) || 0
-  const qty = Number(position.quantity) || 0
+  if (position.roi_percent !== undefined && position.roi_percent !== null) {
+    return Number(position.roi_percent) || 0
+  }
+
+  const avgPrice = Number(position.entry_price ?? position.average_price) || 0
+  const qty = Number(position.quantity) || Number(position.traded_quantity) || 0
   const pnl = Number(position.pnl) || 0
 
-  // Use API-provided pnlpercent if available
-  if (position.pnlpercent !== undefined && position.pnlpercent !== null) {
+  if (position.pnlpercent !== undefined && position.pnlpercent !== null && qty !== 0) {
     return Number(position.pnlpercent) || 0
   }
 
   if (avgPrice === 0) return 0
 
-  // For open positions with quantity, calculate based on investment
+  const exitPrice = Number(position.exit_price ?? position.ltp) || 0
+  if (exitPrice > 0) {
+    const sideIsShort = (position.quantity || 0) < 0
+    return sideIsShort
+      ? ((avgPrice - exitPrice) / avgPrice) * 100
+      : ((exitPrice - avgPrice) / avgPrice) * 100
+  }
+
   if (qty !== 0) {
     const investment = Math.abs(avgPrice * qty)
     return investment > 0 ? (pnl / investment) * 100 : 0
   }
 
-  // For closed positions (qty=0), return 0% like Zerodha
-  // We cannot reliably calculate P&L% without knowing the original quantity
-  // The P&L amount is still shown correctly from the API
   return 0
 }
 
@@ -145,7 +166,7 @@ const PRODUCT_COLORS: Record<string, string> = {
 }
 
 export default function Positions() {
-  const { apiKey, user } = useAuthStore()
+  const { user } = useAuthStore()
   const { isCrypto } = useSupportedExchanges()
   const formatCurrency = useMemo(() => makeFormatCurrency(user?.broker), [user?.broker])
   const [positions, setPositions] = useState<Position[]>([])
@@ -180,7 +201,8 @@ export default function Positions() {
     enabled: positions.length > 0,
     useMultiQuotesFallback: true,
     staleThreshold: 5000,
-    multiQuotesRefreshInterval: 30000,
+    // 5s so running P&L moves when the 8765 ZeroMQ socket is unreachable
+    multiQuotesRefreshInterval: 5000,
     pauseWhenHidden: true,
   })
 
@@ -210,32 +232,25 @@ export default function Positions() {
     savePreferences()
   }, [savePreferences])
 
-  const fetchPositions = useCallback(
-    async (showRefresh = false) => {
-      if (!apiKey) {
-        setIsLoading(false)
-        return
-      }
+  const fetchPositions = useCallback(async (showRefresh = false) => {
+    if (showRefresh) setIsRefreshing(true)
 
-      if (showRefresh) setIsRefreshing(true)
-
-      try {
-        const response = await tradingApi.getPositions(apiKey)
-        if (response.status === 'success' && response.data) {
-          setPositions(response.data)
-          setError(null)
-        } else {
-          setError(response.message || 'Failed to fetch positions')
-        }
-      } catch {
-        setError('Failed to fetch positions')
-      } finally {
-        setIsLoading(false)
-        setIsRefreshing(false)
+    try {
+      const response = await tradingApi.getSessionPositions()
+      if (response.status === 'success' && response.data) {
+        setPositions(response.data)
+        setError(null)
+      } else {
+        setError(response.message || 'Failed to fetch positions')
       }
-    },
-    [apiKey]
-  )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to fetch positions'
+      setError(message)
+    } finally {
+      setIsLoading(false)
+      setIsRefreshing(false)
+    }
+  }, [])
 
   // Initial fetch and visibility-aware polling
   // Pauses polling when tab is hidden to save resources
@@ -251,6 +266,17 @@ export default function Positions() {
   useOrderEventRefresh(fetchPositions, {
     events: ['order_event', 'analyzer_update', 'close_position_event'],
   })
+
+  // When ZeroMQ/WebSocket is down, keep MTM moving from the positions REST snapshot
+  // (the same payload a manual Refresh already uses). Stop once Live ticks arrive.
+  useEffect(() => {
+    if (!isVisible || isLive) return
+    const interval = window.setInterval(() => {
+      fetchPositions()
+      lastFetchRef.current = Date.now()
+    }, 5000)
+    return () => window.clearInterval(interval)
+  }, [isVisible, isLive, fetchPositions])
 
   // Refresh data when tab becomes visible after being hidden
   useEffect(() => {
@@ -481,24 +507,33 @@ export default function Positions() {
     try {
       const headers = [
         'Symbol',
+        'Strike',
         'Exchange',
         ...(isCrypto ? [] : ['Product']),
         'Quantity',
-        'Avg Price',
-        'LTP',
+        'Entry Time',
+        'Entry LTP',
+        'Exit Time',
+        'Exit LTP',
         'P&L',
-        'P&L %',
+        '% RoI',
       ]
-      const rows = filteredPositions.map((p) => [
-        sanitizeCSV(p.symbol),
-        sanitizeCSV(p.exchange),
-        ...(isCrypto ? [] : [sanitizeCSV(p.product)]),
-        sanitizeCSV(p.quantity),
-        sanitizeCSV(p.average_price),
-        sanitizeCSV(p.ltp),
-        sanitizeCSV(p.pnl),
-        sanitizeCSV(calculatePnlPercent(p)),
-      ])
+      const rows = filteredPositions.map((p) => {
+        const parsed = parseSymbol(p.symbol, p.exchange)
+        return [
+          sanitizeCSV(p.symbol),
+          sanitizeCSV(strikeLabel(p, parsed) || ''),
+          sanitizeCSV(p.exchange),
+          ...(isCrypto ? [] : [sanitizeCSV(p.product)]),
+          sanitizeCSV(p.quantity || p.traded_quantity || 0),
+          sanitizeCSV(p.entry_time || ''),
+          sanitizeCSV(p.entry_price ?? p.average_price),
+          sanitizeCSV(p.exit_time || ''),
+          sanitizeCSV(p.exit_price ?? p.ltp),
+          sanitizeCSV(p.pnl),
+          sanitizeCSV(calculatePnlPercent(p)),
+        ]
+      })
 
       const csv = [headers, ...rows].map((row) => row.join(',')).join('\n')
       const blob = new Blob([csv], { type: 'text/csv' })
@@ -517,6 +552,7 @@ export default function Positions() {
   }
 
   const isProfit = (value: number) => value >= 0
+  const leadingColSpan = isCrypto ? 7 : 8
 
   const FilterChip = ({
     type,
@@ -572,8 +608,8 @@ export default function Positions() {
 
     positions.forEach((pos) => {
       totalPnl += pos.pnl || 0
-      const avgPrice = pos.average_price || 0
-      const qty = Math.abs(pos.quantity || 0)
+      const avgPrice = pos.entry_price || pos.average_price || 0
+      const qty = Math.abs(pos.quantity || pos.traded_quantity || 0)
       totalInvestment += avgPrice * qty
     })
 
@@ -621,9 +657,18 @@ export default function Positions() {
                 <Radio className="h-3 w-3 animate-pulse" />
                 Live
               </Badge>
+            ) : positions.length > 0 ? (
+              <Badge
+                variant="outline"
+                className="bg-slate-500/10 text-slate-600 border-slate-500/30 gap-1"
+              >
+                Quotes
+              </Badge>
             ) : null}
           </div>
-          <p className="text-muted-foreground">Monitor and manage your active trading positions</p>
+          <p className="text-muted-foreground">
+            Open positions and today&apos;s closed trades with entry, exit, P&L and % RoI
+          </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Settings Button */}
@@ -872,12 +917,18 @@ export default function Positions() {
           ) : filteredPositions.length === 0 ? (
             <EmptyState
               icon={ChartCandlestick}
-              title="No positions match your filters"
-              description="Try adjusting or clearing your filters to see results."
-              action={hasActiveFilters ?
-                <Button variant="ghost" size="sm" onClick={clearFilters}>
-                  Clear Filters
-                </Button> : undefined
+              title={hasActiveFilters ? 'No positions match your filters' : 'No open positions'}
+              description={
+                hasActiveFilters
+                  ? 'Try adjusting or clearing your filters to see results.'
+                  : 'The sandbox or live book for this session is empty.'
+              }
+              action={
+                hasActiveFilters ? (
+                  <Button variant="ghost" size="sm" onClick={clearFilters}>
+                    Clear Filters
+                  </Button>
+                ) : undefined
               }
             />
           ) : (
@@ -885,15 +936,17 @@ export default function Positions() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <SortableHeader column={0} label="Symbol" className="w-[140px]" />
+                    <SortableHeader column={0} label="Symbol" className="w-[160px]" />
                     <TableHead className="w-[80px]">Exchange</TableHead>
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
                     <SortableHeader column={3} label="Qty" className="w-[80px] text-right" />
-                    <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
-                    <TableHead className="w-[120px] text-right">LTP</TableHead>
+                    <TableHead className="w-[100px]">Entry</TableHead>
+                    <SortableHeader column={4} label="Entry LTP" className="w-[110px] text-right" />
+                    <TableHead className="w-[100px]">Exit</TableHead>
+                    <TableHead className="w-[110px] text-right">Exit LTP</TableHead>
                     <SortableHeader column={6} label="P&L" className="w-[120px] text-right" />
-                    <SortableHeader column={7} label="P&L %" className="w-[100px] text-right" />
-                    <TableHead className="w-[60px] text-right">Action</TableHead>
+                    <SortableHeader column={7} label="% RoI" className="w-[100px] text-right" />
+                    <TableHead className="w-[70px] text-right">Action</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -910,7 +963,7 @@ export default function Positions() {
                             className="bg-muted/50 cursor-pointer hover:bg-muted"
                             onClick={() => toggleGroup(groupKey)}
                           >
-                            <TableCell colSpan={6}>
+                            <TableCell colSpan={leadingColSpan}>
                               <div className="flex items-center gap-3 py-1 font-semibold">
                                 {isCollapsed ? (
                                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -947,10 +1000,37 @@ export default function Positions() {
 
                         {/* Position Rows */}
                         {!isCollapsed &&
-                          groupPositions.map((position, index) => (
+                          groupPositions.map((position, index) => {
+                            const parsed = parseSymbol(position.symbol, position.exchange)
+                            const strike = strikeLabel(position, parsed)
+                            const isClosed = (position.quantity || 0) === 0
+                            const displayQty = isClosed
+                              ? position.traded_quantity || 0
+                              : position.quantity
+                            const entryLtp = position.entry_price ?? position.average_price
+                            const exitLtp = isClosed
+                              ? (position.exit_price ?? position.ltp)
+                              : position.ltp
+                            const roi = calculatePnlPercent(position)
+                            return (
                             <TableRow key={`${position.symbol}-${position.exchange}-${index}`}>
-                              <TableCell className="w-[140px] font-medium">
-                                {position.symbol}
+                              <TableCell className="w-[160px] font-medium">
+                                <div>{position.symbol}</div>
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  {strike ? (
+                                    <Badge variant="outline" className="text-[10px] font-normal">
+                                      {strike}
+                                    </Badge>
+                                  ) : null}
+                                  {isClosed ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="text-[10px] font-normal text-muted-foreground"
+                                    >
+                                      Closed
+                                    </Badge>
+                                  ) : null}
+                                </div>
                               </TableCell>
                               <TableCell className="w-[80px]">
                                 <Badge
@@ -973,16 +1053,34 @@ export default function Positions() {
                               <TableCell
                                 className={cn(
                                   'w-[80px] text-right font-medium',
-                                  position.quantity > 0 ? 'text-green-600' : 'text-red-600'
+                                  isClosed
+                                    ? 'text-muted-foreground'
+                                    : position.quantity > 0
+                                      ? 'text-green-600'
+                                      : 'text-red-600'
                                 )}
                               >
-                                {position.quantity}
+                                {displayQty}
                               </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
-                                {formatCurrency(position.average_price)}
+                              <TableCell
+                                className="w-[100px] font-mono text-xs"
+                                title={position.entry_time || undefined}
+                              >
+                                {formatTradeClock(position.entry_time)}
                               </TableCell>
-                              <TableCell className="w-[120px] text-right font-mono">
-                                {position.ltp !== undefined ? formatCurrency(position.ltp) : '-'}
+                              <TableCell className="w-[110px] text-right font-mono">
+                                {entryLtp ? formatCurrency(entryLtp) : '—'}
+                              </TableCell>
+                              <TableCell
+                                className="w-[100px] font-mono text-xs"
+                                title={position.exit_time || undefined}
+                              >
+                                {formatTradeClock(position.exit_time)}
+                              </TableCell>
+                              <TableCell className="w-[110px] text-right font-mono">
+                                {exitLtp !== undefined && exitLtp !== null
+                                  ? formatCurrency(exitLtp)
+                                  : '—'}
                               </TableCell>
                               <TableCell
                                 className={cn(
@@ -1002,34 +1100,37 @@ export default function Positions() {
                               <TableCell
                                 className={cn(
                                   'w-[100px] text-right',
-                                  isProfit(calculatePnlPercent(position))
-                                    ? 'text-green-600'
-                                    : 'text-red-600'
+                                  isProfit(roi) ? 'text-green-600' : 'text-red-600'
                                 )}
                               >
-                                {calculatePnlPercent(position) >= 0 ? '+' : ''}
-                                {calculatePnlPercent(position).toFixed(2)}%
+                                {roi >= 0 ? '+' : ''}
+                                {roi.toFixed(2)}%
                               </TableCell>
-                              <TableCell className="w-[60px] text-right">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  onClick={() => handleClosePosition(position)}
-                                  aria-label={`Close ${position.symbol} position`}
-                                >
-                                  <X className="h-4 w-4" />
-                                </Button>
+                              <TableCell className="w-[70px] text-right">
+                                {isClosed ? (
+                                  <span className="text-xs text-muted-foreground">—</span>
+                                ) : (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                    onClick={() => handleClosePosition(position)}
+                                    aria-label={`Close ${position.symbol} position`}
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                )}
                               </TableCell>
                             </TableRow>
-                          ))}
+                            )
+                          })}
                       </React.Fragment>
                     )
                   })}
                 </TableBody>
                 <TableFooter>
                   <TableRow className="bg-muted/50">
-                    <TableCell colSpan={6} className="text-right text-muted-foreground">
+                    <TableCell colSpan={leadingColSpan} className="text-right text-muted-foreground">
                       Total P&L:
                     </TableCell>
                     <TableCell

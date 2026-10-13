@@ -28,8 +28,11 @@ from .grounding import (
     EvidenceLedger,
     RegimeSubmission,
     ToolObservation,
+    tool_output_ok,
+    unwrap_tool_output,
     validate_submission,
 )
+from .jev_client import jev_cost_micros
 from .journal import SCHEMA_VERSION
 from .mcp_toolbox import ToolSource
 from .model_client import build_regime_model, cost_micros, token_usage
@@ -77,6 +80,7 @@ class ReadOutcome:
     model_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    trend_snapshot: dict[str, float | None] | None = None
 
 
 class RegimeAnalyst:
@@ -206,6 +210,12 @@ class RegimeAnalyst:
         by_name = {tool.name: tool for tool in tools}
         submit = submit_tool()
         ledger = EvidenceLedger()
+        # Thresholds live in the prompt; recording them lets the rationale name a floor
+        # without failing grounding (the 11 Sep / v3.1 defect: citing "13" ungrounded).
+        ledger.record_playbook(
+            "daily-weight 10m-entry ADX 20 25 35 VIX floor 12 bullish 13 bearish "
+            "confidence 0.40 0.68 0.72 0.80"
+        )
         messages: list[Any] = [
             SystemMessage(content=self._artifact.content),
             HumanMessage(content=self._context(request, now_ist)),
@@ -291,8 +301,9 @@ class RegimeAnalyst:
                 except Exception as exc:  # noqa: BLE001 — a bad call is data, not a crash
                     span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
                     output, ok = f"Error calling {name}: {type(exc).__name__}: {exc}", False
-                if ok and output.lstrip().lower().startswith("error"):
-                    # OpenAlgo's MCP tools report failure as an error string, not an exception.
+                output = unwrap_tool_output(output)
+                if ok and not tool_output_ok(output):
+                    # OpenAlgo's MCP tools report failure as an error string or JSON status.
                     ok = False
 
             output, truncated = self._truncate(output)
@@ -363,11 +374,16 @@ class RegimeAnalyst:
             submission = RegimeSubmission.model_validate(submission_args)
         except ValidationError as exc:
             raw_label = submission_args.get("label")
+            first = exc.errors()[0]
+            loc = ".".join(str(part) for part in first.get("loc", ()))
             return ReadOutcome(
                 status=STATUS_UNGROUNDED,
                 label=str(raw_label) if raw_label else None,
                 rationale=str(submission_args.get("rationale", ""))[:1000],
-                defect=f"submission failed schema validation: {exc.error_count()} error(s)",
+                defect=(
+                    f"submission failed schema validation: {exc.error_count()} error(s) "
+                    f"({loc}: {first.get('msg', 'invalid')})"
+                ),
                 **base,
             )
 
@@ -414,8 +430,14 @@ class RegimeAnalyst:
 
 def build_regime_analyst(
     settings: Settings, prompts: PromptRegistry, tool_source: ToolSource
-) -> RegimeAnalyst:
+) -> Any:
     """Compose the analyst with the configured model tier."""
+    if settings.regime_provider == "jev":
+        from .jev_regime import JevRegimeAnalyst
+
+        if settings.jev_api_key is None:
+            raise ModelCallFailed("STRIKE_DESK_JEV_API_KEY is not configured")
+        return JevRegimeAnalyst(settings, prompts, tool_source)
     return RegimeAnalyst(
         settings=settings,
         prompts=prompts,
@@ -456,10 +478,16 @@ def build_regime_read_row(
         "tool_call_count": int(payload.get("tool_call_count", 0)),
         "tool_error_count": int(payload.get("tool_error_count", 0)),
         "model_calls": int(payload.get("model_calls", 0)),
-        "model_version": settings.regime_model if payload.get("model_calls") else "none",
+        "model_version": (
+            (settings.jev_model if settings.regime_provider == "jev" else settings.regime_model)
+            if payload.get("model_calls")
+            else "none"
+        ),
         "input_tokens": int(payload.get("input_tokens", 0)),
         "output_tokens": int(payload.get("output_tokens", 0)),
-        "token_cost_micros": cost_micros(
+        "token_cost_micros": (
+            jev_cost_micros if settings.regime_provider == "jev" else cost_micros
+        )(
             settings,
             int(payload.get("input_tokens", 0)),
             int(payload.get("output_tokens", 0)),

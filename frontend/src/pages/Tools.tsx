@@ -100,6 +100,13 @@ const tools = [
     href: '/arbitrage',
     color: 'bg-green-600',
   },
+  {
+    title: 'BTC Desk',
+    description:
+      'Live Delta India BTC option book. Shows crossed verticals and the arrests recorded against them.',
+    href: '/btc',
+    color: 'bg-amber-600',
+  },
 ]
 
 export default function Tools() {

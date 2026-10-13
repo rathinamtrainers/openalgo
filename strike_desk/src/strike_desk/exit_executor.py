@@ -112,6 +112,36 @@ class ExitExecutor:
                 return False
         return True
 
+    def flatten_symbol(self, symbol: str, *, reason: str) -> ExitAttempt:
+        """Square off a broker long the journal never adopted. Same ladder as a managed exit."""
+        logger.error("flattening unmanaged %s (%s)", symbol, reason)
+        try:
+            book = self._client.positionbook()
+        except OpenAlgoError as exc:
+            return ExitAttempt(
+                EXIT_FAILED, PATH_CLOSE_POSITION, None, 0, None,
+                f"could not read book to flatten {symbol}: {exc}",
+            )
+        row = next(
+            (
+                entry
+                for entry in book
+                if str(entry.get("symbol") or "").strip().upper() == symbol.strip().upper()
+            ),
+            None,
+        )
+        if row is None:
+            return ExitAttempt(
+                EXIT_FAILED, PATH_CLOSE_POSITION, None, 0, None,
+                f"{symbol} is already absent from the book",
+            )
+        try:
+            quantity = int(float(row.get("quantity") or 0))
+        except (TypeError, ValueError):
+            quantity = 0
+        exchange = str(row.get("exchange") or self._settings.option_exchange or "NFO")
+        return self.fire(symbol, exchange, quantity)
+
     def fire(self, symbol: str, exchange: str, quantity: int) -> ExitAttempt:
         """One attempt at getting flat. Market only, never queued if the platform allows it."""
         if quantity <= 0:

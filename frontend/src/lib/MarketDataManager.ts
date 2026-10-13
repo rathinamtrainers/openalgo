@@ -444,11 +444,14 @@ export class MarketDataManager {
           this.reconnectAttempts++
           const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000) // Exponential backoff, max 30s
           this.reconnectTimeout = setTimeout(() => this.connect(), delay)
-        } else if (
+        }
+        // Fallback is independent of reconnect: refused 8765 used to keep
+        // retrying for ~3 minutes and never start MultiQuotes, so Positions
+        // P&L stayed frozen until a manual refresh.
+        if (
           this.reconnectAttempts >= this.maxReconnectAttempts ||
           this.consecutiveFailures >= this.maxConsecutiveFailures
         ) {
-          // Max reconnect attempts reached - switch to REST API fallback
           this.enableFallbackMode()
         }
       }

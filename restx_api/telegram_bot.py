@@ -50,7 +50,7 @@ user_link_model = api.model(
     {
         "apikey": fields.String(required=True, description="API Key"),
         "telegram_id": fields.Integer(required=True, description="Telegram User ID"),
-        "username": fields.String(required=True, description="OpenAlgo Username"),
+        "username": fields.String(required=True, description="ZeroTouchAlgo Username"),
     },
 )
 
@@ -67,7 +67,7 @@ notification_model = api.model(
     "Notification",
     {
         "apikey": fields.String(required=True, description="API Key"),
-        "username": fields.String(required=True, description="OpenAlgo Username"),
+        "username": fields.String(required=True, description="ZeroTouchAlgo Username"),
         "message": fields.String(required=True, description="Notification message"),
         "priority": fields.Integer(description="Priority (1-10)", default=5),
         "wait_for_delivery": fields.Boolean(

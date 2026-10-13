@@ -122,8 +122,18 @@ export function useMarketStatus() {
         return false
       }
 
-      // Check regular market timing
-      const timing = state.timings.find((t) => t.exchange === exchange)
+      // F&O / currency sessions follow the cash-equity board when the
+      // timings table has no row for the derivative exchange.
+      const EXCHANGE_TIMING_ALIAS: Record<string, string> = {
+        NFO: 'NSE',
+        BFO: 'BSE',
+        CDS: 'NSE',
+        BCD: 'BSE',
+        NCO: 'NSE',
+      }
+      const timing =
+        state.timings.find((t) => t.exchange === exchange) ||
+        state.timings.find((t) => t.exchange === EXCHANGE_TIMING_ALIAS[exchange])
       if (!timing) {
         // If no timing found, assume market is closed (conservative approach)
         return false

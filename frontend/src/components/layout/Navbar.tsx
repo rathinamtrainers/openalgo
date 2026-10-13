@@ -1,4 +1,4 @@
-import { BarChart3, BookOpen, LogOut, Menu, Moon, Sun, Zap } from 'lucide-react'
+import { BarChart3, LogOut, Menu, Moon, Sun, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { authApi } from '@/api/auth'
@@ -20,6 +20,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet'
+import { APP_NAME } from '@/config/branding'
 import { isActiveRoute, mobileSheetItems, navItems } from '@/config/navigation'
 import { useProfileMenuItems } from '@/hooks/useProfileMenuItems'
 import { cn } from '@/lib/utils'
@@ -72,7 +73,7 @@ export function Navbar() {
   const isActive = (href: string) => isActiveRoute(location.pathname, href)
 
   return (
-    <nav className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <nav className="glass-nav sticky top-0 z-50 w-full border-b">
       <div className="container mx-auto px-4 flex h-14 items-center">
         {/* Mobile Menu */}
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
@@ -94,8 +95,8 @@ export function Navbar() {
                 className="flex items-center gap-2 px-2"
                 onClick={() => setMobileOpen(false)}
               >
-                <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-                <span className="font-semibold">OpenAlgo</span>
+                <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+                <span className="font-semibold">{APP_NAME}</span>
               </Link>
 
               {/* Secondary nav items (not in bottom nav) */}
@@ -142,16 +143,6 @@ export function Navbar() {
                     {item.label}
                   </Link>
                 ))}
-                <a
-                  href="https://docs.openalgo.in"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation hover:bg-muted active:bg-muted"
-                  onClick={() => setMobileOpen(false)}
-                >
-                  <BookOpen className="h-4 w-4" />
-                  Docs
-                </a>
               </nav>
             </div>
           </SheetContent>
@@ -159,8 +150,8 @@ export function Navbar() {
 
         {/* Logo */}
         <Link to="/dashboard" className="flex items-center gap-2 mr-6">
-          <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-          <span className="hidden font-semibold sm:inline-block">OpenAlgo</span>
+          <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+          <span className="hidden font-semibold sm:inline-block">{APP_NAME}</span>
         </Link>
 
         {/* Desktop Navigation.
@@ -174,10 +165,10 @@ export function Navbar() {
               to={item.href}
               title={item.label}
               className={cn(
-                'flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                'flex items-center gap-2 rounded-full px-3 py-2 text-sm font-medium transition-all',
                 isActive(item.href)
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                  ? 'bg-primary/18 text-primary shadow-[inset_0_1px_0_var(--glass-shine)]'
+                  : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'
               )}
             >
               <item.icon className="h-4 w-4 shrink-0" />
@@ -201,7 +192,7 @@ export function Navbar() {
             variant={appMode === 'live' ? 'default' : 'secondary'}
             className={cn(
               'text-xs',
-              appMode === 'analyzer' && 'bg-purple-500 hover:bg-purple-600 text-white'
+              appMode === 'analyzer' && 'bg-primary text-primary-foreground hover:bg-primary/90'
             )}
           >
             <span className="hidden lg:inline">
@@ -267,17 +258,6 @@ export function Navbar() {
                   {item.label}
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuItem asChild>
-                <a
-                  href="https://docs.openalgo.in"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2"
-                >
-                  <BookOpen className="h-4 w-4" />
-                  Docs
-                </a>
-              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => setShowLogoutDialog(true)}

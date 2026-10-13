@@ -23,6 +23,7 @@ export const useBrokerStore = create<BrokerStore>()((set) => ({
     try {
       const response = await fetch('/api/broker/capabilities', {
         credentials: 'include',
+        headers: { Accept: 'application/json' },
       })
 
       if (response.ok) {

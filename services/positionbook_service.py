@@ -145,6 +145,50 @@ def get_positionbook_with_auth(
         return False, {"status": "error", "message": str(e)}, 500
 
 
+def _session_api_key_if_logged_in() -> str | None:
+    """Return the signed-in user's API key when this call has a Flask session."""
+    try:
+        from flask import has_request_context, session
+
+        from database.auth_db import get_api_key_for_tradingview
+    except ImportError:
+        return None
+    if not has_request_context():
+        return None
+    if not session.get("logged_in") or not session.get("user"):
+        return None
+    return get_api_key_for_tradingview(session.get("user"))
+
+
+def get_positionbook_for_session(
+    username: str, broker: str
+) -> tuple[bool, dict[str, Any], int]:
+    """Position book for a logged-in UI session.
+
+    Analyze mode reads the sandbox by username. Live mode uses the broker token.
+    """
+    from database.auth_db import get_auth_token
+    from database.settings_db import get_analyze_mode
+
+    if get_analyze_mode():
+        from services.sandbox_service import sandbox_get_positions_for_user
+
+        return sandbox_get_positions_for_user(username)
+
+    auth_token = get_auth_token(username)
+    if auth_token is None:
+        return (
+            False,
+            {
+                "status": "error",
+                "code": "BROKER_SESSION_EXPIRED",
+                "message": "Broker session expired - please reconnect your broker",
+            },
+            401,
+        )
+    return get_positionbook(auth_token=auth_token, broker=broker)
+
+
 def get_positionbook(
     api_key: str | None = None, auth_token: str | None = None, broker: str | None = None
 ) -> tuple[bool, dict[str, Any], int]:
@@ -167,6 +211,20 @@ def get_positionbook(
     if api_key and not (auth_token and broker):
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
+            # The React Positions page persists the last API key it saw. After the
+            # laptop copy and the GCE host swap on :5000, that key belongs to the
+            # other instance and looks invalid here. A live session still has the
+            # right key — use it so Analyze sandbox rows are not 403'd.
+            session_key = _session_api_key_if_logged_in()
+            if session_key and session_key != api_key:
+                AUTH_TOKEN, broker_name = get_auth_token_broker(session_key)
+                if AUTH_TOKEN is not None:
+                    logger.info(
+                        "positionbook: ignored a stale client API key and used the session key"
+                    )
+                    return get_positionbook_with_auth(
+                        AUTH_TOKEN, broker_name, {"apikey": session_key}
+                    )
             return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
         original_data = {"apikey": api_key}
         return get_positionbook_with_auth(AUTH_TOKEN, broker_name, original_data)

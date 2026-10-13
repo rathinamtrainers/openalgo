@@ -10,17 +10,30 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { APP_NAME } from '@/config/branding'
 import { useAuthStore } from '@/stores/authStore'
 import { showToast } from '@/utils/toast'
 
+function afterPasswordPath(searchParams: URLSearchParams): string {
+  if (searchParams.get('next') === '/btc') return '/btc'
+  try {
+    if (sessionStorage.getItem('oa-after-login') === '/btc') return '/btc'
+  } catch {
+    // sessionStorage can be blocked; the query param still works.
+  }
+  return '/broker'
+}
+
 export default function Login() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const destination = afterPasswordPath(searchParams)
   const { login: setLogin } = useAuthStore()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -63,8 +76,8 @@ export default function Login() {
             sessionData.authenticated &&
             !sessionData.logged_in
           ) {
-            // Logged in but no broker, go to broker selection
-            navigate('/broker', { replace: true })
+            // Logged in but no broker. /btc does not need the Zerodha session.
+            navigate(destination, { replace: true })
             return
           }
         }
@@ -75,7 +88,7 @@ export default function Login() {
       }
     }
     checkSetup()
-  }, [navigate])
+  }, [navigate, destination])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -139,8 +152,16 @@ export default function Login() {
         // Set login state (broker from response if session was resumed, empty otherwise)
         setLogin(username, data.broker || '')
         showToast.success('Login successful', 'system')
-        // Use redirect from response if provided, otherwise go to broker
-        navigate(data.redirect || '/broker')
+        // A server redirect to the broker page must not override an open /btc visit.
+        const serverRedirect = data.redirect === '/broker' ? undefined : data.redirect
+        if (destination === '/btc') {
+          try {
+            sessionStorage.removeItem('oa-after-login')
+          } catch {
+            // ignore
+          }
+        }
+        navigate(serverRedirect || destination)
       }
     } catch (_err) {
       setError('Login failed. Please try again.')
@@ -191,7 +212,15 @@ export default function Login() {
 
       setLogin(username, data.broker || '')
       showToast.success('Login successful', 'system')
-      navigate(data.redirect || '/broker')
+      const serverRedirect = data.redirect === '/broker' ? undefined : data.redirect
+      if (destination === '/btc') {
+        try {
+          sessionStorage.removeItem('oa-after-login')
+        } catch {
+          // ignore
+        }
+      }
+      navigate(serverRedirect || destination)
     } catch (_err) {
       setError('Failed to verify TOTP. Please try again.')
     } finally {
@@ -208,24 +237,26 @@ export default function Login() {
   // Show loading while checking setup
   if (isCheckingSetup) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="app-shell flex items-center justify-center">
+        <div className="app-atmosphere" aria-hidden />
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center py-8 px-4">
+    <div className="app-shell flex items-center justify-center py-8 px-4">
+      <div className="app-atmosphere" aria-hidden />
       <div className="container max-w-6xl">
         <div className="flex flex-col lg:flex-row items-center justify-between gap-8 lg:gap-16">
           {/* Login Form - First on mobile */}
-          <Card className="w-full max-w-md order-1 lg:order-2 shadow-xl">
+          <Card className="w-full max-w-md order-1 lg:order-2">
             <CardHeader className="text-center">
               <div className="flex justify-center mb-4">
-                <img src="/logo.png" alt="OpenAlgo" className="h-20 w-20" />
+                <img src="/logo.png" alt={APP_NAME} className="h-20 w-20" />
               </div>
               <CardTitle className="text-2xl">Welcome Back</CardTitle>
-              <CardDescription>Sign in to your OpenAlgo account</CardDescription>
+              <CardDescription>Sign in to your {APP_NAME} account</CardDescription>
             </CardHeader>
             <CardContent>
               {step === 'password' ? (
@@ -370,7 +401,7 @@ export default function Login() {
           {/* Welcome Content - Second on mobile */}
           <div className="flex-1 max-w-xl text-center lg:text-left order-2 lg:order-1">
             <h1 className="text-4xl lg:text-5xl font-bold mb-6">
-              Welcome to <span className="text-primary">OpenAlgo</span>
+              Welcome to <span className="text-primary">{APP_NAME}</span>
             </h1>
             <p className="text-lg lg:text-xl mb-8 text-muted-foreground">
               Sign in to your account to access your trading dashboard and manage your algorithmic

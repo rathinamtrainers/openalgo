@@ -21,8 +21,9 @@ from strike_desk.options_strategist import (
     STATUS_NO_CONTRACT,
     STATUS_PROPOSED,
 )
+from tests.position_fixtures import seed_armed_position
 
-from .risk_fixtures import REDUCES, ROOMY, VETOES
+from .risk_fixtures import REDUCES, ROOMY, SYMBOL, VETOES, position
 
 
 def test_a_cleared_proposal_becomes_an_intent(tick_harness) -> None:
@@ -108,12 +109,18 @@ def test_the_latch_survives_a_recovered_book(tick_harness) -> None:
 
 def test_an_open_position_still_holds_rather_than_stopping(tick_harness) -> None:
     """The stop takes the desk out of new entries; managing the book comes first."""
-    from .risk_fixtures import position
-
+    seed_armed_position(tick_harness.journal, symbol=SYMBOL, trading_day=tick_harness.today)
     tick_harness.set_book(capital=ROOMY, realised=-40_000.0, positions=(position(),))
     decision = tick_harness.run_tick()
     assert decision.outcome == "hold"
     assert decision.reason_code == "position-open"
+
+
+def test_an_unmanaged_book_is_not_a_routine_hold(tick_harness) -> None:
+    tick_harness.set_book(capital=ROOMY, realised=-40_000.0, positions=(position(),))
+    decision = tick_harness.run_tick()
+    assert decision.outcome == "decline"
+    assert decision.reason_code == "position-unmanaged"
 
 
 def test_the_verdict_row_is_written_before_the_decision(tick_harness, monkeypatch) -> None:
@@ -187,4 +194,6 @@ def test_no_write_path_is_ever_touched(tick_harness) -> None:
         "/api/v1/positionbook",
         "/api/v1/market/timings",
         "/api/v1/ping",
+        "/api/v1/quotes",
+        "/api/v1/history",
     }

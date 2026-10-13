@@ -985,6 +985,36 @@ class Journal:
             )
             return list(session.execute(statement).scalars())
 
+    def live_symbols(self, trading_day: str) -> frozenset[str]:
+        """Symbols the monitor currently has adopted, armed, or is exiting.
+
+        Append-only rows keep the adopted/armed states after a flatten, so a
+        position_id that later went terminal is excluded — same rule as live_position.
+        """
+        with self.session_scope() as session:
+            terminal = select(PositionRow.position_id).where(
+                PositionRow.trading_day == trading_day,
+                PositionRow.state.in_(tuple(POSITION_TERMINAL)),
+            )
+            rows = session.execute(
+                select(PositionRow.symbol).where(
+                    PositionRow.trading_day == trading_day,
+                    PositionRow.state.in_(tuple(POSITION_LIVE)),
+                    PositionRow.position_id.not_in(terminal),
+                )
+            ).scalars()
+            return frozenset(str(symbol).strip().upper() for symbol in rows if symbol)
+
+    def latest_proposed_contract(self, trading_day: str, symbol: str) -> Proposal | None:
+        """The newest playbook-pass proposal for this tradable symbol today."""
+        target = symbol.strip().upper()
+        for row in reversed(list(self.list_proposals(trading_day))):
+            if (row.symbol or "").strip().upper() != target:
+                continue
+            if row.status == "proposed" and row.stop_price and row.target_price:
+                return row
+        return None
+
     def unadopted_orders(self, trading_day: str) -> Sequence[OrderRow]:
         """Orders that reached 'complete' today and were never adopted by the monitor."""
         with self.session_scope() as session:

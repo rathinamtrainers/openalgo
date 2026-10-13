@@ -14,7 +14,7 @@ from .errors import StrikeDeskError
 
 logger = logging.getLogger(__name__)
 
-TAXONOMY_VERSION = "dt-5"
+TAXONOMY_VERSION = "dt-9"
 
 CATEGORY_BOOK = "book"
 CATEGORY_CONTRACT = "contract"
@@ -104,6 +104,17 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
         ),
     ),
     _entry(
+        "position-unmanaged",
+        outcome="decline",
+        category=CATEGORY_BOOK,
+        disposition=DISPOSITION_DEFECT,
+        summary="the book is open but the monitor is not managing it",
+        default=(
+            "Declined: {symbols} is open at the broker but Strike Desk is not managing it "
+            "({detail}). That is not a routine hold."
+        ),
+    ),
+    _entry(
         "data-quality",
         outcome="decline",
         category=CATEGORY_DATA,
@@ -153,6 +164,17 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
         default="Declined: the '{role}' specialist did not answer within its timeout ({detail}).",
     ),
     _entry(
+        "specialist-no-submit",
+        outcome="decline",
+        category=CATEGORY_SPECIALIST,
+        disposition=DISPOSITION_DEGRADED,
+        summary="the strategist ran its rounds but never submitted a contract",
+        default=(
+            "Declined: the '{role}' specialist finished its rounds without submitting "
+            "a contract ({detail}). That is not an unread option chain."
+        ),
+    ),
+    _entry(
         "regime-not-tradeable",
         outcome="decline",
         category=CATEGORY_REGIME,
@@ -169,6 +191,39 @@ _ENTRIES: tuple[ReasonEntry, ...] = (
         default=(
             "Declined: regime '{label}' is tradeable but confidence {confidence} "
             "is below the {floor} floor."
+        ),
+    ),
+    _entry(
+        "ema-no-signal",
+        outcome="decline",
+        category=CATEGORY_REGIME,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the 120m EMA bands have not fired a long or short",
+        default=(
+            "Declined: the last closed 120-minute bar is between the 21-EMA bands "
+            "({detail}). The EMA book waits for a close through a band."
+        ),
+    ),
+    _entry(
+        "ema-in-trade",
+        outcome="hold",
+        category=CATEGORY_BOOK,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the EMA book is already in a trade",
+        default=(
+            "Held: the EMA book is already in {symbols}. "
+            "The opposite band is the exit; this tick does not add."
+        ),
+    ),
+    _entry(
+        "regime-weak-trend",
+        outcome="decline",
+        category=CATEGORY_REGIME,
+        disposition=DISPOSITION_ROUTINE,
+        summary="the regime had a side but not enough strength to buy premium",
+        default=(
+            "Declined: trending but not strong enough to buy premium ({detail}). "
+            "A side without strength is a decaying long."
         ),
     ),
     _entry(

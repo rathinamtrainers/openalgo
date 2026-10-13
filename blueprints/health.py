@@ -89,7 +89,7 @@ def simple_health():
                     "status": health_status["status"],
                     "version": "1.0",
                     "serviceId": "openalgo",
-                    "description": "OpenAlgo Trading Platform",
+                    "description": "ZeroTouchAlgo Trading Platform",
                 }
             ),
             status_code,
@@ -218,7 +218,7 @@ def detailed_health_check():
                     "status": overall_status,
                     "version": "1.0",
                     "serviceId": "openalgo",
-                    "description": "OpenAlgo Trading Platform",
+                    "description": "ZeroTouchAlgo Trading Platform",
                     "checks": checks,
                 }
             ),

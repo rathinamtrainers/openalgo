@@ -132,6 +132,27 @@ def option_greeks() -> str:
     )
 
 
+def option_greeks_pe() -> str:
+    return json.dumps(
+        {
+            "status": "success",
+            "data": {
+                "symbol": "NIFTY02SEP2624800PE",
+                "spot": 24812.35,
+                "strike": 24800,
+                "iv": 12.8,
+                "delta": -0.48,
+                "gamma": 0.00041,
+                "theta": -18.4,
+                "vega": 11.72,
+                "rho": 3.18,
+                "interest_rate": 6.5,
+            },
+        },
+        indent=2,
+    )
+
+
 def trend_up() -> str:
     return json.dumps(
         {

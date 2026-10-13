@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from strike_desk.decline_taxonomy import describe
@@ -12,6 +13,7 @@ from strike_desk.graph import (
     REASON_NO_VIABLE_CONTRACT,
     REASON_PROPOSAL_INVALID,
     REASON_PROPOSAL_UNGROUNDED,
+    REASON_SPECIALIST_NO_SUBMIT,
     REASON_SPECIALIST_UNAVAILABLE,
     _decide_outcome,
 )
@@ -50,6 +52,21 @@ def test_each_status_classifies(settings, tick_state, status, code, category, di
     assert text and len(text) <= settings.reason_text_max_chars
 
 
+def test_no_submission_is_not_an_unread_chain(settings, tick_state) -> None:
+    state = {
+        **tick_state,
+        "regime_label": "trending",
+        "regime_confidence": 0.8,
+        "proposal_status": STATUS_DEGRADED,
+        "proposal_detail": "no submission after 6 model rounds",
+        "proposal": {},
+    }
+    outcome, reason_code, text = _decide_outcome(state, settings)
+    assert outcome == OUTCOME_DECLINE
+    assert reason_code == REASON_SPECIALIST_NO_SUBMIT
+    assert "option chain could not be read" not in text
+
+
 def test_a_refusal_never_makes_the_day_look_broken(settings, tick_state) -> None:
     """no-viable-contract is routine: `strike-desk declines` must still exit 0."""
     assert describe(REASON_NO_VIABLE_CONTRACT).disposition == "routine"
@@ -78,3 +95,18 @@ def test_the_proposal_row_is_written_before_the_decision(tick_harness) -> None:
     with pytest.raises(JournalWriteError):
         tick_harness.run_tick()
     assert tick_harness.decision_rows() == []
+
+
+def test_a_dead_broker_token_skips_specialists(tick_harness) -> None:
+    tick_harness.openalgo.post("/api/v1/quotes").mock(
+        return_value=httpx.Response(
+            500,
+            json={"status": "error", "message": "Incorrect api_key or access_token"},
+        )
+    )
+    decision = tick_harness.run_tick()
+    assert tick_harness.analyst_calls == 0
+    assert tick_harness.strategist_calls == 0
+    assert decision.reason_code == REASON_DATA_QUALITY
+    assert "access_token" in decision.reason_text
+    assert "option chain could not be read" not in decision.reason_text

@@ -11,6 +11,7 @@ import pytest
 
 from strike_desk.errors import JournalWriteError
 from tests.conftest import StubSpecialist, position
+from tests.position_fixtures import seed_armed_position
 
 
 def only_decision(journal, today):
@@ -45,6 +46,7 @@ def test_flat_book_with_no_specialists_declines(runner, journal, today):
 
 
 def test_open_position_holds_without_consulting(runner, journal, openalgo, today):
+    seed_armed_position(journal, symbol="NIFTY28JUL2624500CE", trading_day=today)
     openalgo.post("/api/v1/positionbook").mock(
         return_value=httpx.Response(200, json={"status": "success", "data": [position()]})
     )
@@ -53,6 +55,16 @@ def test_open_position_holds_without_consulting(runner, journal, openalgo, today
     assert (row.outcome, row.reason_code) == ("hold", "position-open")
     assert "NIFTY28JUL2624500CE" in row.reason_text
     assert "tick.consult" not in span_names(journal, row.trace_id)
+
+
+def test_unmanaged_open_position_is_not_a_hold(runner, journal, openalgo, today):
+    openalgo.post("/api/v1/positionbook").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": [position()]})
+    )
+    runner.run_tick("manual")
+    row = only_decision(journal, today)
+    assert (row.outcome, row.reason_code) == ("decline", "position-unmanaged")
+    assert "NIFTY28JUL2624500CE" in row.reason_text
 
 
 def test_unreadable_book_declines_on_data_quality(runner, journal, openalgo, today):

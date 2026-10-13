@@ -19,7 +19,8 @@ export function FullWidthLayout() {
 
   return (
     <SocketProvider>
-      <div className="h-screen bg-background flex flex-col overflow-hidden">
+      <div className="app-shell h-screen flex flex-col overflow-hidden">
+        <div className="app-atmosphere" aria-hidden />
         <Outlet />
       </div>
     </SocketProvider>

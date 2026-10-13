@@ -25,6 +25,7 @@ from database.sandbox_db import SandboxPositions, SandboxTrades, db_session, get
 from database.token_db import get_symbol_info
 from sandbox.fund_manager import FundManager
 from sandbox.holdings_manager import HoldingsManager
+from sandbox.round_trips import blotter_fields_for_position, last_trip_by_leg, pair_round_trips
 from services.market_data_service import get_market_data_service
 from services.quotes_service import get_multiquotes, get_quotes
 from utils.logging import get_logger
@@ -344,6 +345,35 @@ class PositionManager:
 
         logger.info(f"Expired position {symbol} settled successfully for user {position.user_id}")
 
+    def _session_trips_by_leg(self, session_start):
+        """FIFO last trip per (symbol, exchange, product) for the current session."""
+        try:
+            trades = (
+                SandboxTrades.query.filter(
+                    SandboxTrades.user_id == self.user_id,
+                    SandboxTrades.trade_timestamp >= session_start,
+                )
+                .order_by(SandboxTrades.trade_timestamp.asc())
+                .all()
+            )
+            fills = [
+                {
+                    "symbol": trade.symbol,
+                    "exchange": trade.exchange,
+                    "product": trade.product,
+                    "action": trade.action,
+                    "quantity": trade.quantity,
+                    "price": float(trade.price),
+                    "timestamp": trade.trade_timestamp,
+                    "tradeid": trade.tradeid,
+                }
+                for trade in trades
+            ]
+            return last_trip_by_leg(pair_round_trips(fills))
+        except Exception:
+            logger.exception("Error building session round-trips for user %s", self.user_id)
+            return {}
+
     def get_open_positions(self, update_mtm=True):
         """
         Get all open positions for the user
@@ -475,6 +505,8 @@ class PositionManager:
             except Exception:
                 _cv_map = {}
 
+            session_trips = self._session_trips_by_leg(last_session_expiry)
+
             for position in positions:
                 unrealized_pnl = Decimal(str(position.pnl))  # Current unrealized P&L from MTM
                 today_realized = Decimal(str(position.today_realized_pnl or 0))
@@ -491,22 +523,51 @@ class PositionManager:
                 total_today_realized_pnl += today_realized
                 total_pnl_today += position_total_pnl_today
 
-                # Calculate P&L% based on total P&L (realized + unrealized) for the day
-                # For open positions: % based on total investment
-                # For closed positions (qty=0): 0% (like Zerodha - avg resets to 0, can't calculate)
                 pos_cv = _cv_map.get(position.symbol, 1.0)
                 pos_cv_dec = Decimal(str(pos_cv))
+                trip = session_trips.get((position.symbol, position.exchange, position.product))
+                blotter = blotter_fields_for_position(
+                    trip,
+                    ltp=float(position.ltp) if position.ltp else None,
+                    contract_value=pos_cv,
+                    today_realized_pnl=float(today_realized) if position.quantity == 0 else None,
+                )
+                entry_price = blotter.get("entry_price")
+                if entry_price is None and position.average_price:
+                    entry_price = float(position.average_price)
+                traded_qty = blotter.get("traded_quantity")
+                if not traded_qty and position.quantity:
+                    traded_qty = abs(int(position.quantity))
+
                 if position.quantity != 0:
-                    investment = abs(Decimal(str(position.average_price)) * Decimal(str(position.quantity)) * pos_cv_dec)
-                    if investment > 0:
-                        calculated_pnl_percent = (position_total_pnl_today / investment) * Decimal("100")
-                    else:
-                        calculated_pnl_percent = Decimal("0.00")
+                    investment = abs(
+                        Decimal(str(position.average_price))
+                        * Decimal(str(position.quantity))
+                        * pos_cv_dec
+                    )
                     display_avg_price = float(position.average_price)
+                    display_ltp = float(position.ltp) if position.ltp else 0.0
                 else:
-                    # Closed position - show 0% and avg=0 (like Zerodha)
+                    # Closed leftover: keep last entry LTP so % RoI is computable
+                    display_avg_price = float(entry_price or 0.0)
+                    display_ltp = (
+                        float(blotter["exit_price"])
+                        if blotter.get("exit_price") is not None
+                        else (float(position.ltp) if position.ltp else 0.0)
+                    )
+                    if traded_qty:
+                        investment = abs(
+                            Decimal(str(display_avg_price)) * Decimal(str(traded_qty)) * pos_cv_dec
+                        )
+                    else:
+                        investment = Decimal("0.00")
+
+                if blotter.get("roi_percent") is not None:
+                    calculated_pnl_percent = Decimal(str(blotter["roi_percent"]))
+                elif investment > 0:
+                    calculated_pnl_percent = (position_total_pnl_today / investment) * Decimal("100")
+                else:
                     calculated_pnl_percent = Decimal("0.00")
-                    display_avg_price = 0.0  # Reset to 0 for display (like Zerodha)
 
                 positions_list.append(
                     {
@@ -514,16 +575,24 @@ class PositionManager:
                         "exchange": position.exchange,
                         "product": position.product,
                         "quantity": position.quantity,
-                        "average_price": display_avg_price,  # 0 for closed positions (like Zerodha)
-                        "ltp": float(position.ltp) if position.ltp else 0.0,
-                        "pnl": float(
-                            position_total_pnl_today
-                        ),  # Today's total P&L (realized + unrealized)
-                        "pnlpercent": float(calculated_pnl_percent),  # Fixed: use pnlpercent (no underscore) to match frontend
-                        "unrealized_pnl": float(unrealized_pnl),  # Unrealized only (for reference)
+                        "average_price": display_avg_price,
+                        "ltp": display_ltp,
+                        "pnl": float(position_total_pnl_today),
+                        "pnlpercent": float(calculated_pnl_percent),
+                        "unrealized_pnl": float(unrealized_pnl),
                         "today_realized_pnl": float(today_realized),
                         "total_pnl_today": float(position_total_pnl_today),
-                        "lot_size": pos_cv,  # contract_value multiplier (e.g. 0.01 for ETHUSD.P)
+                        "lot_size": pos_cv,
+                        "underlying": blotter.get("underlying"),
+                        "expiry": blotter.get("expiry"),
+                        "strike": blotter.get("strike"),
+                        "option_type": blotter.get("option_type"),
+                        "entry_time": blotter.get("entry_time"),
+                        "exit_time": blotter.get("exit_time"),
+                        "entry_price": blotter.get("entry_price"),
+                        "exit_price": blotter.get("exit_price"),
+                        "traded_quantity": blotter.get("traded_quantity"),
+                        "roi_percent": float(calculated_pnl_percent),
                     }
                 )
 
@@ -635,6 +704,7 @@ class PositionManager:
                 logger.debug(f"Positions MTM: All {ws_count} symbols from WebSocket (no API calls)")
 
             # Update MTM for each position
+            mtm_changed = False
             for position in positions:
                 # Skip MTM update for closed positions (quantity = 0)
                 # They already have today's realized P&L stored in position.pnl
@@ -645,6 +715,8 @@ class PositionManager:
                 if quote:
                     ltp = Decimal(str(quote.get("ltp", 0)))
                     if ltp > 0:
+                        if position.ltp != ltp:
+                            mtm_changed = True
                         position.ltp = ltp
 
                         # Calculate current unrealized P&L for open position
@@ -662,10 +734,31 @@ class PositionManager:
                         )
 
             db_session.commit()
+            if mtm_changed:
+                self._emit_mtm_refresh()
 
         except Exception as e:
             db_session.rollback()
             logger.exception(f"Error updating positions MTM: {e}")
+
+    def _emit_mtm_refresh(self) -> None:
+        """Tell the Positions page to refetch over Socket.IO (port 5000).
+
+        Live LTP in the browser is supposed to come from the 8765 ZeroMQ proxy.
+        When that socket is not tunneled, Socket.IO on the Flask port is the
+        path that still reaches a laptop browser. Throttled to 1s.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_last_mtm_emit", 0.0)
+        if now - last < 1.0:
+            return
+        self._last_mtm_emit = now
+        try:
+            from extensions import socketio
+
+            socketio.emit("analyzer_update", {"source": "sandbox_mtm"})
+        except Exception:
+            logger.debug("could not emit sandbox MTM refresh", exc_info=True)
 
     def _update_single_position_mtm(self, position):
         """

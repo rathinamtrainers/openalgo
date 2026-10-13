@@ -89,7 +89,7 @@ export function useLivePrice<T extends PriceableItem>(
   } = options
 
   const { apiKey } = useAuthStore()
-  const { isMarketOpen, isAnyMarketOpen } = useMarketStatus()
+  const { isAnyMarketOpen } = useMarketStatus()
   const { isVisible, wasHidden, timeSinceHidden } = usePageVisibility()
   const anyMarketOpen = isAnyMarketOpen()
 
@@ -121,8 +121,10 @@ export function useLivePrice<T extends PriceableItem>(
     enabled: enabled && items.length > 0,
   })
 
-  // Effective live status
-  const isLive = wsConnected && anyMarketOpen && !wsPaused
+  // Live when the 8765 proxy is connected. Do not require market-timings —
+  // /admin/api/timings can be empty or omit NFO, which used to hide ticks
+  // even while ZeroMQ was delivering LTP.
+  const isLive = wsConnected && !wsPaused
 
   /**
    * Fetch MultiQuotes data from API
@@ -217,15 +219,12 @@ export function useLivePrice<T extends PriceableItem>(
       const qty = item.quantity || 0
       const avgPrice = item.average_price || 0
 
-      // Check if market is open for this exchange
-      const exchangeMarketOpen = isMarketOpen(item.exchange)
-
-      // Check if WebSocket LTP is fresh AND market is open
-      const hasWsData =
-        exchangeMarketOpen &&
+      // Fresh ZeroMQ LTP wins even if timings omit this exchange (NFO/BFO).
+      const hasWsData = Boolean(
         wsData?.data?.ltp &&
-        wsData.lastUpdate &&
-        Date.now() - wsData.lastUpdate < staleThreshold
+          wsData.lastUpdate &&
+          Date.now() - wsData.lastUpdate < staleThreshold
+      )
 
       // Check if we have MultiQuotes data (fallback when WebSocket not available)
       const hasMqData = !hasWsData && mqData?.ltp
@@ -296,7 +295,7 @@ export function useLivePrice<T extends PriceableItem>(
         _dataSource: dataSource,
       } as T & { _dataSource: string }
     })
-  }, [items, marketData, multiQuotes, isMarketOpen, staleThreshold])
+  }, [items, marketData, multiQuotes, staleThreshold])
 
   return {
     data: enhancedData,

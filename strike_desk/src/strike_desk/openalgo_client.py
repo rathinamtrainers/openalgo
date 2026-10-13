@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import IST, Settings
 from .errors import OpenAlgoError, ReadOnlyViolation
 
 logger = logging.getLogger(__name__)
@@ -21,10 +21,32 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/positionbook",
         "/api/v1/market/timings",
         "/api/v1/quotes",
+        "/api/v1/history",
+        "/api/v1/expiry",
+        "/api/v1/optionchain",
     }
 )
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_TOKEN_MARKERS = ("access_token", "incorrect api_key", "invalid token")
+
+
+def _body_snippet(response: httpx.Response) -> str:
+    try:
+        parsed = response.json()
+    except ValueError:
+        text = (response.text or "").strip()
+        return f" {text[:200]}" if text else ""
+    if isinstance(parsed, dict):
+        message = parsed.get("message") or parsed.get("error")
+        if message:
+            return f" {str(message)[:200]}"
+    return ""
+
+
+def _token_dead(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TOKEN_MARKERS)
 
 
 class OpenAlgoClient:
@@ -63,11 +85,13 @@ class OpenAlgoClient:
             else:
                 if response.status_code in RETRYABLE_STATUS:
                     last_error = OpenAlgoError(
-                        f"{path}: HTTP {response.status_code}", status_code=response.status_code
+                        f"{path}: HTTP {response.status_code}{_body_snippet(response)}",
+                        status_code=response.status_code,
                     )
                 elif response.status_code != 200:
                     raise OpenAlgoError(
-                        f"{path}: HTTP {response.status_code}", status_code=response.status_code
+                        f"{path}: HTTP {response.status_code}{_body_snippet(response)}",
+                        status_code=response.status_code,
                     )
                 else:
                     try:
@@ -120,3 +144,68 @@ class OpenAlgoClient:
         if not isinstance(data, dict):
             raise OpenAlgoError("/api/v1/quotes: 'data' was not an object")
         return data
+
+    def history(
+        self,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, Any] | list[Any]:
+        """A short history window. Used to prove the broker token can still read the feed."""
+        data = self._post(
+            "/api/v1/history",
+            {
+                "symbol": symbol,
+                "exchange": exchange,
+                "interval": interval,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        ).get("data")
+        if data is None:
+            raise OpenAlgoError("/api/v1/history: 'data' was missing")
+        return data
+
+    def expiry_dates(self, symbol: str, exchange: str, instrumenttype: str) -> dict[str, Any]:
+        """Live F&O expiries. Read-only; used to freeze the current weekly chain."""
+        return self._post(
+            "/api/v1/expiry",
+            {"symbol": symbol, "exchange": exchange, "instrumenttype": instrumenttype},
+        )
+
+    def optionchain(self, underlying: str, exchange: str, expiry_date: str) -> dict[str, Any]:
+        """Full weekly chain with volume. Read-only; never places."""
+        return self._post(
+            "/api/v1/optionchain",
+            {
+                "underlying": underlying,
+                "exchange": exchange,
+                "expiry_date": expiry_date,
+            },
+        )
+
+    def broker_token_error(self) -> str | None:
+        """One quote and one history probe. Returns a detail when the access token is dead."""
+        settings = self._settings
+        today = datetime.now(tz=IST).date()
+        start = (today - timedelta(days=5)).isoformat()
+        end = today.isoformat()
+        try:
+            self.quotes(settings.index_symbol, settings.index_spot_exchange)
+        except OpenAlgoError as exc:
+            if _token_dead(exc):
+                return str(exc)
+        try:
+            self.history(
+                settings.index_symbol,
+                settings.index_spot_exchange,
+                "D",
+                start,
+                end,
+            )
+        except OpenAlgoError as exc:
+            if _token_dead(exc):
+                return str(exc)
+        return None

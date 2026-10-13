@@ -1667,7 +1667,7 @@ def _render_report(payload, errors_summary, errors_recent, fmt):
     h2 = "## " if is_md else ""
 
     lines = []
-    lines.append(f"{h1}OpenAlgo System Report")
+    lines.append(f"{h1}ZeroTouchAlgo System Report")
     lines.append("")
     lines.append(_md_kv("Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")) if is_md else f"Generated: {datetime.now()}")
     lines.append("")
@@ -1723,8 +1723,8 @@ def _render_report(payload, errors_summary, errors_recent, fmt):
 
     build = payload.get("build") or {}
     lines.append(f"{h2}Build")
-    lines.append(_md_kv("OpenAlgo", build.get("openalgo_version")))
-    lines.append(_md_kv("OpenAlgo SDK", build.get("openalgo_sdk_version")))
+    lines.append(_md_kv("ZeroTouchAlgo", build.get("openalgo_version")))
+    lines.append(_md_kv("SDK", build.get("openalgo_sdk_version")))
     lines.append(_md_kv("Git branch", build.get("git_branch")))
     lines.append(_md_kv("Git commit", build.get("git_commit")))
     lines.append(_md_kv("Frontend build", build.get("frontend_build_time")))

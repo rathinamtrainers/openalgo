@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from strike_desk.errors import AlreadyJournalled
-from strike_desk.journal import POSITION_ADOPTED, POSITION_FLAT, SCHEMA_VERSION
+from strike_desk.journal import POSITION_ADOPTED, POSITION_ARMED, POSITION_FLAT, SCHEMA_VERSION
 from tests.position_fixtures import seed_chain, today
 
 
@@ -70,6 +70,17 @@ def test_unadopted_orders_finds_a_filled_order(journal):
         **{**base_row(str(uuid.uuid4()), POSITION_ADOPTED), "order_id": ids["order_id"]}
     )
     assert journal.unadopted_orders(today()) == []
+
+
+def test_live_symbols_ignore_flattened_rows(journal):
+    live = str(uuid.uuid4())
+    done = str(uuid.uuid4())
+    journal.record_position_state(**base_row(done, POSITION_ADOPTED))
+    journal.record_position_state(**{**base_row(done, POSITION_FLAT), "symbol": "NIFTYFLATPE"})
+    journal.record_position_state(
+        **{**base_row(live, POSITION_ARMED), "symbol": "NIFTYLIVECE"}
+    )
+    assert journal.live_symbols(today()) == {"NIFTYLIVECE"}
 
 
 def test_rows_cannot_be_updated_or_deleted(journal):

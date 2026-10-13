@@ -207,10 +207,107 @@ def test_a_rejected_tool_is_counted_and_never_executed(strategist_harness) -> No
     assert strategist_harness.executed_tools() == [call["name"] for call in _read_rounds()]
 
 
-def test_no_submission_within_the_round_budget_is_degraded(strategist_harness) -> None:
+def test_no_submission_after_a_live_chain_is_atm_ce(strategist_harness) -> None:
+    """Prove overlay: six silent rounds with a live chain become current-week ATM CE."""
     result = strategist_harness.run(rounds=[_read_rounds()] * 6)
+    payload = result.payload
+    assert payload["status"] == STATUS_PROPOSED
+    assert payload["proposal"]["option_type"] == "CE"
+    assert payload["proposal"]["strike"] == 24800
+    assert payload["proposal"]["lots"] == 1
+    assert payload["defect"] is None
+
+
+def test_last_round_prose_after_a_chain_is_atm_not_chain_unread(strategist_harness) -> None:
+    result = strategist_harness.run(rounds=[_read_rounds()])
+    payload = result.payload
+    assert payload["status"] == STATUS_PROPOSED
+    assert payload["proposal"]["symbol"] == SYMBOL
+
+
+def test_bearish_rationale_selects_atm_pe(strategist_harness) -> None:
+    from tests.chain_fixtures import option_greeks_pe
+
+    for tool in strategist_harness.source.tools(""):
+        if tool.name == "get_option_greeks":
+            tool.output = option_greeks_pe()
+    result = strategist_harness.run(
+        rounds=[_read_rounds()],
+        regime_rationale="bearish. Daily -DI led +DI and ADX 33.46 confirms the down move.",
+    )
+    payload = result.payload
+    assert payload["status"] == STATUS_PROPOSED
+    assert payload["proposal"]["option_type"] == "PE"
+    assert payload["proposal"]["direction"] == "bearish"
+    assert payload["proposal"]["symbol"].endswith("PE")
+
+
+def test_chain_without_greeks_is_no_contract_not_chain_unread(strategist_harness) -> None:
+    for tool in strategist_harness.source.tools(""):
+        if tool.name == "get_option_greeks":
+            tool.raises = True
+    result = strategist_harness.run(
+        rounds=[[{"name": "get_option_chain", "args": {"symbol": "NIFTY"}, "id": "c4"}]]
+    )
+    assert result.payload["status"] == STATUS_NO_CONTRACT
+    assert "greeks" in result.payload["rationale"]
+
+
+def test_no_chain_read_stays_degraded_as_no_submission(strategist_harness) -> None:
+    for tool in strategist_harness.source.tools(""):
+        if tool.name in {
+            "get_option_chain",
+            "get_option_greeks",
+            "get_option_symbol",
+            "get_expiry_dates",
+        }:
+            tool.raises = True
+    result = strategist_harness.run(
+        rounds=[[{"name": "get_trend_snapshot", "args": {"symbol": "NIFTY"}, "id": "c2"}]]
+    )
     assert result.payload["status"] == STATUS_DEGRADED
     assert "no submission" in result.payload["defect"]
+
+
+def test_closed_session_retries_then_proposes(strategist_harness) -> None:
+    from strike_desk.errors import McpSessionClosed
+
+    source = strategist_harness.source
+    attempts = {"n": 0}
+    original_submit = source.submit
+
+    def submit(factory, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise McpSessionClosed("MCP session closed during a tool call")
+        return original_submit(factory, timeout)
+
+    broken = {"n": 0}
+    source.submit = submit  # type: ignore[method-assign]
+    source.mark_broken = lambda: broken.__setitem__("n", broken["n"] + 1)  # type: ignore[method-assign]
+
+    result = strategist_harness.run(
+        rounds=[_read_rounds(), [{"name": SUBMIT_PROPOSAL, "args": proposal_args(), "id": "s"}]]
+    )
+    assert attempts["n"] == 2
+    assert broken["n"] == 1
+    assert result.payload["status"] == STATUS_PROPOSED
+
+
+def test_model_failure_still_proposes_atm_from_python_chain(strategist_harness) -> None:
+    class Boom:
+        async def ainvoke(self, *_args, **_kwargs):
+            raise RuntimeError("credit balance is too low")
+
+        def bind_tools(self, *_args, **_kwargs):
+            return self
+
+    strategist_harness.strategist._model = Boom()  # type: ignore[method-assign]
+    result = strategist_harness.run(rounds=[])
+    payload = result.payload
+    assert payload["status"] == STATUS_PROPOSED
+    assert payload["proposal"]["option_type"] == "CE"
+    assert payload["proposal"]["lots"] == 1
 
 
 def test_every_tool_failing_is_degraded_not_ungrounded(strategist_harness) -> None:
@@ -285,3 +382,56 @@ def test_the_spans_carry_what_ac9_requires(strategist_harness, journal) -> None:
         "playbook.artifact",
     ):
         assert key in attributes, key
+
+
+def test_atm_overlay_reads_a_wrapped_mcp_chain(settings) -> None:
+    from datetime import datetime
+
+    from strike_desk.config import IST
+    from strike_desk.grounding import EvidenceLedger, ToolObservation
+    from strike_desk.options_strategist import try_atm_overlay
+    from strike_desk.playbook import Playbook
+    from strike_desk.specialists import SpecialistRequest
+    from tests.chain_fixtures import option_chain, option_greeks
+
+    inner = option_chain()
+    wrapped = str([{"type": "text", "text": inner}])
+    ledger = EvidenceLedger()
+    ledger.record(
+        ToolObservation(
+            call_id="c",
+            tool="get_option_chain",
+            args={},
+            output=wrapped,
+            ok=True,
+            latency_ms=1,
+            truncated=False,
+        )
+    )
+    ledger.record(
+        ToolObservation(
+            call_id="g",
+            tool="get_option_greeks",
+            args={},
+            output=option_greeks(),
+            ok=True,
+            latency_ms=1,
+            truncated=False,
+        )
+    )
+    request = SpecialistRequest(
+        tick_id="t",
+        index_symbol="NIFTY",
+        as_of=datetime(2026, 8, 25, 6, 0, tzinfo=IST),
+        book={"regime": {"rationale": "ADX at 27.4 confirms the move."}},
+    )
+    overlay = try_atm_overlay(
+        ledger,
+        request,
+        Playbook.from_settings(settings),
+        now_ist=datetime(2026, 8, 25, 11, 30, tzinfo=IST),
+        index_symbol="NIFTY",
+    )
+    assert overlay is not None
+    assert overlay.option_type == "CE"
+    assert overlay.strike == 24800

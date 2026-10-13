@@ -11,7 +11,7 @@ from limiter import limiter
 from services.holdings_service import get_holdings
 from services.orderbook_service import get_orderbook
 from services.place_smart_order_service import place_smart_order
-from services.positionbook_service import get_positionbook
+from services.positionbook_service import get_positionbook, get_positionbook_for_session
 from services.tradebook_service import get_tradebook
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -250,18 +250,7 @@ def positions():
         logger.error("Broker not set in session")
         return "Broker not set in session", 400
 
-    # Check if in analyze mode and route accordingly
-    if get_analyze_mode():
-        # Get API key for sandbox mode
-        api_key = get_api_key_for_tradingview(login_username)
-        if api_key:
-            success, response, status_code = get_positionbook(api_key=api_key)
-        else:
-            logger.error("No API key found for analyze mode")
-            return "API key required for analyze mode", 400
-    else:
-        # Use live broker
-        success, response, status_code = get_positionbook(auth_token=auth_token, broker=broker)
+    success, response, status_code = get_positionbook_for_session(login_username, broker)
 
     if not success:
         logger.error(f"Failed to get positions data: {response.get('message', 'Unknown error')}")

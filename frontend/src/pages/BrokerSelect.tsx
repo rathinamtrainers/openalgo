@@ -1,5 +1,6 @@
 import { BookOpen, ExternalLink, Info, Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { APP_NAME } from '@/config/branding'
 import { useAuthStore } from '@/stores/authStore'
 
 // All supported brokers with their display names and auth types
@@ -76,6 +78,7 @@ function generateRandomState(): string {
 }
 
 export default function BrokerSelect() {
+  const navigate = useNavigate()
   const { user } = useAuthStore()
   const [selectedBroker, setSelectedBroker] = useState<string>('')
   const [isLoading, setIsLoading] = useState(true)
@@ -84,6 +87,15 @@ export default function BrokerSelect() {
   const [brokerConfig, setBrokerConfig] = useState<BrokerConfig | null>(null)
 
   useEffect(() => {
+    try {
+      if (sessionStorage.getItem('oa-after-login') === '/btc') {
+        sessionStorage.removeItem('oa-after-login')
+        navigate('/btc', { replace: true })
+        return
+      }
+    } catch {
+      // ignore
+    }
     // Fetch broker configuration
     const fetchBrokerConfig = async () => {
       try {
@@ -107,7 +119,7 @@ export default function BrokerSelect() {
     }
 
     fetchBrokerConfig()
-  }, [])
+  }, [navigate])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -220,21 +232,23 @@ export default function BrokerSelect() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="app-shell flex items-center justify-center">
+        <div className="app-atmosphere" aria-hidden />
         <Loader2 className="h-8 w-8 animate-spin" />
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center py-8 px-4">
+    <div className="app-shell flex items-center justify-center py-8 px-4">
+      <div className="app-atmosphere" aria-hidden />
       <div className="container max-w-6xl">
         <div className="flex flex-col lg:flex-row items-center justify-between gap-8 lg:gap-16">
           {/* Right side broker form - Shown first on mobile */}
-          <Card className="w-full max-w-md shadow-xl order-1 lg:order-2">
+          <Card className="w-full max-w-md order-1 lg:order-2">
             <CardHeader className="text-center">
               <div className="flex justify-center mb-4">
-                <img src="/logo.png" alt="OpenAlgo" className="h-20 w-20" />
+                <img src="/logo.png" alt={APP_NAME} className="h-20 w-20" />
               </div>
               <CardTitle className="text-2xl">Connect Your Trading Account</CardTitle>
               <CardDescription>
@@ -307,7 +321,7 @@ export default function BrokerSelect() {
               Connect Your <span className="text-primary">Broker</span>
             </h1>
             <p className="text-lg lg:text-xl mb-8 text-muted-foreground">
-              Link your trading account to start executing trades through OpenAlgo's algorithmic
+              Link your trading account to start executing trades through {APP_NAME}'s algorithmic
               trading platform.
             </p>
 

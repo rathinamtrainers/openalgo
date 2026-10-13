@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from strike_desk.config import IST, Settings, get_settings
-from strike_desk.journal import POSITION_FLAT, SCHEMA_VERSION, Journal
+from strike_desk.journal import POSITION_ARMED, POSITION_FLAT, SCHEMA_VERSION, Journal
 from strike_desk.levels import ExitLevels
 
 STRATEGY = "strike-desk-NIFTY"
@@ -43,6 +43,9 @@ def seed_chain(
     time_stop_ist: str = "14:45",
     quantity: int = 75,
     symbol: str = SYMBOL,
+    with_fill: bool = True,
+    rationale: str = "seeded by the test fixtures for the position monitor",
+    expiry: str = "2026-09-30",
 ) -> dict[str, str]:
     """Write the proposal, approval and order rows one adoption needs, and return the ids."""
     now = datetime.now(tz=UTC)
@@ -66,7 +69,7 @@ def seed_chain(
         regime_confidence=0.8,
         direction="bullish",
         symbol=symbol,
-        expiry="2026-09-30",
+        expiry=expiry,
         strike=25000.0,
         option_type="CE",
         lots=1,
@@ -82,7 +85,7 @@ def seed_chain(
         stop_price=stop,
         target_price=target,
         time_stop_ist=time_stop_ist,
-        rationale="seeded by the test fixtures for the position monitor",
+        rationale=rationale,
         evidence_json="[]",
         playbook_artifact="pb-1",
         playbook_verdict="pass",
@@ -103,68 +106,105 @@ def seed_chain(
         latency_ms=0,
         schema_version=SCHEMA_VERSION,
     )
-    journal.record_approval(
-        approval_id=approval_id,
-        status="approved",
-        tick_id=tick_id,
-        trace_id=trace_id,
-        tick_trace_id=trace_id,
-        proposal_id=proposal_id,
-        verdict_id=None,
-        created_at_utc=now,
-        trading_day=day,
-        index_symbol="NIFTY",
-        symbol=symbol,
-        exchange="NFO",
-        action="BUY",
-        product="MIS",
-        lots=1,
-        lot_size=quantity,
-        quantity=quantity,
-        limit_price=105.0,
-        band_low=100.0,
-        band_high=105.0,
-        pending_order_id=1,
-        strategy_tag=STRATEGY,
-        deadline_utc=now + timedelta(minutes=5),
-        wait_seconds=3.0,
-        approved_by="tester",
-        resolved_at_ist=None,
-        broker_order_id="B-1",
-        withdrawal=None,
-        detail="seeded",
-        payload_json="{}",
-        response_json="{}",
-        defect=False,
-    )
-    journal.record_order(
-        order_id=order_id,
-        approval_id=approval_id,
-        tick_id=tick_id,
-        trace_id=trace_id,
-        created_at_utc=now,
-        trading_day=day,
-        pending_order_id=1,
-        broker_order_id="B-1",
-        symbol=symbol,
-        exchange="NFO",
-        action="BUY",
-        product="MIS",
-        price_type="LIMIT",
-        limit_price=105.0,
-        lots=1,
-        lot_size=quantity,
-        quantity=quantity,
-        order_status="complete",
-        average_price=102.5,
-        raw_json="{}",
-    )
+    if with_fill:
+        journal.record_approval(
+            approval_id=approval_id,
+            status="approved",
+            tick_id=tick_id,
+            trace_id=trace_id,
+            tick_trace_id=trace_id,
+            proposal_id=proposal_id,
+            verdict_id=None,
+            created_at_utc=now,
+            trading_day=day,
+            index_symbol="NIFTY",
+            symbol=symbol,
+            exchange="NFO",
+            action="BUY",
+            product="MIS",
+            lots=1,
+            lot_size=quantity,
+            quantity=quantity,
+            limit_price=105.0,
+            band_low=100.0,
+            band_high=105.0,
+            pending_order_id=1,
+            strategy_tag=STRATEGY,
+            deadline_utc=now + timedelta(minutes=5),
+            wait_seconds=3.0,
+            approved_by="tester",
+            resolved_at_ist=None,
+            broker_order_id="B-1",
+            withdrawal=None,
+            detail="seeded",
+            payload_json="{}",
+            response_json="{}",
+            defect=False,
+        )
+        journal.record_order(
+            order_id=order_id,
+            approval_id=approval_id,
+            tick_id=tick_id,
+            trace_id=trace_id,
+            created_at_utc=now,
+            trading_day=day,
+            pending_order_id=1,
+            broker_order_id="B-1",
+            symbol=symbol,
+            exchange="NFO",
+            action="BUY",
+            product="MIS",
+            price_type="LIMIT",
+            limit_price=105.0,
+            lots=1,
+            lot_size=quantity,
+            quantity=quantity,
+            order_status="complete",
+            average_price=102.5,
+            raw_json="{}",
+        )
     return {
         "proposal_id": proposal_id,
-        "approval_id": approval_id,
-        "order_id": order_id,
+        "approval_id": approval_id if with_fill else "",
+        "order_id": order_id if with_fill else "",
         "tick_id": tick_id,
     }
+
+
+def seed_armed_position(
+    journal: Journal,
+    *,
+    symbol: str,
+    trading_day: str,
+    quantity: int = 75,
+) -> str:
+    """A live monitor row so a tick with this symbol in the book is a routine hold."""
+    position_id = str(uuid.uuid4())
+    journal.record_position_state(
+        position_id=position_id,
+        state=POSITION_ARMED,
+        order_id=None,
+        approval_id=None,
+        proposal_id=None,
+        tick_id=None,
+        trace_id="0" * 32,
+        created_at_utc=datetime.now(tz=UTC),
+        trading_day=trading_day,
+        symbol=symbol,
+        exchange="NFO",
+        product="MIS",
+        quantity=quantity,
+        entry_price=102.5,
+        stop_price=80.0,
+        target_price=140.0,
+        time_stop_utc=datetime.now(tz=UTC) + timedelta(minutes=30),
+        theta_per_day=-4.2,
+        exit_reason=None,
+        realised_pnl=None,
+        detail="seeded armed",
+        defect=False,
+    )
+    return position_id
 
 
 def seed_flat_loss(journal: Journal, *, realised: float = -600.0, day: str = SEED_DAY) -> str:

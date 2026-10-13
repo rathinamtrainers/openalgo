@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -17,16 +19,21 @@ from opentelemetry.trace import Status, StatusCode
 from pydantic import ValidationError
 
 from .config import IST, Settings
-from .errors import SpecialistTimeout
+from .ema120 import format_trailer as format_ema_trailer
+from .errors import McpSessionClosed, SpecialistTimeout
 from .grounding import (
+    EvidenceItem,
     EvidenceLedger,
     NoContractSubmission,
     ProposalSubmission,
     ToolObservation,
+    tool_output_ok,
+    unwrap_tool_output,
     validate_no_contract,
     validate_proposal,
 )
 from .journal import SCHEMA_VERSION
+from .ltp_fade.exits import format_trailer
 from .mcp_toolbox import ToolSource
 from .model_client import build_strategist_model, strategist_cost_micros, token_usage
 from .observability import get_tracer
@@ -37,6 +44,7 @@ from .specialists import ROLE_STRATEGIST, SpecialistRequest, SpecialistResult
 logger = logging.getLogger(__name__)
 
 PROMPT_NAME = "options_strategist"
+_active_playbook: ContextVar[Playbook | None] = ContextVar("sd_slot_playbook", default=None)
 SUBMIT_PROPOSAL = "submit_proposal"
 SUBMIT_NO_CONTRACT = "submit_no_viable_contract"
 
@@ -49,6 +57,421 @@ STATUS_DEGRADED = "degraded"
 VERDICT_PASS = "pass"  # nosec B105 — playbook verdict, not a credential
 VERDICT_FAIL = "fail"
 VERDICT_NA = "n/a"
+
+_MONTHS = (
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC",
+)
+
+
+def direction_from_regime(request: SpecialistRequest) -> tuple[str, str]:
+    """Fade tag wins when live; EMA120 side next; otherwise Jev: bearish → PE, else CE."""
+    fade = request.book.get("ltp_fade") if isinstance(request.book, dict) else None
+    if isinstance(fade, dict) and fade.get("tag") == "CE":
+        return "bullish", "CE"
+    if isinstance(fade, dict) and fade.get("tag") == "PE":
+        return "bearish", "PE"
+    ema = request.book.get("ema120") if isinstance(request.book, dict) else None
+    if isinstance(ema, dict) and ema.get("side") == "long":
+        return "bullish", "CE"
+    if isinstance(ema, dict) and ema.get("side") == "short":
+        return "bearish", "PE"
+    rationale = str((request.book.get("regime") or {}).get("rationale") or "").strip().lower()
+    if rationale.startswith("bearish"):
+        return "bearish", "PE"
+    return "bullish", "CE"
+
+
+def _stamp_ema120(
+    proposal: ProposalSubmission, request: SpecialistRequest, playbook: Playbook
+) -> ProposalSubmission:
+    """Force the EMA trailer and expiry-cutoff time-stop onto a live proposal."""
+    ema = request.book.get("ema120") if isinstance(request.book, dict) else None
+    if not isinstance(ema, dict) or ema.get("side") not in {"long", "short"}:
+        return proposal
+    trailer = format_ema_trailer(
+        str(ema["side"]), float(ema["ema_high"]), float(ema["ema_low"])
+    )
+    rationale = proposal.rationale or ""
+    if "[ema120]" not in rationale:
+        rationale = f"{rationale} {trailer}".strip()
+    return proposal.model_copy(
+        update={"rationale": rationale, "time_stop_ist": playbook.time_stop}
+    )
+
+
+def _fade_context(request: SpecialistRequest) -> str:
+    fade = request.book.get("ltp_fade") if isinstance(request.book, dict) else None
+    if not isinstance(fade, dict) or fade.get("state") != "FROZEN":
+        return ""
+    return (
+        f"LTP 9:20 fade ({fade.get('reversal_mode')}): tag={fade.get('tag')} "
+        f"spot={fade.get('spot')} EOS-1={fade.get('eos1')} EOR+1={fade.get('eor1')}. "
+        "Buy the tagged ATM-SPOT side. Exits are 50% premium, spot target, "
+        "spot level±10, flatten 15:29.\n"
+    )
+
+
+def _fmt_num(value: float | int) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return str(number)
+
+
+_ISO_DATE = re.compile(r"(20\d{2})-(\d{2})-(\d{2})")
+_DDMONYY = re.compile(
+    r"(\d{2})-?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)-?(\d{2,4})",
+    re.IGNORECASE,
+)
+
+
+def _expiry_iso(raw: str) -> str | None:
+    text = (raw or "").strip().upper()
+    token = _DDMONYY.search(text)
+    if token:
+        year = token.group(3)
+        if len(year) == 4:
+            year = year[2:]
+        month = _MONTHS.index(token.group(2).upper()) + 1
+        return f"20{year}-{month:02d}-{int(token.group(1)):02d}"
+    iso = _ISO_DATE.search(text)
+    if iso:
+        return f"{iso.group(1)}-{iso.group(2)}-{iso.group(3)}"
+    return None
+
+
+def _expiry_ddmmmyy(iso: str) -> str:
+    year, month, day = iso.split("-")
+    return f"{int(day):02d}{_MONTHS[int(month) - 1]}{year[-2:]}"
+
+
+def _nearest_expiry(payload: dict[str, Any], playbook: Playbook, now_ist: datetime) -> str | None:
+    blob = json.dumps(payload)
+    seen: list[str] = []
+    for match in _ISO_DATE.finditer(blob):
+        seen.append(f"{match.group(1)}-{match.group(2)}-{match.group(3)}")
+    for match in _DDMONYY.finditer(blob):
+        parsed = _expiry_iso(match.group(0))
+        if parsed:
+            seen.append(parsed)
+    unique = list(dict.fromkeys(seen))
+    today = now_ist.date()
+    in_band: list[tuple[int, str]] = []
+    future: list[tuple[int, str]] = []
+    for iso in unique:
+        try:
+            dte = (date.fromisoformat(iso) - today).days
+        except ValueError:
+            continue
+        if dte < 0:
+            continue
+        future.append((dte, iso))
+        if playbook.min_days_to_expiry <= dte <= playbook.max_days_to_expiry:
+            in_band.append((dte, iso))
+    chosen = [item for item in in_band if item[0] >= 2] or in_band or future
+    chosen.sort()
+    return chosen[0][1] if chosen else None
+
+
+def _openalgo_option_symbol(index: str, expiry: str, strike: float, option_type: str) -> str:
+    year, month, day = expiry.split("-")
+    return (
+        f"{index}{int(day):02d}{_MONTHS[int(month) - 1]}{year[-2:]}{_fmt_num(strike)}{option_type}"
+    )
+
+
+def _tool_json(raw: str) -> dict[str, Any] | None:
+    text = unwrap_tool_output(raw).strip()
+    if not text:
+        return None
+    try:
+        payload: Any = json.loads(text)
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except ValueError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _as_data(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    return data if isinstance(data, dict) else payload
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_ok_json(ledger: EvidenceLedger, name: str) -> dict[str, Any] | None:
+    for observation in reversed(ledger.observations):
+        if observation.tool == name and observation.ok:
+            parsed = _tool_json(observation.output)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _observe_symbol(ledger: EvidenceLedger, symbol: str) -> None:
+    """Grounding requires the tradable symbol to appear in a tool output."""
+    if symbol in ledger.text():
+        return
+    ledger.record(
+        ToolObservation(
+            call_id="atm-overlay-symbol",
+            tool="get_option_symbol",
+            args={"offset": "ATM"},
+            output=json.dumps({"status": "success", "data": {"symbol": symbol}}, sort_keys=True),
+            ok=True,
+            latency_ms=0,
+            truncated=False,
+        )
+    )
+
+
+def try_atm_overlay(
+    ledger: EvidenceLedger,
+    request: SpecialistRequest,
+    playbook: Playbook,
+    *,
+    now_ist: datetime,
+    index_symbol: str,
+) -> ProposalSubmission | NoContractSubmission | None:
+    """Current-week ATM from a live chain when Sonnet did not submit.
+
+    Returns ``None`` when ``get_option_chain`` never succeeded — the caller stays
+    degraded, honestly, rather than inventing a contract.
+    """
+    chain_payload = _last_ok_json(ledger, "get_option_chain")
+    if chain_payload is None:
+        return None
+    data = _as_data(chain_payload)
+    atm = _as_float(data.get("atm_strike"))
+    expiry = _expiry_iso(str(data.get("expiry") or data.get("expiry_date") or "")) or ""
+    rows = data.get("chain")
+    chain_ok = EvidenceItem(tool="get_option_chain", field="status", value="success")
+    if atm is None or not expiry or not isinstance(rows, list):
+        return NoContractSubmission(
+            reason="The option chain was read but it had no ATM strike, expiry, or ladder.",
+            evidence=[chain_ok],
+        )
+
+    direction, option_type = direction_from_regime(request)
+    row: dict[str, Any] | None = None
+    for item in rows:
+        if isinstance(item, dict) and _as_float(item.get("strike")) == atm:
+            row = item
+            break
+    if row is None:
+        return NoContractSubmission(
+            reason=(
+                f"The live chain has no row at ATM strike {_fmt_num(atm)}, "
+                "so no contract is proposed."
+            ),
+            evidence=[
+                EvidenceItem(tool="get_option_chain", field="atm_strike", value=_fmt_num(atm))
+            ],
+        )
+
+    leg = None
+    for key in (option_type, option_type.lower(), option_type.capitalize()):
+        candidate = row.get(key)
+        if isinstance(candidate, dict):
+            leg = candidate
+            break
+    if not isinstance(leg, dict):
+        return NoContractSubmission(
+            reason=(
+                f"ATM strike {_fmt_num(atm)} is on the chain but the {option_type} "
+                "leg was missing, so no contract is proposed."
+            ),
+            evidence=[
+                EvidenceItem(tool="get_option_chain", field="atm_strike", value=_fmt_num(atm))
+            ],
+        )
+
+    bid = _as_float(leg.get("bid"))
+    ask = _as_float(leg.get("ask"))
+    open_interest = _as_float(
+        leg.get("oi") if leg.get("oi") is not None else leg.get("open_interest")
+    )
+    lot_size = _as_float(
+        leg.get("lotsize") if leg.get("lotsize") is not None else leg.get("lot_size")
+    )
+    if bid is None or ask is None or open_interest is None or lot_size is None:
+        return NoContractSubmission(
+            reason=(
+                f"ATM {option_type} at strike {_fmt_num(atm)} is on the chain but the "
+                "quote, open interest, or lot size was missing."
+            ),
+            evidence=[
+                EvidenceItem(tool="get_option_chain", field="atm_strike", value=_fmt_num(atm))
+            ],
+        )
+
+    symbol_payload = _last_ok_json(ledger, "get_option_symbol")
+    symbol = str(leg.get("symbol") or "") or _openalgo_option_symbol(
+        index_symbol, expiry, atm, option_type
+    )
+    if symbol_payload is not None:
+        reported = str(_as_data(symbol_payload).get("symbol") or "")
+        reported_type = str(_as_data(symbol_payload).get("option_type") or "").upper()
+        if reported and (reported_type == option_type or reported.endswith(option_type)):
+            symbol = reported
+
+    greeks_payload = _last_ok_json(ledger, "get_option_greeks")
+    atm_evidence = EvidenceItem(tool="get_option_chain", field="atm_strike", value=_fmt_num(atm))
+    if greeks_payload is None:
+        return NoContractSubmission(
+            reason=(
+                f"ATM {_fmt_num(atm)} {option_type} is on the chain but matching "
+                "greeks were not fetched this tick."
+            ),
+            evidence=[atm_evidence],
+        )
+    gdata = _as_data(greeks_payload)
+    nested = gdata.get("greeks") if isinstance(gdata.get("greeks"), dict) else {}
+    greeks_symbol = str(gdata.get("symbol") or "")
+    greeks_strike = _as_float(gdata.get("strike"))
+    if greeks_symbol.endswith(option_type):
+        symbol = greeks_symbol
+    elif greeks_symbol and greeks_symbol != symbol:
+        return NoContractSubmission(
+            reason=(
+                f"ATM {_fmt_num(atm)} {option_type} is on the chain but matching "
+                "greeks were not fetched this tick."
+            ),
+            evidence=[atm_evidence],
+        )
+    elif greeks_strike is not None and greeks_strike != atm:
+        return NoContractSubmission(
+            reason=(
+                f"ATM {_fmt_num(atm)} {option_type} is on the chain but matching "
+                "greeks were not fetched this tick."
+            ),
+            evidence=[atm_evidence],
+        )
+
+    delta = _as_float(
+        gdata.get("delta") if gdata.get("delta") is not None else nested.get("delta")
+    )
+    implied_volatility = _as_float(
+        gdata.get("iv")
+        if gdata.get("iv") is not None
+        else gdata.get("implied_volatility")
+        if gdata.get("implied_volatility") is not None
+        else nested.get("implied_volatility")
+    )
+    theta = _as_float(
+        gdata.get("theta") if gdata.get("theta") is not None else nested.get("theta")
+    )
+    if delta is None or implied_volatility is None or theta is None:
+        return NoContractSubmission(
+            reason=(
+                f"ATM {_fmt_num(atm)} {option_type} is on the chain but matching "
+                "greeks were not fetched this tick."
+            ),
+            evidence=[atm_evidence],
+        )
+
+    if playbook.time_stop_time <= now_ist.time():
+        return NoContractSubmission(
+            reason=(
+                f"ATM {_fmt_num(atm)} {option_type} is on the chain but the playbook "
+                f"time-stop {playbook.time_stop} is not in the future."
+            ),
+            evidence=[atm_evidence],
+        )
+
+    lots = 1
+    quantity = int(lot_size) * lots
+    premium_high = ask
+    breakeven = atm + premium_high if option_type == "CE" else atm - premium_high
+    fade = request.book.get("ltp_fade") if isinstance(request.book, dict) else None
+    fade_live = isinstance(fade, dict) and fade.get("tag") in {"CE", "PE"}
+    if fade_live:
+        stop_price = round(ask * 0.50, 2)
+        target_price = round(max(ask * 10.0, stop_price + 1.0), 2)
+        time_stop_ist = "15:29"
+        tgt = fade.get("tgt_ce") if option_type == "CE" else fade.get("tgt_pe")
+        sl = fade.get("sl_ce_spot") if option_type == "CE" else fade.get("sl_pe_spot")
+        trailer = format_trailer(option_type, tgt, sl)
+        rationale = (
+            f"{direction} LTP 9:20 fade ATM {option_type} at strike {_fmt_num(atm)}, "
+            f"bid {_fmt_num(bid)} ask {_fmt_num(ask)}. "
+            f"{trailer}"
+        )
+    else:
+        stop_price = round(bid * 0.80, 2)
+        target_price = round(ask * 1.40, 2)
+        time_stop_ist = playbook.time_stop
+        rationale = (
+            f"{direction} ATM overlay: current-week {option_type} at strike {_fmt_num(atm)}, "
+            f"bid {_fmt_num(bid)} ask {_fmt_num(ask)}, "
+            f"open interest {_fmt_num(open_interest)}, delta {_fmt_num(delta)}, "
+            f"IV {_fmt_num(implied_volatility)}."
+        )
+        ema = request.book.get("ema120") if isinstance(request.book, dict) else None
+        if isinstance(ema, dict) and ema.get("side") in {"long", "short"}:
+            time_stop_ist = playbook.time_stop
+            trailer = format_ema_trailer(
+                str(ema["side"]), float(ema["ema_high"]), float(ema["ema_low"])
+            )
+            rationale = (
+                f"{direction} EMA120 ATM {option_type} at strike {_fmt_num(atm)}, "
+                f"bid {_fmt_num(bid)} ask {_fmt_num(ask)}. {trailer}"
+            )
+    return ProposalSubmission(
+        direction=direction,  # type: ignore[arg-type]
+        index_symbol=index_symbol,
+        expiry=expiry,
+        strike=atm,
+        option_type=option_type,  # type: ignore[arg-type]
+        symbol=symbol,
+        lot_size=int(lot_size),
+        lots=lots,
+        quantity=quantity,
+        bid=bid,
+        ask=ask,
+        entry_price_low=bid,
+        entry_price_high=ask,
+        delta=delta,
+        theta_per_day=theta,
+        implied_volatility=implied_volatility,
+        open_interest=int(open_interest),
+        breakeven=breakeven,
+        stop_price=stop_price,
+        target_price=target_price,
+        time_stop_ist=time_stop_ist,
+        rationale=rationale,
+        evidence=[
+            atm_evidence,
+            EvidenceItem(tool="get_option_chain", field="bid", value=_fmt_num(bid)),
+            EvidenceItem(tool="get_option_chain", field="ask", value=_fmt_num(ask)),
+            EvidenceItem(tool="get_option_chain", field="oi", value=_fmt_num(open_interest)),
+            EvidenceItem(tool="get_option_chain", field="lotsize", value=_fmt_num(lot_size)),
+            EvidenceItem(tool="get_option_greeks", field="delta", value=_fmt_num(delta)),
+            EvidenceItem(tool="get_option_greeks", field="iv", value=_fmt_num(implied_volatility)),
+            EvidenceItem(tool="get_option_greeks", field="theta", value=_fmt_num(theta)),
+        ],
+    )
 
 
 def _interceptor(name: str, schema: type, description: str) -> StructuredTool:
@@ -116,12 +539,20 @@ class OptionsStrategist:
         self._artifact = prompts.get(PROMPT_NAME)
         self._tool_source = tool_source
         self._model = model
-        self._playbook = Playbook.from_settings(settings)
+        self._base_playbook = Playbook.from_settings(settings)
         self._tracer = get_tracer()
 
     @property
     def playbook(self) -> Playbook:
-        return self._playbook
+        return _active_playbook.get() or self._base_playbook
+
+    def _playbook_for(self, request: SpecialistRequest) -> Playbook:
+        mode = (request.book or {}).get("playbook_mode")
+        if mode == "ema120":
+            return Playbook.from_settings(
+                self._settings.model_copy(update={"playbook_mode": "ema120"})
+            )
+        return self._base_playbook
 
     # -- entry point --------------------------------------------------------
 
@@ -129,13 +560,22 @@ class OptionsStrategist:
         """Called by the registry, on a worker thread, under the registry's timeout."""
         started = time.monotonic()
         proposal_id = str(uuid.uuid4())
+        token = _active_playbook.set(self._playbook_for(request))
+        try:
+            return self._run_bound(request, proposal_id, started)
+        finally:
+            _active_playbook.reset(token)
+
+    def _run_bound(
+        self, request: SpecialistRequest, proposal_id: str, started: float
+    ) -> SpecialistResult:
         with self._tracer.start_as_current_span("strategy.propose") as span:
             span.set_attribute("strategy.proposal_id", proposal_id)
             span.set_attribute("strike_desk.tick_id", request.tick_id)
             span.set_attribute("strike_desk.index", request.index_symbol)
             span.set_attribute("prompt.name", self._artifact.name)
             span.set_attribute("prompt.version", self._artifact.version)
-            span.set_attribute("playbook.artifact", self._playbook.artifact)
+            span.set_attribute("playbook.artifact", self.playbook.artifact)
             span.set_attribute("model.id", self._settings.strategist_model)
 
             outcome = self._propose(request)
@@ -177,7 +617,7 @@ class OptionsStrategist:
                     "rationale": outcome.rationale,
                     "evidence": outcome.evidence,
                     "calls": outcome.calls,
-                    "playbook_artifact": self._playbook.artifact,
+                    "playbook_artifact": self.playbook.artifact,
                     "playbook_verdict": outcome.verdict,
                     "violations": outcome.violations,
                     "defect": outcome.defect,
@@ -199,14 +639,30 @@ class OptionsStrategist:
 
     def _propose(self, request: SpecialistRequest) -> ProposalOutcome:
         now_ist = datetime.now(tz=IST)
-        self._tool_source.ensure_started()
-        try:
-            return self._tool_source.submit(
-                lambda: self._agent(request, now_ist),
-                timeout=self._settings.strategist_deadline_seconds,
-            )
-        except TimeoutError as exc:
-            raise SpecialistTimeout(ROLE_STRATEGIST, str(exc)) from exc
+        last_error = "MCP session closed during the proposal"
+        for attempt in (1, 2):
+            self._tool_source.ensure_started()
+            try:
+                return self._tool_source.submit(
+                    lambda: self._agent(request, now_ist),
+                    timeout=self._settings.strategist_deadline_seconds,
+                )
+            except TimeoutError as exc:
+                raise SpecialistTimeout(ROLE_STRATEGIST, str(exc)) from exc
+            except McpSessionClosed as exc:
+                last_error = str(exc) or last_error
+                self._tool_source.mark_broken()
+                logger.warning(
+                    "MCP session closed during proposal (attempt %d); reconnecting",
+                    attempt,
+                )
+                if attempt == 2:
+                    break
+        return ProposalOutcome(
+            status=STATUS_DEGRADED,
+            rationale="No contract could be proposed from this chain read.",
+            defect=last_error,
+        )
 
     # -- the loop -----------------------------------------------------------
 
@@ -218,7 +674,7 @@ class OptionsStrategist:
         ledger = EvidenceLedger()
         # The constraints the prompt states are facts the desk gave the agent, so a refusal
         # may name the band it failed without that citation being ungrounded.
-        ledger.record_playbook(self._playbook.describe())
+        ledger.record_playbook(self.playbook.describe())
         messages: list[Any] = [
             SystemMessage(content=self._system_prompt()),
             HumanMessage(content=self._context(request, now_ist)),
@@ -239,14 +695,20 @@ class OptionsStrategist:
                 try:
                     answer = await bound.ainvoke(messages)
                 except Exception as exc:  # noqa: BLE001 — one taxonomy for provider failures
+                    logger.exception("strategist model call failed")
                     span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
-                    return self._degraded(
-                        f"the model provider failed: {type(exc).__name__}",
+                    detail = str(exc).replace("\n", " ")[:240]
+                    await self._python_fill_chain(by_name, ledger, request, now_ist)
+                    return self._finish(
+                        None,
                         ledger,
+                        now_ist,
                         model_calls,
                         input_tokens,
                         output_tokens,
                         rejected,
+                        request,
+                        empty_defect=(f"the model provider failed: {type(exc).__name__}: {detail}"),
                     )
                 round_in, round_out = token_usage(answer)
                 model_calls += 1
@@ -272,6 +734,8 @@ class OptionsStrategist:
                 break
 
             if not calls:
+                if final:
+                    break
                 messages.append(
                     HumanMessage(
                         content=(
@@ -286,8 +750,102 @@ class OptionsStrategist:
                 if await self._execute(call, by_name, ledger, messages):
                     rejected += 1
 
+        if submitted is None:
+            await self._python_fill_chain(by_name, ledger, request, now_ist)
         return self._finish(
-            submitted, ledger, now_ist, model_calls, input_tokens, output_tokens, rejected
+            submitted,
+            ledger,
+            now_ist,
+            model_calls,
+            input_tokens,
+            output_tokens,
+            rejected,
+            request,
+        )
+
+    async def _python_fill_chain(
+        self,
+        by_name: dict[str, BaseTool],
+        ledger: EvidenceLedger,
+        request: SpecialistRequest,
+        now_ist: datetime,
+    ) -> None:
+        """Read expiry, chain, ATM symbol and greeks without waiting for Sonnet."""
+        sink: list[Any] = []
+        settings = self._settings
+        expiry_iso: str | None = None
+        if _last_ok_json(ledger, "get_option_chain") is None:
+            await self._execute(
+                {
+                    "name": "get_expiry_dates",
+                    "args": {
+                        "symbol": request.index_symbol,
+                        "exchange": settings.option_exchange,
+                        "instrument_type": "options",
+                    },
+                    "id": "atm-expiry",
+                },
+                by_name,
+                ledger,
+                sink,
+            )
+            payload = _last_ok_json(ledger, "get_expiry_dates")
+            if payload is not None:
+                expiry_iso = _nearest_expiry(payload, self.playbook, now_ist)
+                if expiry_iso is None:
+                    logger.warning(
+                        "python ATM overlay could not parse an expiry: %s",
+                        json.dumps(payload)[:240],
+                    )
+            chain_args: dict[str, Any] = {
+                "underlying": request.index_symbol,
+                "exchange": settings.index_spot_exchange,
+                "strike_count": 7,
+            }
+            if expiry_iso:
+                chain_args["expiry_date"] = _expiry_ddmmmyy(expiry_iso)
+            await self._execute(
+                {"name": "get_option_chain", "args": chain_args, "id": "atm-chain"},
+                by_name,
+                ledger,
+                sink,
+            )
+        chain_payload = _last_ok_json(ledger, "get_option_chain")
+        if chain_payload is not None and expiry_iso is None:
+            data = _as_data(chain_payload)
+            expiry_iso = _expiry_iso(str(data.get("expiry") or data.get("expiry_date") or ""))
+        if _last_ok_json(ledger, "get_option_greeks") is not None:
+            return
+        _direction, option_type = direction_from_regime(request)
+        symbol_args: dict[str, Any] = {
+            "underlying": request.index_symbol,
+            "exchange": settings.index_spot_exchange,
+            "offset": "ATM",
+            "option_type": option_type,
+        }
+        if expiry_iso:
+            symbol_args["expiry_date"] = _expiry_ddmmmyy(expiry_iso)
+        await self._execute(
+            {"name": "get_option_symbol", "args": symbol_args, "id": "atm-symbol"},
+            by_name,
+            ledger,
+            sink,
+        )
+        symbol = ""
+        symbol_payload = _last_ok_json(ledger, "get_option_symbol")
+        if symbol_payload is not None:
+            symbol = str(_as_data(symbol_payload).get("symbol") or "")
+        if not symbol:
+            return
+        await self._execute(
+            {
+                "name": "get_option_greeks",
+                "args": {"symbol": symbol, "exchange": settings.option_exchange},
+                "id": "atm-greeks",
+            },
+            by_name,
+            ledger,
+            sink,
         )
 
     async def _execute(
@@ -320,10 +878,13 @@ class OptionsStrategist:
                 try:
                     output, ok = str(await tool.ainvoke(args)), True
                 except Exception as exc:  # noqa: BLE001 — a bad call is data, not a crash
+                    if type(exc).__name__ == "ClosedResourceError":
+                        raise McpSessionClosed("MCP session closed during a tool call") from exc
                     span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
                     output, ok = f"Error calling {name}: {type(exc).__name__}: {exc}", False
-                if ok and output.lstrip().lower().startswith("error"):
-                    # OpenAlgo's MCP tools report failure as an error string, not an exception.
+                output = unwrap_tool_output(output)
+                if ok and not tool_output_ok(output):
+                    # OpenAlgo's MCP tools report failure as an error string or JSON status.
                     ok = False
 
             output, truncated = self._truncate(output)
@@ -398,12 +959,14 @@ class OptionsStrategist:
         input_tokens: int,
         output_tokens: int,
         rejected: int,
+        request: SpecialistRequest,
+        empty_defect: str | None = None,
     ) -> ProposalOutcome:
         base = self._base(ledger, model_calls, input_tokens, output_tokens, rejected)
 
         if ledger.successful_calls() == 0:
             return self._degraded(
-                "every tool call failed or none was made",
+                empty_defect or "every tool call failed or none was made",
                 ledger,
                 model_calls,
                 input_tokens,
@@ -411,14 +974,28 @@ class OptionsStrategist:
                 rejected,
             )
         if submitted is None:
-            return self._degraded(
-                f"no submission after {model_calls} model rounds",
+            overlay = try_atm_overlay(
                 ledger,
-                model_calls,
-                input_tokens,
-                output_tokens,
-                rejected,
+                request,
+                self.playbook,
+                now_ist=now_ist,
+                index_symbol=request.index_symbol,
             )
+            if overlay is None:
+                return self._degraded(
+                    empty_defect or f"no submission after {model_calls} model rounds",
+                    ledger,
+                    model_calls,
+                    input_tokens,
+                    output_tokens,
+                    rejected,
+                )
+            if isinstance(overlay, NoContractSubmission):
+                submitted = (SUBMIT_NO_CONTRACT, overlay.model_dump())
+            else:
+                _observe_symbol(ledger, overlay.symbol)
+                submitted = (SUBMIT_PROPOSAL, overlay.model_dump())
+            base = self._base(ledger, model_calls, input_tokens, output_tokens, rejected)
 
         name, args = submitted
         cap = self._settings.proposal_rationale_max_chars
@@ -459,8 +1036,9 @@ class OptionsStrategist:
                 **base,
             )
 
+        proposal = _stamp_ema120(proposal, request, self.playbook)
         evidence = [item.model_dump() for item in proposal.evidence]
-        contract = proposal.model_dump(exclude={"rationale", "evidence"})
+        contract = proposal.model_dump()
 
         defect = validate_proposal(proposal, ledger, cap)
         if defect is not None:
@@ -473,7 +1051,7 @@ class OptionsStrategist:
                 **base,
             )
 
-        violations = check(proposal, self._playbook, now_ist=now_ist)
+        violations = check(proposal, self.playbook, now_ist=now_ist)
         if violations:
             return ProposalOutcome(
                 status=STATUS_INVALID,
@@ -498,7 +1076,7 @@ class OptionsStrategist:
     # -- the request --------------------------------------------------------
 
     def _system_prompt(self) -> str:
-        return self._artifact.content.replace("{constraints}", self._playbook.describe())
+        return self._artifact.content.replace("{constraints}", self.playbook.describe())
 
     def _context(self, request: SpecialistRequest, now_ist: datetime) -> str:
         settings = self._settings
@@ -510,6 +1088,7 @@ class OptionsStrategist:
             f"Regime: {regime.get('label', 'unknown')} at "
             f"{regime.get('confidence', 0.0)} confidence. "
             f"Analyst said: {regime.get('rationale', '(nothing)')}\n"
+            f"{_fade_context(request)}"
             f"The book is flat; this would be the only open position.\n"
             f"Tool rounds available: {settings.strategist_max_rounds}. "
             "The final round accepts only a submission."
@@ -618,5 +1197,7 @@ __all__ = [
     "ProposalOutcome",
     "build_options_strategist",
     "build_proposal_row",
+    "direction_from_regime",
     "submission_tools",
+    "try_atm_overlay",
 ]

@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
+import { APP_NAME } from '@/config/branding'
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Home',
@@ -39,6 +40,8 @@ const PAGE_TITLES: Record<string, string> = {
   '/gex': 'GEX Dashboard',
   '/ivsmile': 'IV Smile',
   '/oiprofile': 'OI Profile',
+  '/arbitrage': 'Arbitrage',
+  '/btc': 'BTC Desk',
   '/websocket/test': 'WebSocket Test',
   '/strategy': 'Strategies',
   '/strategy/new': 'New Strategy',
@@ -98,7 +101,7 @@ function getPageTitle(pathname: string): string {
     }
   }
 
-  return 'OpenAlgo'
+  return APP_NAME
 }
 
 export function usePageTitle() {
@@ -106,6 +109,6 @@ export function usePageTitle() {
 
   useEffect(() => {
     const title = getPageTitle(pathname)
-    document.title = title === 'OpenAlgo' ? 'OpenAlgo' : `${title} | OpenAlgo`
+    document.title = title === APP_NAME ? APP_NAME : `${title} | ${APP_NAME}`
   }, [pathname])
 }

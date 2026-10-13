@@ -10,8 +10,13 @@
     },
     {
       "id": "REG-02",
-      "note": "one open index position — manage, never add",
-      "state": {"book": {"open_positions": [{"symbol": "NIFTY28JUL2624500CE"}]}},
+      "note": "one open index position the monitor is managing — hold, never add",
+      "state": {
+        "book": {
+          "open_positions": [{"symbol": "NIFTY28JUL2624500CE"}],
+          "unmanaged_symbols": []
+        }
+      },
       "expect": {"outcome": "hold", "reason_code": "position-open"}
     },
     {
@@ -306,6 +311,92 @@
         }
       },
       "expect": {"outcome": "decline", "reason_code": "daily-trade-cap"}
+    },
+    {
+      "id": "REG-27",
+      "note": "six strategist rounds with no submit is not an unread chain",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "proposal_status": "degraded",
+        "proposal_detail": "no submission after 6 model rounds"
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-no-submit"}
+    },
+    {
+      "id": "REG-28",
+      "note": "a daily side with a weak ADX is not a premium buy",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 0.80,
+        "trend_snapshot": {
+          "daily_plus_di": 12.4,
+          "daily_minus_di": 18.1,
+          "daily_adx": 18.2,
+          "ten_plus_di": 14.0,
+          "ten_minus_di": 20.0,
+          "ten_adx": 22.0
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "regime-weak-trend"}
+    },
+    {
+      "id": "REG-29",
+      "note": "28 Sep 2026 fill snapshot still clears the strength floors",
+      "state": {
+        "book": {"open_positions": []},
+        "regime_label": "trending",
+        "regime_confidence": 1.0,
+        "trend_snapshot": {
+          "daily_plus_di": 11.06,
+          "daily_minus_di": 35.62,
+          "daily_adx": 33.46,
+          "ten_plus_di": 14.24,
+          "ten_minus_di": 33.39,
+          "ten_adx": 41.31
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "specialist-unavailable"}
+    },
+    {
+      "id": "REG-30",
+      "note": "open broker lot with no journal position is a defect, not a hold",
+      "state": {
+        "book": {
+          "open_positions": [{"symbol": "NIFTY06OCT2622800PE"}],
+          "unmanaged_symbols": ["NIFTY06OCT2622800PE"]
+        }
+      },
+      "expect": {"outcome": "decline", "reason_code": "position-unmanaged"}
+    },
+    {
+      "id": "REG-31",
+      "note": "ema120 already in a trade does not add a second contract",
+      "settings": {"playbook_mode": "ema120"},
+      "state": {
+        "book": {"open_positions": [{"symbol": "NIFTY13OCT2624800CE"}]}
+      },
+      "expect": {"outcome": "hold", "reason_code": "ema-in-trade"}
+    },
+    {
+      "id": "REG-32",
+      "note": "ema120 waits when the last closed bar is between the bands",
+      "settings": {"playbook_mode": "ema120"},
+      "state": {
+        "book": {"open_positions": []},
+        "ema_no_signal": true,
+        "ema_signal": {
+          "side": null,
+          "ema_high": 25010.0,
+          "ema_low": 24820.0,
+          "close": 24900.0
+        },
+        "regime_label": "trending",
+        "regime_confidence": 1.0
+      },
+      "expect": {"outcome": "decline", "reason_code": "ema-no-signal"}
     }
   ]
 }

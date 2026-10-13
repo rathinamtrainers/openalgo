@@ -5,8 +5,8 @@ api_v1_bp = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 api = Api(
     api_v1_bp,
     version="1.0",
-    title="OpenAlgo API",
-    description="API for OpenAlgo Trading Platform",
+    title="ZeroTouchAlgo API",
+    description="API for ZeroTouchAlgo Trading Platform",
     doc=False,
 )
 

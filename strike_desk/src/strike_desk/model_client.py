@@ -27,17 +27,21 @@ def build_regime_model(settings: Settings) -> ChatAnthropic:
 
 
 def build_strategist_model(settings: Settings) -> ChatAnthropic:
-    """Claude Sonnet 5 — the deliberation tier. Temperature 0: a chooser, not a writer."""
+    """Claude Sonnet 5 — the deliberation tier.
+
+    Sonnet 5 returns HTTP 400 if ``temperature`` is set (including 0). Omit it and
+    disable adaptive thinking so the desk stays a chooser, not a writer.
+    """
     if settings.anthropic_api_key is None:
         raise ModelCallFailed("STRIKE_DESK_ANTHROPIC_API_KEY is not configured")
     return ChatAnthropic(
         model=settings.strategist_model,
-        temperature=settings.strategist_temperature,
         max_tokens=settings.strategist_max_output_tokens,
         timeout=settings.strategist_deadline_seconds,
         max_retries=1,
         stop=None,
         api_key=settings.anthropic_api_key,
+        thinking={"type": "disabled"},
     )
 
 

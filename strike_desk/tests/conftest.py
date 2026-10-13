@@ -146,6 +146,18 @@ def openalgo():
             return httpx.Response(200, json={"status": "success", "data": timings_for(day)})
 
         router.post("/api/v1/market/timings").mock(side_effect=timings)
+        router.post("/api/v1/quotes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "success",
+                    "data": {"symbol": "NIFTY", "ltp": 24812.35},
+                },
+            )
+        )
+        router.post("/api/v1/history").mock(
+            return_value=httpx.Response(200, json={"status": "success", "data": []})
+        )
         yield router
 
 
@@ -299,6 +311,9 @@ class LocalToolSource:
         if self.fail_to_start is not None:
             raise self.fail_to_start
 
+    def mark_broken(self) -> None:
+        return None
+
     def tools(self, role: str = "") -> list[BaseTool]:
         return list(self._tools)
 
@@ -369,7 +384,7 @@ def strategist_harness(settings, prompts, fake_tools, tracing, journal):
         def executed_tools(self) -> list[str]:
             return list(self._log)
 
-        def run(self, rounds, all_tools_fail: bool = False):
+        def run(self, rounds, all_tools_fail: bool = False, regime_rationale: str | None = None):
             if all_tools_fail:
                 for tool in fake_tools:
                     tool.raises = True
@@ -387,7 +402,7 @@ def strategist_harness(settings, prompts, fake_tools, tracing, journal):
                     "regime": {
                         "label": "trending",
                         "confidence": 0.78,
-                        "rationale": "ADX at 27.4 confirms the move.",
+                        "rationale": regime_rationale or "ADX at 27.4 confirms the move.",
                     },
                 },
             )

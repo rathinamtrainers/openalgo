@@ -21,10 +21,15 @@ from .autonomy import evaluate as autonomy_evaluate
 from .book_state import read_book_state
 from .config import IST, Settings
 from .decline_taxonomy import describe, render
-from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
+from .ema120 import read_signal
+from .errors import BookStateUnavailable, OpenAlgoError, SpecialistTimeout, SpecialistUnavailable
 from .exit_executor import exit_path_status
 from .grounding import ProposalSubmission
-from .journal import APPROVAL_PENDING, SCHEMA_VERSION, Journal
+from .journal import (
+    APPROVAL_PENDING,
+    SCHEMA_VERSION,
+    Journal,
+)
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
 from .openalgo_mirror import OpenAlgoMirror
@@ -76,6 +81,7 @@ from .specialists import (
     SpecialistRequest,
     SpecialistResult,
 )
+from .trend_strength import assess_trend_strength
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +90,14 @@ OUTCOME_DECLINE = "decline"
 OUTCOME_HOLD = "hold"
 
 REASON_POSITION_OPEN = "position-open"
+REASON_POSITION_UNMANAGED = "position-unmanaged"
 REASON_DATA_QUALITY = "data-quality"
 REASON_SPECIALIST_UNAVAILABLE = "specialist-unavailable"
 REASON_SPECIALIST_TIMEOUT = "specialist-timeout"
+REASON_SPECIALIST_NO_SUBMIT = "specialist-no-submit"
 REASON_REGIME_NOT_TRADEABLE = "regime-not-tradeable"
 REASON_REGIME_LOW_CONFIDENCE = "regime-low-confidence"
+REASON_REGIME_WEAK_TREND = "regime-weak-trend"
 REASON_REGIME_UNGROUNDED = "regime-ungrounded"
 REASON_TICK_TIMEOUT = "tick-timeout"
 REASON_INTERNAL_ERROR = "internal-error"
@@ -107,6 +116,8 @@ REASON_AUTONOMY_MODE_MISMATCH = "autonomy-mode-mismatch"
 REASON_MONITOR_UNAVAILABLE = "monitor-unavailable"
 REASON_DAILY_LOSS_CAP = "daily-loss-cap"
 REASON_DAILY_TRADE_CAP = "daily-trade-cap"
+REASON_EMA_NO_SIGNAL = "ema-no-signal"
+REASON_EMA_IN_TRADE = "ema-in-trade"
 
 TRADEABLE_REGIMES = frozenset({"trending", "range-bound"})
 
@@ -124,6 +135,7 @@ class TickState(TypedDict, total=False):
     regime_label: str | None
     regime_confidence: float | None
     regime_rationale: str | None
+    trend_snapshot: dict[str, float | None] | None
     regime_data_error: str | None
     specialist_error: dict[str, str] | None
     model_versions: list[str]
@@ -145,6 +157,9 @@ class TickState(TypedDict, total=False):
     autonomy_blocked: AutonomyVerdict | None
     approval: dict[str, Any] | None
     resolution: dict[str, Any] | None
+    broker_session_dead: str | None
+    ema_signal: dict[str, Any] | None
+    ema_no_signal: bool
 
 
 @dataclass
@@ -159,12 +174,50 @@ class TickDeps:
     gate: ApprovalGate | None = None
     monitor: Any | None = None
     mirror: OpenAlgoMirror | None = None
+    fade: Any | None = None
+
+
+def _position_symbol(position: Any) -> str:
+    if isinstance(position, dict):
+        return str(position.get("symbol") or "").strip().upper()
+    return str(getattr(position, "symbol", "") or "").strip().upper()
+
+
+def _unmanaged_symbols(journal: Journal, trading_day: str, positions: list[Any]) -> list[str]:
+    """Broker symbols that are open but have no live monitor row."""
+    live = journal.live_symbols(trading_day)
+    unmanaged: list[str] = []
+    for position in positions:
+        symbol = _position_symbol(position)
+        if symbol and symbol not in live:
+            unmanaged.append(symbol)
+    return unmanaged
 
 
 def _rationale(state: TickState) -> str | None:
     """The analyst's own sentence, when this tick had one."""
     text = (state.get("regime_rationale") or "").strip()
     return text or None
+
+
+def _fade_live(state: TickState) -> bool:
+    """A frozen first-touch CE/PE tag is waiting; ADX must not block it."""
+    fade = (state.get("book") or {}).get("ltp_fade") or {}
+    return (
+        fade.get("state") == "FROZEN"
+        and fade.get("tag") in {"CE", "PE"}
+        and not fade.get("entered_today")
+        and not fade.get("dual_tag")
+    )
+
+
+def _strength_block(state: TickState, settings: Settings) -> str | None:
+    """None when the tick never attached a snapshot, or when it clears the floors."""
+    snapshot = state.get("trend_snapshot")
+    if not snapshot:
+        return None
+    verdict = assess_trend_strength(snapshot, settings)
+    return None if verdict.ok else verdict.detail
 
 
 def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str]:
@@ -194,9 +247,41 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             render(REASON_DATA_QUALITY, max_chars=cap, variant="book", detail=book_error),
         )
 
+    token_dead = state.get("broker_session_dead")
+    if token_dead:
+        return (
+            OUTCOME_DECLINE,
+            REASON_DATA_QUALITY,
+            render(
+                REASON_DATA_QUALITY,
+                max_chars=cap,
+                variant="regime",
+                detail=str(token_dead),
+            ),
+        )
+
     book = state.get("book") or {}
     positions = book.get("open_positions") or []
     if positions:
+        unmanaged = list(book.get("unmanaged_symbols") or [])
+        if unmanaged:
+            return (
+                OUTCOME_DECLINE,
+                REASON_POSITION_UNMANAGED,
+                render(
+                    REASON_POSITION_UNMANAGED,
+                    max_chars=cap,
+                    symbols=", ".join(unmanaged),
+                    detail="no armed journal position",
+                ),
+            )
+        symbols = ", ".join(str(position.get("symbol", "?")) for position in positions)
+        if settings.ema120:
+            return (
+                OUTCOME_HOLD,
+                REASON_EMA_IN_TRADE,
+                render(REASON_EMA_IN_TRADE, max_chars=cap, symbols=symbols),
+            )
         return (
             OUTCOME_HOLD,
             REASON_POSITION_OPEN,
@@ -205,7 +290,7 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
                 max_chars=cap,
                 count=len(positions),
                 index=settings.index_symbol,
-                symbols=", ".join(str(position.get("symbol", "?")) for position in positions),
+                symbols=symbols,
             ),
         )
 
@@ -306,6 +391,25 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             render(REASON_SPECIALIST_UNAVAILABLE, max_chars=cap, role=role, detail=detail),
         )
 
+    if state.get("ema_no_signal") or (
+        settings.ema120
+        and not (state.get("ema_signal") or {}).get("side")
+        and state.get("regime_label") is not None
+    ):
+        signal = state.get("ema_signal") or {}
+        return (
+            OUTCOME_DECLINE,
+            REASON_EMA_NO_SIGNAL,
+            render(
+                REASON_EMA_NO_SIGNAL,
+                max_chars=cap,
+                detail=(
+                    f"close {signal.get('close', '?')} high {signal.get('ema_high', '?')} "
+                    f"low {signal.get('ema_low', '?')}"
+                ),
+            ),
+        )
+
     if state.get("regime_label") is None:
         return (
             OUTCOME_DECLINE,
@@ -345,7 +449,24 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             ),
         )
 
-    if label not in settings.directional_regime_set:
+    blocked = (
+        None
+        if _fade_live(state) or settings.ema120
+        else _strength_block(state, settings)
+    )
+    if blocked:
+        return (
+            OUTCOME_DECLINE,
+            REASON_REGIME_WEAK_TREND,
+            render(
+                REASON_REGIME_WEAK_TREND,
+                max_chars=cap,
+                rationale=_rationale(state),
+                detail=blocked,
+            ),
+        )
+
+    if label not in settings.directional_regime_set and not _fade_live(state):
         return (
             OUTCOME_DECLINE,
             REASON_NO_VIABLE_CONTRACT,
@@ -396,6 +517,28 @@ def _decide_outcome(state: TickState, settings: Settings) -> tuple[str, str, str
             ),
         )
     if status == STRATEGY_DEGRADED:
+        if "no submission" in detail.lower():
+            return (
+                OUTCOME_DECLINE,
+                REASON_SPECIALIST_NO_SUBMIT,
+                render(
+                    REASON_SPECIALIST_NO_SUBMIT,
+                    max_chars=cap,
+                    role=ROLE_STRATEGIST,
+                    detail=detail,
+                ),
+            )
+        if "model provider failed" in detail.lower() or "mcp session closed" in detail.lower():
+            return (
+                OUTCOME_DECLINE,
+                REASON_SPECIALIST_UNAVAILABLE,
+                render(
+                    REASON_SPECIALIST_UNAVAILABLE,
+                    max_chars=cap,
+                    role=ROLE_STRATEGIST,
+                    detail=detail,
+                ),
+            )
         return (
             OUTCOME_DECLINE,
             REASON_DATA_QUALITY,
@@ -531,6 +674,7 @@ def _record_read(deps: TickDeps, state: TickState, result: SpecialistResult) -> 
             "regime_label": label,
             "regime_confidence": confidence,
             "regime_rationale": str(payload.get("rationale", "")),
+            "trend_snapshot": payload.get("trend_snapshot"),
         }
     if status == STATUS_UNGROUNDED:
         return {
@@ -548,13 +692,21 @@ def _wants_a_contract(state: TickState, settings: Settings) -> bool:
     """AC-6: the strategist is reached only from a clean, tradeable, directional read."""
     if state.get("budget_exceeded") or state.get("book_error"):
         return False
+    if state.get("broker_session_dead"):
+        return False
     if state.get("regime_data_error") or state.get("specialist_error"):
         return False
+    if settings.ema120:
+        return (state.get("ema_signal") or {}).get("side") in {"long", "short"}
     label = state.get("regime_label")
     confidence = state.get("regime_confidence") or 0.0
     if label is None or label not in TRADEABLE_REGIMES:
         return False
     if confidence < settings.min_regime_confidence:
+        return False
+    if _fade_live(state):
+        return True
+    if _strength_block(state, settings):
         return False
     return label in settings.directional_regime_set
 
@@ -664,6 +816,30 @@ def build_tick_graph(deps: TickDeps) -> Any:
             span.set_attribute("book.decisions_today", book.decisions_today)
             span.set_attribute("book.available_cash", book.available_cash)
             snapshot = book.as_dict()
+            snapshot["unmanaged_symbols"] = _unmanaged_symbols(
+                deps.journal, state["trading_day"], snapshot["open_positions"]
+            )
+            if deps.fade is not None:
+                try:
+                    snapshot["ltp_fade"] = deps.fade.sync(
+                        deps.client, datetime.now(tz=IST), deps.settings
+                    )
+                except Exception as exc:  # noqa: BLE001 — fade is advisory; book still stands
+                    logger.warning("ltp fade sync failed: %s", exc)
+                    snapshot["ltp_fade"] = {"state": "UNAVAILABLE", "tag": None}
+
+            def _consult_ready() -> dict[str, Any]:
+                token_dead = deps.client.broker_token_error()
+                if token_dead:
+                    logger.warning(
+                        "broker token dead; skipping specialists this tick: %s",
+                        str(token_dead)[:160].replace("\n", " "),
+                    )
+                    span.set_attribute("broker.session_dead", True)
+                    return {"book": snapshot, "broker_session_dead": token_dead}
+                span.set_attribute("broker.session_dead", False)
+                return {"book": snapshot}
+
             limits = RiskLimits.from_settings(deps.settings)
             with tracer.start_as_current_span("risk.session") as risk_span:
                 assessment = assess_session(snapshot, limits)
@@ -715,12 +891,12 @@ def build_tick_graph(deps: TickDeps) -> Any:
                                 return {"book": snapshot, "exit_path_gated": status.detail}
                     if deps.settings.execution_enabled and deps.gate is not None:
                         if deps.settings.unattended:
-                            return {"book": snapshot}
+                            return _consult_ready()
                         health = deps.gate.health()
                         span.set_attribute("approval.gate_ok", health.ok)
                         if not health.ok:
                             return {"book": snapshot, "gate_unavailable": health.detail}
-                    return {"book": snapshot}
+                    return _consult_ready()
                 if assessment.stopped and not latched:
                     _latch_session_stop(deps, state, assessment, limits)
             return {
@@ -734,6 +910,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
 
     def route_after_plan(state: TickState) -> str:
         if state.get("budget_exceeded") or state.get("book_error"):
+            return "decide"
+        if state.get("broker_session_dead"):
             return "decide"
         book = state.get("book") or {}
         if book.get("open_positions"):
@@ -752,6 +930,40 @@ def build_tick_graph(deps: TickDeps) -> Any:
             if _over_budget(state):
                 span.set_attribute("tick.budget_exceeded", True)
                 return {"budget_exceeded": True}
+            if state.get("broker_session_dead"):
+                span.set_attribute("broker.session_dead", True)
+                return {}
+            if deps.settings.ema120:
+                try:
+                    signal = read_signal(deps.client, deps.settings)
+                except OpenAlgoError as exc:
+                    span.set_attribute("specialist.outcome", "ema120-data")
+                    return {"regime_data_error": str(exc)}
+                payload = signal.as_dict()
+                span.set_attribute("ema120.side", str(signal.side or "none"))
+                span.set_attribute("ema120.close", signal.close)
+                if signal.side is None:
+                    return {
+                        "ema_signal": payload,
+                        "ema_no_signal": True,
+                        "regime_label": "trending",
+                        "regime_confidence": 1.0,
+                        "regime_rationale": (
+                            f"120m close {signal.close:.2f} is between EMA high "
+                            f"{signal.ema_high:.2f} and low {signal.ema_low:.2f}"
+                        ),
+                    }
+                side_word = "bullish" if signal.side == "long" else "bearish"
+                return {
+                    "ema_signal": payload,
+                    "ema_no_signal": False,
+                    "regime_label": "trending",
+                    "regime_confidence": 1.0,
+                    "regime_rationale": (
+                        f"{side_word} 120m EMA close {signal.close:.2f} vs high "
+                        f"{signal.ema_high:.2f} low {signal.ema_low:.2f}"
+                    ),
+                }
 
             request = SpecialistRequest(
                 tick_id=state["tick_id"],
@@ -799,6 +1011,9 @@ def build_tick_graph(deps: TickDeps) -> Any:
             if _over_budget(state):
                 span.set_attribute("tick.budget_exceeded", True)
                 return {"budget_exceeded": True}
+            if state.get("broker_session_dead"):
+                span.set_attribute("broker.session_dead", True)
+                return {}
 
             request = SpecialistRequest(
                 tick_id=state["tick_id"],
@@ -810,7 +1025,10 @@ def build_tick_graph(deps: TickDeps) -> Any:
                         "label": state.get("regime_label"),
                         "confidence": state.get("regime_confidence"),
                         "rationale": state.get("regime_rationale"),
+                        "trend_snapshot": state.get("trend_snapshot"),
                     },
+                    "ema120": state.get("ema_signal"),
+                    "playbook_mode": deps.settings.playbook_mode,
                 },
             )
             try:
@@ -962,6 +1180,8 @@ def build_tick_graph(deps: TickDeps) -> Any:
                 entry.disposition,
                 latency_ms,
             )
+            if state.get("outcome") == OUTCOME_ENTER and deps.fade is not None:
+                deps.fade.mark_entered()
             return {}
 
     def route_after_persist(state: TickState) -> str:

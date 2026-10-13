@@ -10,6 +10,7 @@ from .config import Settings
 from .errors import BookStateUnavailable, OpenAlgoError
 from .journal import Journal
 from .openalgo_client import OpenAlgoClient
+from .slots import isolation_active, lot_tag, owns_strategy_tag
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ def read_book_state(
 
     index = settings.index_symbol.upper()
     exchange = settings.option_exchange.upper()
+    live = journal.live_symbols(trading_day)
+    isolated = isolation_active(settings)
     positions: list[OpenPosition] = []
 
     for row in raw_positions:
@@ -81,6 +84,8 @@ def read_book_state(
             continue
         quantity = _as_int(row.get("quantity", 0), "quantity")
         if quantity == 0:
+            continue
+        if isolated and symbol not in live and not owns_strategy_tag(settings, lot_tag(row)):
             continue
         positions.append(
             OpenPosition(

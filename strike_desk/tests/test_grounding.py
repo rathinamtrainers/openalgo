@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from strike_desk.grounding import (
@@ -9,6 +11,8 @@ from strike_desk.grounding import (
     RegimeSubmission,
     ToolObservation,
     extract_numbers,
+    tool_output_ok,
+    unwrap_tool_output,
     validate_proposal,
     validate_submission,
 )
@@ -40,6 +44,25 @@ def submission(rationale: str, evidence=None, label: str = "trending") -> Regime
         rationale=rationale,
         evidence=evidence or [{"tool": "get_trend_snapshot", "field": "adx_di", "value": "31.7"}],
     )
+
+
+def test_unwrap_langchain_python_repr():
+    inner = "Error getting trend snapshot: history error"
+    raw = str([{"type": "text", "text": inner, "id": "lc_test"}])
+    assert unwrap_tool_output(raw) == inner
+
+
+def test_unwrap_json_content_block():
+    inner = '{"indicators": {"adx_di": [16.59, 28.3, 31.36]}}'
+    raw = json.dumps([{"type": "text", "text": inner}])
+    assert unwrap_tool_output(raw) == inner
+
+
+def test_tool_output_ok_rejects_wrapped_error_and_status_json():
+    wrapped = str([{"type": "text", "text": "Error getting trend snapshot: history error"}])
+    assert tool_output_ok(wrapped) is False
+    assert tool_output_ok('{"status": "error", "message": "HTTP 500"}') is False
+    assert tool_output_ok('{"indicators": {"adx_di": [16.59, 28.3, 31.36]}}') is True
 
 
 def test_extract_numbers_handles_separators_and_decimals():

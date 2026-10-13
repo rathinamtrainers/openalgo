@@ -46,7 +46,9 @@ class Playbook:
             min_days_to_expiry=settings.playbook_min_days_to_expiry,
             max_days_to_expiry=settings.playbook_max_days_to_expiry,
             theta_budget_rupees=settings.playbook_theta_budget_rupees,
-            time_stop=settings.playbook_time_stop,
+            time_stop=(
+                settings.expiry_cutoff if settings.ema120 else settings.playbook_time_stop
+            ),
         )
 
     @property
@@ -212,12 +214,19 @@ def check(
     except ValueError:
         violations.append(f"time-stop {proposal.time_stop_ist!r} is not HH:MM")
     else:
-        if stop_at <= now_ist.time():
+        ema120 = "[ema120]" in (proposal.rationale or "")
+        if not ema120 and stop_at <= now_ist.time():
             violations.append(f"time-stop {proposal.time_stop_ist} is not in the future")
-        if stop_at > playbook.time_stop_time:
+        fade_flat = time.fromisoformat("15:29")
+        cutoff = (
+            fade_flat if "[ltp_fade]" in (proposal.rationale or "") else playbook.time_stop_time
+        )
+        if ema120:
+            cutoff = playbook.time_stop_time
+        if stop_at > cutoff:
             violations.append(
                 f"time-stop {proposal.time_stop_ist} is later than the "
-                f"{playbook.time_stop} session cutoff"
+                f"{cutoff.isoformat(timespec='minutes')} session cutoff"
             )
 
     return violations

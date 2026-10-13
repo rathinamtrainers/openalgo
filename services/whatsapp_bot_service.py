@@ -1048,7 +1048,7 @@ class WhatsAppBotService:
     def _cmd_help(self, wa, msg, chat, sender_jid, args) -> None:
         self.send_sync(
             chat,
-            "OpenAlgo WhatsApp Bot\n"
+            "ZeroTouchAlgo WhatsApp Bot\n"
             "/status - connection + paired status\n"
             "/orderbook - today's orders\n"
             "/tradebook - today's trades\n"
@@ -1089,14 +1089,14 @@ class WhatsAppBotService:
         if not owner_username:
             return None, (
                 "No owner recorded for this paired device. Re-pair from the "
-                "/whatsapp page while logged in to OpenAlgo."
+                "/whatsapp page while logged in to ZeroTouchAlgo."
             )
         try:
             from database.auth_db import get_api_key_for_tradingview
             api_key = get_api_key_for_tradingview(owner_username)
         except Exception:
             logger.exception("Failed to load owner api_key from auth_db")
-            return None, "Could not load OpenAlgo API key for the owner."
+            return None, "Could not load the platform API key for the owner."
         if not api_key:
             return None, (
                 "No API key on file for the owner. Generate one at /apikey "

@@ -1,0 +1,7 @@
+[Unit]
+Description=Keep OpenAlgo and Strike Desk running during the cash session
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/strike-desk-session-watchdog

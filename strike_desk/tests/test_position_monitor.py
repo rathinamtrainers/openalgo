@@ -10,6 +10,7 @@ import pytest
 import respx
 from freezegun import freeze_time
 
+from strike_desk.config import IST
 from strike_desk.execution_client import ExecutionClient
 from strike_desk.exit_executor import ExitExecutor
 from strike_desk.journal import (
@@ -111,6 +112,24 @@ def test_adoption_stamps_levels_from_the_proposal(oa_http, monitor, journal, mon
     assert live.stop_price == 80.0 and live.target_price == 140.0
     assert live.quantity == 75 and live.entry_price == 102.5
     assert POSITION_ARMED in states(journal, live.position_id)
+
+
+def test_restart_resumes_an_already_armed_position(oa_http, monitor, journal, monkeypatch):
+    ids = seed_chain(journal, stop=80.0, target=140.0, time_stop_ist="14:45")
+    mock_book(oa_http)
+    _patch_price_feed(monkeypatch, lambda *a, **k: FakeFeed(tick(110.0)))
+    monitor._adopt(ids["order_id"])
+    live = journal.live_position()
+    assert live is not None
+    first_id = live.position_id
+    monitor._position = None
+    monitor._feed = None
+    monitor._cycle()
+    snap = monitor.snapshot()
+    assert snap["managed"] is True
+    assert snap["position_id"] == first_id
+    assert snap["symbol"] == SYMBOL
+    assert snap["quantity"] == 75
 
 
 def test_a_stop_breach_exits_and_records_latency(
@@ -251,3 +270,93 @@ def test_an_unexplained_broker_position_is_not_adopted(oa_http, monitor, journal
     mock_book(oa_http)
     monitor._adopt_unadopted_orders()
     assert journal.live_position() is None
+
+
+def test_an_unmanaged_fill_is_adopted_from_todays_proposal(
+    oa_http, monitor, journal, monkeypatch
+):
+    seed_chain(journal, with_fill=False)
+    mock_book(oa_http)
+    _patch_price_feed(monkeypatch, lambda *a, **k: FakeFeed(tick(110.0)))
+    monitor._adopt_or_flatten_book()
+    live = journal.live_position()
+    assert live is not None
+    assert live.symbol == SYMBOL
+    assert POSITION_ARMED in states(journal, live.position_id)
+
+
+def test_an_unmanaged_fill_is_flattened_after_fifteen(oa_http, monitor, journal):
+    mock_book(oa_http)
+    close = oa_http.post("/api/v1/closeposition").mock(
+        return_value=httpx.Response(200, json={"status": "success"})
+    )
+    with freeze_time("2026-09-08T09:35:00+00:00", ignore=["threading"]):
+        monitor._adopt_or_flatten_book()
+    assert close.call_count == 1
+    assert journal.live_position() is None
+
+
+def test_ema120_does_not_flatten_the_book_at_fifteen(
+    oa_http, monitor, journal, monitor_settings
+):
+    monitor_settings.playbook_mode = "ema120"
+    mock_book(oa_http)
+    close = oa_http.post("/api/v1/closeposition").mock(
+        return_value=httpx.Response(200, json={"status": "success"})
+    )
+    with freeze_time("2026-09-09T09:35:00+00:00", ignore=["threading"]):
+        monitor._adopt_or_flatten_book()
+    assert close.call_count == 0
+
+
+def test_ema120_adopt_stamps_the_expiry_cutoff(
+    oa_http, monitor, journal, monkeypatch, monitor_settings
+):
+    from strike_desk.ema120 import format_trailer
+
+    trailer = format_trailer("long", 25100.0, 24800.0)
+    ids = seed_chain(
+        journal,
+        rationale=f"EMA120 ATM CE. {trailer}",
+        expiry="2026-09-15",
+        time_stop_ist="14:00",
+    )
+    mock_book(oa_http)
+    _patch_price_feed(monkeypatch, lambda *a, **k: FakeFeed(tick(110.0)))
+    monitor._adopt(ids["order_id"])
+    live = journal.live_position()
+    assert live is not None
+    stamped = live.time_stop_utc
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=UTC)
+    stamped_ist = stamped.astimezone(IST)
+    assert stamped_ist.date().isoformat() == "2026-09-15"
+    assert stamped_ist.strftime("%H:%M") == monitor_settings.expiry_cutoff
+
+
+def test_ema120_exits_when_the_index_tags_the_opposite_band(
+    oa_http, monitor, journal, monkeypatch
+):
+    from strike_desk.ema120 import format_trailer
+
+    trailer = format_trailer("long", 25100.0, 24900.0)
+    ids = seed_chain(journal, rationale=f"EMA120 ATM CE. {trailer}", stop=80.0, target=140.0)
+    mock_book(oa_http)
+    _patch_price_feed(monkeypatch, lambda *a, **k: FakeFeed(tick(110.0)))
+    oa_http.post("/api/v1/quotes").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"ltp": 24750.0, "low": 24750.0, "high": 25000.0},
+            },
+        )
+    )
+    oa_http.post("/api/v1/closeposition").mock(
+        return_value=httpx.Response(200, json={"status": "success"})
+    )
+    monitor._adopt(ids["order_id"])
+    monitor._evaluate()
+    position_id = journal.list_positions(SEED_DAY)[0].position_id
+    exits = journal.exits_for_position(position_id)
+    assert exits[0].reason == "stop"

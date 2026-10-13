@@ -90,6 +90,8 @@ class ToolSource(Protocol):
 
     def submit(self, factory: Callable[[], Coroutine[Any, Any, Any]], timeout: float) -> Any: ...
 
+    def mark_broken(self) -> None: ...
+
 
 def select_tools(loaded: list[BaseTool]) -> list[BaseTool]:
     """Keep exactly the union whitelist, in order, and fail closed if one is absent."""
@@ -122,6 +124,7 @@ class McpToolbox:
         self._ready = threading.Event()
         self._tools: list[BaseTool] = []
         self._error: BaseException | None = None
+        self._broken = False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -129,7 +132,8 @@ class McpToolbox:
         """Start the session, or restart it when the previous one has died."""
         with self._lock:
             healthy = (
-                self._thread is not None
+                not self._broken
+                and self._thread is not None
                 and self._thread.is_alive()
                 and self._error is None
                 and self._serving is not None
@@ -146,6 +150,7 @@ class McpToolbox:
         with self._lock:
             self._ready.clear()
             self._error = None
+            self._broken = False
             self._tools = []
             loop = asyncio.new_event_loop()
             thread = threading.Thread(
@@ -223,6 +228,7 @@ class McpToolbox:
             self._loop = self._thread = self._serving = self._shutdown = None
             self._tools = []
             self._error = None
+            self._broken = False
             self._ready.clear()
         if loop is None:
             return
@@ -238,6 +244,12 @@ class McpToolbox:
             thread.join(timeout=10)
         loop.close()
         logger.info("MCP session closed")
+
+    def mark_broken(self) -> None:
+        """The stdio session is still listed as up, but tool calls already failed closed."""
+        with self._lock:
+            self._broken = True
+        logger.warning("MCP session marked broken; the next read will reconnect")
 
     # -- use ----------------------------------------------------------------
 
