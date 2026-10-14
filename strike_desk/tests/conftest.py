@@ -90,6 +90,7 @@ def settings(tmp_path) -> Settings:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     return Settings(
+        _env_file=None,
         openalgo_base_url=BASE_URL,
         openalgo_api_key=API_KEY,
         anthropic_api_key=MODEL_KEY,

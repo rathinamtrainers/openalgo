@@ -18,13 +18,16 @@ from strike_desk.openalgo_client import READ_ONLY_PATHS
 from tests.conftest import API_KEY, StubSpecialist
 
 
-def test_read_only_whitelist_is_exactly_the_four_read_paths():
+def test_read_only_whitelist_is_exactly_the_read_paths():
     assert READ_ONLY_PATHS == {
         "/api/v1/ping",
         "/api/v1/funds",
         "/api/v1/positionbook",
         "/api/v1/market/timings",
+        "/api/v1/quotes",
+        "/api/v1/history",
     }
+    assert "/api/v1/placeorder" not in READ_ONLY_PATHS
 
 
 @pytest.mark.parametrize(

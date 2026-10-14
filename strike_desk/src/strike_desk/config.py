@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         env_prefix="STRIKE_DESK_",
         env_file=_ENV_FILES,
         env_file_encoding="utf-8",
-        extra="forbid",
+        extra="ignore",
         protected_namespaces=(),
     )
 
@@ -95,6 +95,27 @@ class Settings(BaseSettings):
     # --- Paths --------------------------------------------------------------
     state_dir: Path = Path("/var/lib/strike-desk")
     prompts_dir: Path = Field(default_factory=lambda: Path(__file__).parent / "prompts")
+
+    # --- StrikeShield (QuadShield mind → Tradetron hands) -------------------
+    strikeshield_enabled: bool = False
+    strikeshield_interval_seconds: int = Field(default=15, ge=5, le=120)
+    strikeshield_adx_entry: float = Field(default=40.0, gt=0, le=100)
+    strikeshield_adx_exit: float = Field(default=45.0, gt=0, le=100)
+    strikeshield_vix_min: float = Field(default=11.0, ge=0, le=100)
+    strikeshield_vix_max: float = Field(default=40.0, gt=0, le=100)
+    strikeshield_atr_period: int = Field(default=14, ge=2, le=50)
+    strikeshield_adx_period: int = Field(default=15, ge=2, le=50)
+    strikeshield_spot_atr_mult: float = Field(default=3.5, gt=0, le=20)
+    strikeshield_atr_spike: float = Field(default=1.3, gt=1.0, le=5)
+    strikeshield_first_min_move: float = Field(default=50.0, gt=0, le=500)
+    strikeshield_short_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
+    tt_auth_token: SecretStr | None = None
+    tt_auth_token_overlay: SecretStr | None = None
+    tt_auth_token_bn: SecretStr | None = None
+    tt_webhook_url: str = "https://api.tradetron.tech/api?"
+    tt_hands: bool = False
+    tt_map: str = ""
+    slots: str = ""
 
     # --- Observability ------------------------------------------------------
     service_name: str = "strike-desk"
@@ -158,6 +179,10 @@ class Settings(BaseSettings):
     @property
     def events_path(self) -> Path:
         return self.state_dir / "events.json"
+
+    @property
+    def strikeshield_state_path(self) -> Path:
+        return self.state_dir / "strikeshield.json"
 
 
 @lru_cache(maxsize=1)

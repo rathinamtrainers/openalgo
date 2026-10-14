@@ -26,6 +26,8 @@ from .regime_analyst import build_regime_analyst
 from .runner import TickRunner
 from .session import SessionGate
 from .specialists import SpecialistRegistry, shutdown_executor
+from .strikeshield import StrikeShieldRunner
+from .tradetron_hands import TradetronHands
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,13 @@ class StrikeDeskService:
         secrets = [settings.openalgo_api_key.get_secret_value()]
         if settings.anthropic_api_key is not None:
             secrets.append(settings.anthropic_api_key.get_secret_value())
+        for token in (
+            settings.tt_auth_token,
+            settings.tt_auth_token_overlay,
+            settings.tt_auth_token_bn,
+        ):
+            if token is not None:
+                secrets.append(token.get_secret_value())
         redactor = Redactor(secrets)
         configure_logging(settings, redactor)
 
@@ -70,7 +79,26 @@ class StrikeDeskService:
             span_processor=self._span_processor,
             checkpointer=checkpointer,
         )
-        self._runner = TickRunner(deps, SessionGate(self._client, settings))
+        self._gate = SessionGate(self._client, settings)
+        self._runner = TickRunner(deps, self._gate)
+        self._shield: StrikeShieldRunner | None = None
+        if settings.strikeshield_enabled:
+            token = (
+                settings.tt_auth_token.get_secret_value().strip()
+                if settings.tt_auth_token is not None
+                else ""
+            )
+            if not token:
+                logger.error("StrikeShield is enabled but STRIKE_DESK_TT_AUTH_TOKEN is empty")
+            else:
+                self._shield = StrikeShieldRunner(
+                    settings,
+                    self._client,
+                    TradetronHands(settings),
+                    is_trading_day=self._gate.is_trading_day,
+                    expiry_date_for=self._gate.expiry_date_for,
+                    trading_window=self._gate.trading_window,
+                )
         self._scheduler = BackgroundScheduler(timezone=IST)
         self._stop = threading.Event()
         self._manual = threading.Event()
@@ -114,6 +142,14 @@ class StrikeDeskService:
         else:
             self._journal_failures = 0
 
+    def _safe_shield(self) -> None:
+        if self._shield is None:
+            return
+        try:
+            self._shield.step()
+        except Exception:  # noqa: BLE001
+            logger.exception("strikeshield step failed")
+
     def engage_kill_switch(self, reason: str) -> None:
         self._settings.kill_switch_path.write_text(
             f"{datetime.now(tz=UTC).isoformat()} {reason}", encoding="utf-8"
@@ -146,6 +182,19 @@ class StrikeDeskService:
             coalesce=True,
             misfire_grace_time=30,
         )
+        if self._shield is not None:
+            self._scheduler.add_job(
+                self._safe_shield,
+                IntervalTrigger(seconds=self._settings.strikeshield_interval_seconds),
+                id="strikeshield",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=15,
+            )
+            logger.info(
+                "StrikeShield on: interval=%ss hands=Tradetron webhook",
+                self._settings.strikeshield_interval_seconds,
+            )
         self._scheduler.start()
         signal.signal(signal.SIGTERM, self._handle_stop)
         signal.signal(signal.SIGINT, self._handle_stop)

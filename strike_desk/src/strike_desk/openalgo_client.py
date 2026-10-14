@@ -20,6 +20,8 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/funds",
         "/api/v1/positionbook",
         "/api/v1/market/timings",
+        "/api/v1/quotes",
+        "/api/v1/history",
     }
 )
 
@@ -36,7 +38,7 @@ class OpenAlgoClient:
             base_url=settings.openalgo_base_url.rstrip("/"),
             timeout=httpx.Timeout(settings.openalgo_timeout_seconds),
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
-            headers={"User-Agent": "strike-desk/0.1"},
+            headers={"User-Agent": "strike-desk/0.2"},
         )
 
     def close(self) -> None:
@@ -112,3 +114,33 @@ class OpenAlgoClient:
         if not isinstance(data, list):
             raise OpenAlgoError("/api/v1/market/timings: 'data' was not a list")
         return data
+
+    def quotes(self, symbol: str, exchange: str) -> dict[str, Any]:
+        data = self._post("/api/v1/quotes", {"symbol": symbol, "exchange": exchange}).get("data")
+        if not isinstance(data, dict):
+            raise OpenAlgoError("/api/v1/quotes: 'data' was not an object")
+        return data
+
+    def history(
+        self,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        data = self._post(
+            "/api/v1/history",
+            {
+                "symbol": symbol,
+                "exchange": exchange,
+                "interval": interval,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+        ).get("data")
+        if isinstance(data, dict):
+            data = data.get("candles") or data.get("data") or []
+        if not isinstance(data, list):
+            raise OpenAlgoError("/api/v1/history: 'data' was not a list")
+        return [row for row in data if isinstance(row, dict)]

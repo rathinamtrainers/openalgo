@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -18,7 +19,10 @@ from .observability import Redactor, configure_logging, configure_tracing, get_t
 from .prompt_registry import PromptRegistry
 from .regime_analyst import build_regime_analyst, build_regime_read_row
 from .service import StrikeDeskService
+from .session import SessionGate
 from .specialists import SpecialistRequest
+from .strikeshield import StrikeShieldRunner
+from .tradetron_hands import TradetronHands
 
 
 def _today() -> str:
@@ -93,6 +97,11 @@ def _cmd_status(settings: Settings, _args: argparse.Namespace) -> int:
         print(f"model            : {settings.regime_model}")
         print(f"prompt set       : {PromptRegistry.load(settings.prompts_dir).set_version}")
         print(f"kill switch      : {'ENGAGED' if killed else 'released'}")
+        print(
+            f"strikeshield     : "
+            f"{'enabled' if settings.strikeshield_enabled else 'off'} "
+            f"({settings.strikeshield_interval_seconds}s to Tradetron)"
+        )
         if killed:
             reason = settings.kill_switch_path.read_text(encoding="utf-8").strip()
             print(f"  reason         : {reason}")
@@ -194,6 +203,48 @@ def _cmd_regime(settings: Settings, _args: argparse.Namespace) -> int:
         journal.close()
 
 
+def _cmd_strikeshield(settings: Settings, args: argparse.Namespace) -> int:
+    token = (
+        settings.tt_auth_token.get_secret_value().strip()
+        if settings.tt_auth_token is not None
+        else ""
+    )
+    if not token:
+        print("STRIKE_DESK_TT_AUTH_TOKEN is required for StrikeShield", file=sys.stderr)
+        return 1
+    secrets = [settings.openalgo_api_key.get_secret_value(), token]
+    if settings.anthropic_api_key is not None:
+        secrets.append(settings.anthropic_api_key.get_secret_value())
+    redactor = Redactor(secrets)
+    configure_logging(settings, redactor)
+    from .openalgo_client import OpenAlgoClient
+
+    client = OpenAlgoClient(settings)
+    gate = SessionGate(client, settings)
+    runner = StrikeShieldRunner(
+        settings,
+        client,
+        TradetronHands(settings),
+        is_trading_day=gate.is_trading_day,
+        expiry_date_for=gate.expiry_date_for,
+        trading_window=gate.trading_window,
+    )
+    try:
+        if args.once:
+            sent = runner.step()
+            print("strikeshield once:", ", ".join(sent) if sent else "hold")
+            return 0
+        print("StrikeShield running; Ctrl-C to stop")
+        while True:
+            runner.step()
+            time.sleep(settings.strikeshield_interval_seconds)
+    except KeyboardInterrupt:
+        print("strikeshield stopped")
+        return 0
+    finally:
+        client.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -212,6 +263,16 @@ def main(argv: list[str] | None = None) -> int:
     journal_parser.add_argument("--day", help="IST trading day as YYYY-MM-DD")
     journal_parser.add_argument("--limit", type=int, default=50)
 
+    shield_parser = subparsers.add_parser(
+        "strikeshield",
+        help="run StrikeShield (QuadShield mind to Tradetron hands)",
+    )
+    shield_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="evaluate one step and exit",
+    )
+
     args = parser.parse_args(argv)
     settings = get_settings()
     handlers = {
@@ -222,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "regime": _cmd_regime,
         "journal": _cmd_journal,
+        "strikeshield": _cmd_strikeshield,
     }
     return handlers[args.command](settings, args)
 

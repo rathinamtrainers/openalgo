@@ -32,6 +32,7 @@ LABEL_AGREEMENT_FLOOR = 0.80
 def live_settings(tmp_path_factory):
     """The shipped configuration, with the real key and a realistic budget."""
     return Settings(
+        _env_file=None,
         openalgo_api_key="unused-by-the-eval-suite",
         anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
         state_dir=tmp_path_factory.mktemp("evals"),

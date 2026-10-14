@@ -1,3 +1,3 @@
-"""Strike Desk — an agentic options-buying desk built on OpenAlgo."""
+"""Strike Desk — an agentic options desk built on OpenAlgo."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
