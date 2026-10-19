@@ -106,16 +106,32 @@ class Settings(BaseSettings):
     strikeshield_atr_period: int = Field(default=14, ge=2, le=50)
     strikeshield_adx_period: int = Field(default=15, ge=2, le=50)
     strikeshield_spot_atr_mult: float = Field(default=3.5, gt=0, le=20)
-    strikeshield_atr_spike: float = Field(default=1.3, gt=1.0, le=5)
+    strikeshield_min_spot_move: float = Field(default=180.0, gt=0, le=2000)
+    strikeshield_atr_spike: float = Field(default=1.5, gt=1.0, le=5)
     strikeshield_first_min_move: float = Field(default=50.0, gt=0, le=500)
+    strikeshield_max_adjustments_per_day: int = Field(default=1, ge=0, le=20)
     strikeshield_short_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     tt_auth_token: SecretStr | None = None
+    tt_auth_token_hands: SecretStr | None = None
     tt_auth_token_overlay: SecretStr | None = None
     tt_auth_token_bn: SecretStr | None = None
+    tt_auth_token_coa: SecretStr | None = None
+    tt_auth_token_ofa: SecretStr | None = None
     tt_webhook_url: str = "https://api.tradetron.tech/api?"
     tt_hands: bool = False
+    coa_interval_seconds: int = Field(default=300, ge=60, le=900)
     tt_map: str = ""
     slots: str = ""
+
+    # --- OFA (mind + Analyzer fill + Tradetron Hands) -----------------------
+    ofa_symbol: str = ""
+    ofa_exchange: str = "NFO"
+    ofa_tick: float = Field(default=0.05, gt=0, le=10)
+    ofa_wall_mult: float = Field(default=3.0, gt=1.0, le=20)
+    ofa_thin_total: float = Field(default=80.0, ge=0, le=1_000_000)
+    ofa_interval_seconds: int = Field(default=5, ge=1, le=60)
+    ofa_lots: int = Field(default=1, ge=1, le=20)
+    ofa_product: str = "MIS"
 
     # --- Observability ------------------------------------------------------
     service_name: str = "strike-desk"
@@ -183,6 +199,18 @@ class Settings(BaseSettings):
     @property
     def strikeshield_state_path(self) -> Path:
         return self.state_dir / "strikeshield.json"
+
+    @property
+    def strikeshield_heartbeat_path(self) -> Path:
+        return self.state_dir / "strikeshield.heartbeat"
+
+    @property
+    def public_brief_path(self) -> Path:
+        return self.state_dir / "public-brief.json"
+
+    @property
+    def ofa_state_path(self) -> Path:
+        return self.state_dir / "ofa.json"
 
 
 @lru_cache(maxsize=1)

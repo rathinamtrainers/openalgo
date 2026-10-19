@@ -1,8 +1,10 @@
 import { BarChart3, BookOpen, FileText, MessageCircle, Search, Zap } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { StackStatusBar } from '@/components/StackStatus'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
+import { APP_NAME } from '@/config/branding'
 import { useOrderEventRefresh } from '@/hooks/useOrderEventRefresh'
 import { cn } from '@/lib/utils'
 import { onModeChange } from '@/stores/themeStore'
@@ -204,7 +206,7 @@ export default function Dashboard() {
   const quickAccessCards = [
     {
       href: '/search',
-      label: 'OpenAlgo Symbols',
+      label: `${APP_NAME} Symbols`,
       description: 'Universal symbology across brokers',
       icon: Search,
       gradient: 'from-primary/10 to-primary/5 hover:from-primary/20 hover:to-primary/10',
@@ -325,6 +327,8 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <StackStatusBar />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6">

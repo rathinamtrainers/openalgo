@@ -14,6 +14,10 @@ from .errors import OpenAlgoError, ReadOnlyViolation
 
 logger = logging.getLogger(__name__)
 
+
+def _iso_day(value: date | str) -> str:
+    return value if isinstance(value, str) else value.isoformat()
+
 READ_ONLY_PATHS = frozenset(
     {
         "/api/v1/ping",
@@ -22,6 +26,8 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/market/timings",
         "/api/v1/quotes",
         "/api/v1/history",
+        "/api/v1/optionchain",
+        "/api/v1/depth",
     }
 )
 
@@ -121,13 +127,20 @@ class OpenAlgoClient:
             raise OpenAlgoError("/api/v1/quotes: 'data' was not an object")
         return data
 
+    def depth(self, symbol: str, exchange: str) -> dict[str, Any]:
+        data = self._post("/api/v1/depth", {"symbol": symbol, "exchange": exchange}).get("data")
+        if not isinstance(data, dict):
+            raise OpenAlgoError("/api/v1/depth: 'data' was not an object")
+        return data
+
     def history(
         self,
         symbol: str,
         exchange: str,
         interval: str,
-        start_date: date,
-        end_date: date,
+        start_date: date | str,
+        end_date: date | str,
+        source: str = "api",
     ) -> list[dict[str, Any]]:
         data = self._post(
             "/api/v1/history",
@@ -135,8 +148,9 @@ class OpenAlgoClient:
                 "symbol": symbol,
                 "exchange": exchange,
                 "interval": interval,
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
+                "start_date": _iso_day(start_date),
+                "end_date": _iso_day(end_date),
+                "source": source,
             },
         ).get("data")
         if isinstance(data, dict):
@@ -144,3 +158,24 @@ class OpenAlgoClient:
         if not isinstance(data, list):
             raise OpenAlgoError("/api/v1/history: 'data' was not a list")
         return [row for row in data if isinstance(row, dict)]
+
+    def optionchain(
+        self,
+        underlying: str,
+        exchange: str,
+        expiry_date: str,
+        strike_count: int = 10,
+    ) -> dict[str, Any]:
+        payload = self._post(
+            "/api/v1/optionchain",
+            {
+                "underlying": underlying,
+                "exchange": exchange,
+                "expiry_date": expiry_date,
+                "strike_count": strike_count,
+            },
+        )
+        chain = payload.get("chain")
+        if not isinstance(chain, list):
+            raise OpenAlgoError("/api/v1/optionchain: 'chain' was not a list")
+        return payload

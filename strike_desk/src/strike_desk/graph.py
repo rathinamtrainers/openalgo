@@ -15,7 +15,7 @@ from opentelemetry.trace import Status, StatusCode
 from .book_state import read_book_state
 from .config import Settings
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
-from .journal import SCHEMA_VERSION, Journal
+from .journal import SCHEMA_VERSION, Journal, append_decision_export
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
 from .prompt_registry import PromptRegistry
@@ -347,26 +347,31 @@ def build_tick_graph(deps: TickDeps) -> Any:
             latency_ms = int((time.monotonic() - state["started_monotonic"]) * 1000)
             trace_complete = not deps.span_processor.had_failure(state["trace_id"])
             models = [version for version in (state.get("model_versions") or []) if version]
-            deps.journal.record_decision(
-                tick_id=state["tick_id"],
-                trace_id=state["trace_id"],
-                created_at_utc=datetime.now(tz=UTC),
-                trading_day=state["trading_day"],
-                index_symbol=deps.settings.index_symbol,
-                trigger=state["trigger"],
-                outcome=state["outcome"],
-                reason_code=state["reason_code"],
-                reason_text=state["reason_text"],
-                regime_label=state.get("regime_label"),
-                regime_confidence=state.get("regime_confidence"),
-                book_state_json=json.dumps(state.get("book"), default=str, sort_keys=True),
-                prompt_set_version=deps.prompts.set_version,
-                model_version=",".join(models) if models else "none",
-                token_cost_micros=int(state.get("token_cost_micros") or 0),
-                latency_ms=latency_ms,
-                trace_complete=trace_complete,
-                schema_version=SCHEMA_VERSION,
-            )
+            decision_fields = {
+                "tick_id": state["tick_id"],
+                "trace_id": state["trace_id"],
+                "created_at_utc": datetime.now(tz=UTC),
+                "trading_day": state["trading_day"],
+                "index_symbol": deps.settings.index_symbol,
+                "trigger": state["trigger"],
+                "outcome": state["outcome"],
+                "reason_code": state["reason_code"],
+                "reason_text": state["reason_text"],
+                "regime_label": state.get("regime_label"),
+                "regime_confidence": state.get("regime_confidence"),
+                "book_state_json": json.dumps(state.get("book"), default=str, sort_keys=True),
+                "prompt_set_version": deps.prompts.set_version,
+                "model_version": ",".join(models) if models else "none",
+                "token_cost_micros": int(state.get("token_cost_micros") or 0),
+                "latency_ms": latency_ms,
+                "trace_complete": trace_complete,
+                "schema_version": SCHEMA_VERSION,
+            }
+            deps.journal.record_decision(**decision_fields)
+            try:
+                append_decision_export(decision_fields)
+            except OSError:
+                logger.warning("decision export unwritable — journal still holds the audit row")
             span.set_attribute("journal.latency_ms", latency_ms)
             span.set_attribute("journal.trace_complete", trace_complete)
             logger.info(

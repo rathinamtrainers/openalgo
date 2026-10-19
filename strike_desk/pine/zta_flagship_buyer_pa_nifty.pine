@@ -1,0 +1,88 @@
+//@version=6
+strategy("ZTA Flagship Buyer PA (NIFTY)", overlay = true, max_labels_count = 50, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100)
+
+// NIFTY v2 — price action entry + HTF direction only. Not option premium.
+// Trigger: 10m close breaks prior swing (or PDH). Filter: 60m close > EMA.
+// Exit: opposite swing break, chandelier 22/3, or 15:15 IST. One entry per direction per day.
+// No ADX histogram, no RSI, no volume AND. Test on regular candles, not Heikin Ashi.
+
+groupPa = "Price action (10m)"
+paMode = input.string("Swing", "Trigger", options = ["Swing", "PDH"], group = groupPa)
+swingLen = input.int(12, "Swing lookback bars", minval = 3, group = groupPa)
+
+groupHtf = "HTF direction"
+useHtf = input.bool(true, "Require HTF close > EMA (long) / < EMA (short)", group = groupHtf)
+htfTf = input.timeframe("60", "HTF", group = groupHtf)
+htfEmaLen = input.int(20, "HTF EMA length", minval = 2, group = groupHtf)
+
+groupCe = "Chandelier"
+useChandelier = input.bool(true, "Chandelier exit 22/3", group = groupCe)
+ceLen = input.int(22, "Period", minval = 2, group = groupCe)
+ceMult = input.float(3.0, "ATR multiplier", minval = 0.5, step = 0.5, group = groupCe)
+
+groupSess = "Session IST"
+useSession = input.bool(true, "09:20–15:15 Asia/Kolkata", group = groupSess)
+lastEntryHm = input.int(1400, "Last new entry HHMM", minval = 920, maxval = 1515, group = groupSess)
+flattenHm = input.int(1515, "Flatten HHMM", minval = 920, maxval = 1530, group = groupSess)
+onePerDir = input.bool(true, "One entry per direction per day", group = groupSess)
+
+swingHigh = ta.highest(high[1], swingLen)
+swingLow = ta.lowest(low[1], swingLen)
+swingUp = close > swingHigh
+swingDn = close < swingLow
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+pdhUp = not na(pdh) and close > pdh
+pdlDn = not na(pdl) and close < pdl
+
+breakUp = paMode == "PDH" ? pdhUp : swingUp
+breakDn = paMode == "PDH" ? pdlDn : swingDn
+
+htfClose = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_off)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off)
+htfLong = not useHtf or (not na(htfClose) and not na(htfEma) and htfClose > htfEma)
+htfShort = not useHtf or (not na(htfClose) and not na(htfEma) and htfClose < htfEma)
+
+istHm = hour(time, "Asia/Kolkata") * 100 + minute(time, "Asia/Kolkata")
+inSession = not useSession or (istHm >= 920 and istHm < flattenHm)
+canEnter = not useSession or (istHm >= 920 and istHm <= lastEntryHm)
+flattenBar = useSession and istHm >= flattenHm
+
+newDay = ta.change(time("D")) != 0
+var int longsToday = 0
+var int shortsToday = 0
+if newDay
+    longsToday := 0
+    shortsToday := 0
+longSlot = not onePerDir or longsToday == 0
+shortSlot = not onePerDir or shortsToday == 0
+
+ceAtr = ta.atr(ceLen)
+ceLongStop = ta.highest(high, ceLen) - ceMult * ceAtr
+ceShortStop = ta.lowest(low, ceLen) + ceMult * ceAtr
+
+longEntry = breakUp and htfLong and canEnter and inSession and longSlot and strategy.position_size == 0
+shortEntry = breakDn and htfShort and canEnter and inSession and shortSlot and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("CE proxy", strategy.long)
+    longsToday += 1
+if shortEntry
+    strategy.entry("PE proxy", strategy.short)
+    shortsToday += 1
+
+if strategy.position_size > 0
+    if swingDn or flattenBar
+        strategy.close("CE proxy", comment = flattenBar ? "flat" : "struct")
+    else if useChandelier and close < ceLongStop
+        strategy.close("CE proxy", comment = "ce")
+if strategy.position_size < 0
+    if swingUp or flattenBar
+        strategy.close("PE proxy", comment = flattenBar ? "flat" : "struct")
+    else if useChandelier and close > ceShortStop
+        strategy.close("PE proxy", comment = "ce")
+
+plot(swingHigh, "Swing high", color.new(color.teal, 60))
+plot(swingLow, "Swing low", color.new(color.orange, 60))
+plotshape(longEntry, title = "Long PA", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
+plotshape(shortEntry, title = "Short PA", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny)

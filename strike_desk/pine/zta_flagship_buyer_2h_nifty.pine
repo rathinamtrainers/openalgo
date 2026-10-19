@@ -1,0 +1,92 @@
+//@version=6
+strategy("ZTA Flagship Buyer 2H (NIFTY)", overlay = true, max_labels_count = 50, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100)
+
+// NIFTY — fewer trades. Confirmed 2h close only. No ADX, RSI, volume, or chart Renko.
+// Modes: 2h close breaks prior 2h high/low, or 2h body >= 100 points.
+// Exit: opposite 2h signal, chandelier 22/3, or 15:15 IST. One entry per direction per day.
+// Test on regular candles. HTF uses close[1] so the 2h bar is finished.
+
+groupPa = "2h trigger"
+paMode = input.string("Range break", "Trigger", options = ["Range break", "100pt body"], group = groupPa)
+bodyPts = input.float(100.0, "Min 2h body (points)", minval = 20, step = 10, group = groupPa)
+
+groupHtf = "HTF"
+htfTf = input.timeframe("120", "HTF", group = groupHtf)
+htfEmaLen = input.int(20, "HTF EMA length", minval = 2, group = groupHtf)
+useEma = input.bool(true, "Require 2h close vs EMA", group = groupHtf)
+
+groupCe = "Chandelier"
+useChandelier = input.bool(true, "Chandelier exit 22/3", group = groupCe)
+ceLen = input.int(22, "Period", minval = 2, group = groupCe)
+ceMult = input.float(3.0, "ATR multiplier", minval = 0.5, step = 0.5, group = groupCe)
+
+groupSess = "Session IST"
+useSession = input.bool(true, "09:20–15:15 Asia/Kolkata", group = groupSess)
+lastEntryHm = input.int(1400, "Last new entry HHMM", minval = 920, maxval = 1515, group = groupSess)
+flattenHm = input.int(1515, "Flatten HHMM", minval = 920, maxval = 1530, group = groupSess)
+onePerDir = input.bool(true, "One entry per direction per day", group = groupSess)
+
+htfClose = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_off)
+htfOpen = request.security(syminfo.tickerid, htfTf, open[1], lookahead = barmerge.lookahead_off)
+htfHighPrev = request.security(syminfo.tickerid, htfTf, high[2], lookahead = barmerge.lookahead_off)
+htfLowPrev = request.security(syminfo.tickerid, htfTf, low[2], lookahead = barmerge.lookahead_off)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off)
+
+htfChg = ta.change(htfClose)
+newHtf = not na(htfClose) and htfChg != 0
+emaLong = not useEma or (not na(htfEma) and htfClose > htfEma)
+emaShort = not useEma or (not na(htfEma) and htfClose < htfEma)
+body = not na(htfClose) and not na(htfOpen) ? htfClose - htfOpen : 0.0
+
+rangeLong = not na(htfHighPrev) and htfClose > htfHighPrev
+rangeShort = not na(htfLowPrev) and htfClose < htfLowPrev
+bodyLong = body >= bodyPts
+bodyShort = body <= -bodyPts
+
+breakUp = paMode == "100pt body" ? bodyLong : rangeLong
+breakDn = paMode == "100pt body" ? bodyShort : rangeShort
+
+istHm = hour(time, "Asia/Kolkata") * 100 + minute(time, "Asia/Kolkata")
+inSession = not useSession or (istHm >= 920 and istHm < flattenHm)
+canEnter = not useSession or (istHm >= 920 and istHm <= lastEntryHm)
+flattenBar = useSession and istHm >= flattenHm
+
+newDay = ta.change(time("D")) != 0
+var int longsToday = 0
+var int shortsToday = 0
+if newDay
+    longsToday := 0
+    shortsToday := 0
+longSlot = not onePerDir or longsToday == 0
+shortSlot = not onePerDir or shortsToday == 0
+
+ceAtr = ta.atr(ceLen)
+ceLongStop = ta.highest(high, ceLen) - ceMult * ceAtr
+ceShortStop = ta.lowest(low, ceLen) + ceMult * ceAtr
+
+longEntry = newHtf and breakUp and emaLong and canEnter and inSession and longSlot and strategy.position_size == 0
+shortEntry = newHtf and breakDn and emaShort and canEnter and inSession and shortSlot and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("CE proxy", strategy.long)
+    longsToday += 1
+if shortEntry
+    strategy.entry("PE proxy", strategy.short)
+    shortsToday += 1
+
+oppLong = newHtf and breakDn
+oppShort = newHtf and breakUp
+
+if strategy.position_size > 0
+    if oppLong or flattenBar
+        strategy.close("CE proxy", comment = flattenBar ? "flat" : "2h rev")
+    else if useChandelier and close < ceLongStop
+        strategy.close("CE proxy", comment = "ce")
+if strategy.position_size < 0
+    if oppShort or flattenBar
+        strategy.close("PE proxy", comment = flattenBar ? "flat" : "2h rev")
+    else if useChandelier and close > ceShortStop
+        strategy.close("PE proxy", comment = "ce")
+
+plotshape(longEntry, title = "2h long", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.small)
+plotshape(shortEntry, title = "2h short", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.small)

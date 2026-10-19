@@ -23,6 +23,10 @@ class ReadOnlyViolation(StrikeDeskError):
         self.path = path
 
 
+class AnalyzerOff(StrikeDeskError):
+    """OpenAlgo is not in analyze mode; OFA will not place an order."""
+
+
 class BookStateUnavailable(StrikeDeskError):
     """The book could not be read or parsed; the desk must not assume it is flat."""
 

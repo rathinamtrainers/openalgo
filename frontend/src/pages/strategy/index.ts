@@ -1,3 +1,5 @@
+export { default as AnalyzerBookAudit } from './AnalyzerBookAudit'
+export { default as StrategyBookTimeline } from './StrategyBookTimeline'
 export { default as ConfigureSymbols } from './ConfigureSymbols'
 export { default as NewStrategy } from './NewStrategy'
 export { default as StrategyIndex } from './StrategyIndex'

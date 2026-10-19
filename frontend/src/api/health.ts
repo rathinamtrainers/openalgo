@@ -149,6 +149,24 @@ export interface HealthAlert {
   resolved: boolean
 }
 
+export interface StackComponent {
+  id: string
+  label: string
+  status: 'pass' | 'warn' | 'fail'
+  detail: string
+}
+
+export interface StackStatus {
+  overall: 'pass' | 'warn' | 'fail'
+  updated_at: string
+  components: StackComponent[]
+}
+
+export async function getStackStatus(): Promise<StackStatus> {
+  const response = await webClient.get<StackStatus>('/health/api/stack')
+  return response.data
+}
+
 /**
  * Simple health check (for AWS ELB, K8s)
  * No authentication required

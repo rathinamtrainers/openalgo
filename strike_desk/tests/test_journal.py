@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from strike_desk.errors import JournalWriteError
-from strike_desk.journal import SCHEMA_VERSION
+from strike_desk.journal import SCHEMA_VERSION, append_decision_export
 
 
 def make_row(tick_id: str = "tick-1", **overrides):
@@ -43,6 +43,7 @@ def test_decision_round_trips(journal):
     assert rows[0].reason_code == "specialist-unavailable"
     assert journal.count_decisions("2026-07-22") == 1
     assert journal.count_decisions("2026-07-23") == 0
+    assert journal.list_recent_decisions(limit=5)[0].tick_id == "tick-1"
 
 
 @pytest.mark.parametrize(
@@ -97,3 +98,12 @@ def test_spans_for_trace_are_ordered(journal):
         "tick.plan",
         "tick.decide",
     ]
+
+
+def test_append_decision_export_writes_jsonl(tmp_path):
+    path = tmp_path / "decisions.jsonl"
+    append_decision_export(make_row("tick-export"), path)
+    append_decision_export(make_row("tick-export-2"), path)
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert "tick-export" in lines[0]

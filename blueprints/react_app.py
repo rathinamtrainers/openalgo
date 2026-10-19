@@ -330,6 +330,11 @@ def react_strategy_new():
     return serve_react_app()
 
 
+@react_bp.route("/strategy/books/<book_id>", strict_slashes=False)
+def react_strategy_book_audit(book_id):
+    return serve_react_app()
+
+
 @react_bp.route("/strategy/<int:strategy_id>", strict_slashes=False)
 def react_strategy_view(strategy_id):
     return serve_react_app()
@@ -486,6 +491,12 @@ def react_logs_live():
 # Sandbox Logs (Analyzer)
 @react_bp.route("/logs/sandbox", strict_slashes=False)
 def react_logs_sandbox():
+    return serve_react_app()
+
+
+# Strike Desk Analyzer 15-minute decision log
+@react_bp.route("/logs/desk-decisions", strict_slashes=False)
+def react_logs_desk_decisions():
     return serve_react_app()
 
 

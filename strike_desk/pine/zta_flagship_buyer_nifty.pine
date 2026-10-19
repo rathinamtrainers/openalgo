@@ -1,0 +1,122 @@
+//@version=6
+strategy("ZTA Flagship Buyer (NIFTY)", overlay = true, max_labels_count = 50, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100)
+
+// NIFTY v1 only. Index directional tester — not option premium, theta, or circuit.
+// Entry: first 10m ADX-histogram pulse + ADX>20 + vol>SMA20 + 60m DI bias + not into PDH/PDL.
+// Exit: opposite pulse, chandelier 22/3, or 15:15 IST flatten. One entry per direction per day.
+
+groupAdx = "ADX histogram (10m)"
+adxLen = input.int(14, "ADX / DI length", minval = 2, group = groupAdx)
+adxFloor = input.float(20.0, "ADX floor", minval = 0, step = 1, group = groupAdx)
+
+groupVol = "Volume"
+useVol = input.bool(true, "Require volume > SMA", group = groupVol)
+volLen = input.int(20, "Volume SMA length", minval = 2, group = groupVol)
+
+groupHtf = "HTF bias"
+useHtf = input.bool(true, "Require 60m DI alignment + ADX rising", group = groupHtf)
+htfTf = input.timeframe("60", "HTF", group = groupHtf)
+
+groupSr = "Prior-day S/R"
+useSr = input.bool(true, "Block longs into PDH / shorts into PDL", group = groupSr)
+srPct = input.float(0.1, "Buffer %", minval = 0, step = 0.05, group = groupSr)
+
+groupCe = "Chandelier"
+useChandelier = input.bool(true, "Chandelier exit 22/3", group = groupCe)
+ceLen = input.int(22, "Period", minval = 2, group = groupCe)
+ceMult = input.float(3.0, "ATR multiplier", minval = 0.5, step = 0.5, group = groupCe)
+
+groupSess = "Session IST"
+useSession = input.bool(true, "09:20–15:15 Asia/Kolkata", group = groupSess)
+lastEntryHm = input.int(1400, "Last new entry HHMM", minval = 920, maxval = 1515, group = groupSess)
+flattenHm = input.int(1515, "Flatten HHMM", minval = 920, maxval = 1530, group = groupSess)
+onePerDir = input.bool(true, "One entry per direction per day", group = groupSess)
+
+f_adx(int len) =>
+    trueRange = math.max(math.max(high - low, math.abs(high - nz(close[1]))), math.abs(low - nz(close[1])))
+    movePlus = high - nz(high[1])
+    moveMinus = nz(low[1]) - low
+    dmPlus = movePlus > moveMinus ? math.max(movePlus, 0.0) : 0.0
+    dmMinus = moveMinus > movePlus ? math.max(moveMinus, 0.0) : 0.0
+    smTr = 0.0
+    smPlus = 0.0
+    smMinus = 0.0
+    smTr := nz(smTr[1]) - nz(smTr[1]) / len + trueRange
+    smPlus := nz(smPlus[1]) - nz(smPlus[1]) / len + dmPlus
+    smMinus := nz(smMinus[1]) - nz(smMinus[1]) / len + dmMinus
+    diPlus = smTr == 0 ? 0.0 : smPlus / smTr * 100.0
+    diMinus = smTr == 0 ? 0.0 : smMinus / smTr * 100.0
+    dxDen = diPlus + diMinus
+    dx = dxDen == 0 ? 0.0 : math.abs(diPlus - diMinus) / dxDen * 100.0
+    adx = ta.sma(dx, len)
+    [diPlus, diMinus, adx]
+
+[diPlus, diMinus, adx] = f_adx(adxLen)
+adxRising = adx > nz(adx[1])
+buyHist = diPlus > diMinus and adx > diMinus and adxRising and adx > adxFloor
+sellHist = diMinus > diPlus and adx > diPlus and adxRising and adx > adxFloor
+buyPulse = buyHist and not buyHist[1]
+sellPulse = sellHist and not sellHist[1]
+
+f_htf_bias() =>
+    [dp, dm, ax] = f_adx(adxLen)
+    rising = ax > nz(ax[1])
+    htfLong = dp > dm and rising
+    htfShort = dm > dp and rising
+    [htfLong, htfShort]
+
+[htfLongRaw, htfShortRaw] = request.security(syminfo.tickerid, htfTf, f_htf_bias(), lookahead = barmerge.lookahead_off)
+htfLong = not useHtf or htfLongRaw
+htfShort = not useHtf or htfShortRaw
+
+volSma = ta.sma(volume, volLen)
+volOk = not useVol or volume > volSma
+
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+srBuf = srPct / 100.0
+srOkLong = not useSr or na(pdh) or close < pdh * (1.0 - srBuf)
+srOkShort = not useSr or na(pdl) or close > pdl * (1.0 + srBuf)
+
+istHm = hour(time, "Asia/Kolkata") * 100 + minute(time, "Asia/Kolkata")
+inSession = not useSession or (istHm >= 920 and istHm < flattenHm)
+canEnter = not useSession or (istHm >= 920 and istHm <= lastEntryHm)
+flattenBar = useSession and istHm >= flattenHm
+
+newDay = ta.change(time("D")) != 0
+var int longsToday = 0
+var int shortsToday = 0
+if newDay
+    longsToday := 0
+    shortsToday := 0
+longSlot = not onePerDir or longsToday == 0
+shortSlot = not onePerDir or shortsToday == 0
+
+ceAtr = ta.atr(ceLen)
+ceLongStop = ta.highest(high, ceLen) - ceMult * ceAtr
+ceShortStop = ta.lowest(low, ceLen) + ceMult * ceAtr
+
+longEntry = buyPulse and htfLong and volOk and srOkLong and canEnter and inSession and longSlot
+shortEntry = sellPulse and htfShort and volOk and srOkShort and canEnter and inSession and shortSlot
+
+if longEntry
+    strategy.entry("CE proxy", strategy.long)
+    longsToday += 1
+if shortEntry
+    strategy.entry("PE proxy", strategy.short)
+    shortsToday += 1
+
+if strategy.position_size > 0
+    if sellPulse or flattenBar
+        strategy.close("CE proxy", comment = flattenBar ? "flat" : "rev")
+    else if useChandelier and close < ceLongStop
+        strategy.close("CE proxy", comment = "ce")
+if strategy.position_size < 0
+    if buyPulse or flattenBar
+        strategy.close("PE proxy", comment = flattenBar ? "flat" : "rev")
+    else if useChandelier and close > ceShortStop
+        strategy.close("PE proxy", comment = "ce")
+
+plot(useChandelier ? ceLongStop : na, "CE long", color.new(color.teal, 40))
+plot(useChandelier ? ceShortStop : na, "CE short", color.new(color.orange, 40))
+plotshape(longEntry, title = "Long pulse", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
+plotshape(shortEntry, title = "Short pulse", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny)

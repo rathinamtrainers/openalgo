@@ -76,6 +76,7 @@ const StrategyPortfolio = lazy(() => import('@/pages/StrategyPortfolio'))
 // Strategy pages
 const StrategyIndex = lazy(() => import('@/pages/strategy/StrategyIndex'))
 const NewStrategy = lazy(() => import('@/pages/strategy/NewStrategy'))
+const AnalyzerBookAudit = lazy(() => import('@/pages/strategy/AnalyzerBookAudit'))
 const ViewStrategy = lazy(() => import('@/pages/strategy/ViewStrategy'))
 const ConfigureSymbols = lazy(() => import('@/pages/strategy/ConfigureSymbols'))
 
@@ -229,6 +230,8 @@ function App() {
                 {/* Phase 6: Webhook Strategies */}
                 <Route path="/strategy" element={<StrategyIndex />} />
                 <Route path="/strategy/new" element={<NewStrategy />} />
+                <Route path="/strategy/books/:bookId" element={<AnalyzerBookAudit />} />
+                <Route path="/logs/desk-decisions" element={<AnalyzerBookAudit />} />
                 <Route path="/strategy/:strategyId" element={<ViewStrategy />} />
                 <Route path="/strategy/:strategyId/configure" element={<ConfigureSymbols />} />
                 {/* Phase 6: Python Strategies */}

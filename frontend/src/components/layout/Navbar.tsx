@@ -2,6 +2,7 @@ import { BarChart3, BookOpen, LogOut, Menu, Moon, Sun, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { authApi } from '@/api/auth'
+import { StackStatusLamp } from '@/components/StackStatus'
 import { LogoutConfirmDialog } from '@/components/auth/LogoutConfirmDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,6 +21,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet'
+import { APP_NAME } from '@/config/branding'
 import { isActiveRoute, mobileSheetItems, navItems } from '@/config/navigation'
 import { useProfileMenuItems } from '@/hooks/useProfileMenuItems'
 import { cn } from '@/lib/utils'
@@ -94,8 +96,8 @@ export function Navbar() {
                 className="flex items-center gap-2 px-2"
                 onClick={() => setMobileOpen(false)}
               >
-                <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-                <span className="font-semibold">OpenAlgo</span>
+                <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+                <span className="font-semibold">{APP_NAME}</span>
               </Link>
 
               {/* Secondary nav items (not in bottom nav) */}
@@ -159,8 +161,8 @@ export function Navbar() {
 
         {/* Logo */}
         <Link to="/dashboard" className="flex items-center gap-2 mr-6">
-          <img src="/logo.png" alt="OpenAlgo" className="h-8 w-8" />
-          <span className="hidden font-semibold sm:inline-block">OpenAlgo</span>
+          <img src="/logo.png" alt={APP_NAME} className="h-8 w-8" />
+          <span className="hidden font-semibold sm:inline-block">{APP_NAME}</span>
         </Link>
 
         {/* Desktop Navigation.
@@ -195,6 +197,7 @@ export function Navbar() {
               {user.broker}
             </Badge>
           )}
+          <StackStatusLamp />
 
           {/* Mode Badge */}
           <Badge

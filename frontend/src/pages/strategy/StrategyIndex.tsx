@@ -14,19 +14,23 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { getStrategyBooks, type StrategyBook } from '@/api/strategy-books'
 import { strategyApi } from '@/api/strategy'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { Strategy } from '@/types/strategy'
 import { showToast } from '@/utils/toast'
 
 export default function StrategyIndex() {
   const navigate = useNavigate()
   const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [books, setBooks] = useState<StrategyBook[]>([])
   const [loading, setLoading] = useState(true)
+  const [booksLoading, setBooksLoading] = useState(true)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [hostConfig, setHostConfig] = useState<{
     host_server: string
@@ -64,10 +68,29 @@ export default function StrategyIndex() {
     fetchHostConfig()
   }, [])
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time fetch on mount; fetchStrategies should not re-run on every render
+  const fetchBooks = async () => {
+    try {
+      setBooksLoading(true)
+      setBooks(await getStrategyBooks())
+    } catch {
+      showToast.error('Failed to load running books', 'strategy')
+    } finally {
+      setBooksLoading(false)
+    }
+  }
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time fetch on mount
   useEffect(() => {
     fetchStrategies()
+    fetchBooks()
   }, [])
+
+  const bookBadge = (status: StrategyBook['run_status']) => {
+    if (status === 'live-entered') return { label: 'Live-Entered', variant: 'default' as const }
+    if (status === 'active') return { label: 'Active', variant: 'default' as const }
+    if (status === 'parked') return { label: 'Parked', variant: 'secondary' as const }
+    return { label: 'Mind down', variant: 'destructive' as const }
+  }
 
   // Get webhook URL using host config
   const getWebhookUrl = (webhookId: string): string => {
@@ -133,13 +156,20 @@ export default function StrategyIndex() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Webhook Strategies</h1>
+          <h1 className="text-2xl font-bold tracking-tight">My Strategies</h1>
           <p className="text-muted-foreground">
-            Manage your trading strategies and webhook integrations
+            Running Strike Desk books, then webhook templates
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={fetchStrategies}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              fetchStrategies()
+              fetchBooks()
+            }}
+          >
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
@@ -150,7 +180,88 @@ export default function StrategyIndex() {
         </div>
       </div>
 
-      {/* Webhook Info Alert */}
+      <Tabs defaultValue="running">
+        <TabsList>
+          <TabsTrigger value="running">Running</TabsTrigger>
+          <TabsTrigger value="webhooks">Webhooks</TabsTrigger>
+        </TabsList>
+        <TabsContent value="running" className="space-y-4 pt-2">
+          <p className="text-sm text-muted-foreground">
+            Status only. Click a book for its event timeline. Analyzer fills stay in ZeroTouchAlgo
+            Analyze. Hands books fill on Tradetron. This page does not execute.
+          </p>
+          {booksLoading ? (
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-40" />
+              ))}
+            </div>
+          ) : books.length === 0 ? (
+            <Card className="py-10">
+              <CardContent className="text-center text-muted-foreground">
+                No Strike Desk books registered.
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {books.map((book) => {
+                const badge = bookBadge(book.run_status)
+                const href = book.audit_href || `/strategy/books/${book.id}`
+                const card = (
+                  <Card className="relative overflow-hidden hover:border-primary/50 transition-colors">
+                    <div
+                      className={`absolute top-0 left-0 right-0 h-1 ${
+                        book.run_status === 'live-entered'
+                          ? 'bg-green-500'
+                          : book.run_status === 'active'
+                            ? 'bg-blue-500'
+                            : book.run_status === 'parked'
+                              ? 'bg-gray-400'
+                              : 'bg-red-500'
+                      }`}
+                    />
+                    <CardHeader className="pb-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="space-y-1">
+                          <CardTitle className="text-lg">{book.name}</CardTitle>
+                          <CardDescription>
+                            {book.kind_label} · {book.underlying}
+                          </CardDescription>
+                        </div>
+                        <Badge variant={badge.variant}>{badge.label}</Badge>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm">
+                      <p className="text-muted-foreground">{book.detail}</p>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge variant="outline" className="font-normal">
+                          {book.execution_label}
+                        </Badge>
+                        {book.tt_sid != null && (
+                          <Badge variant="outline" className="font-normal font-mono">
+                            SID {book.tt_sid}
+                          </Badge>
+                        )}
+                        <Badge variant="outline" className="font-normal">
+                          mind {book.mind}
+                        </Badge>
+                        <Badge variant="outline" className="font-normal">
+                          timeline
+                        </Badge>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )
+                return (
+                  <Link key={book.id} to={href} className="block h-full">
+                    {card}
+                  </Link>
+                )
+              })}
+            </div>
+          )}
+        </TabsContent>
+        <TabsContent value="webhooks" className="space-y-6 pt-2">
       <Alert>
         <Webhook className="h-4 w-4" />
         <AlertTitle>Webhook Integration</AlertTitle>
@@ -163,7 +274,6 @@ export default function StrategyIndex() {
         </AlertDescription>
       </Alert>
 
-      {/* Strategies Grid */}
       {strategies.length === 0 ? (
         <Card className="py-12">
           <CardContent className="flex flex-col items-center justify-center text-center">
@@ -293,6 +403,8 @@ export default function StrategyIndex() {
           </div>
         </CardContent>
       </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -29,6 +31,47 @@ from sqlalchemy.pool import NullPool
 from .errors import JournalWriteError
 
 SCHEMA_VERSION = 2
+_LINUX_EXPORT = Path("/var/tmp/strike-desk-decisions.jsonl")
+
+_EXPORT_FIELDS = (
+    "tick_id",
+    "created_at_utc",
+    "trading_day",
+    "index_symbol",
+    "trigger",
+    "outcome",
+    "reason_code",
+    "reason_text",
+    "regime_label",
+    "regime_confidence",
+    "book_state_json",
+    "latency_ms",
+    "trace_complete",
+)
+
+
+def default_export_path() -> Path | None:
+    raw = os.getenv("STRIKE_DESK_DECISIONS_EXPORT")
+    if raw:
+        return Path(raw)
+    if _LINUX_EXPORT.parent.is_dir() and os.access(_LINUX_EXPORT.parent, os.W_OK):
+        return _LINUX_EXPORT
+    return None
+
+
+def append_decision_export(fields: dict[str, Any], path: Path | None = None) -> None:
+    """World-readable JSONL copy for the OpenAlgo audit page. Fail-soft at the caller."""
+    target = path or default_export_path()
+    if target is None:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {key: fields.get(key) for key in _EXPORT_FIELDS}
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, default=str) + "\n")
+    try:
+        os.chmod(target, 0o644)
+    except OSError:
+        pass
 
 
 class Base(DeclarativeBase):
@@ -214,6 +257,12 @@ class Journal:
                 .order_by(Decision.created_at_utc.desc())
                 .limit(limit)
             )
+            return list(session.execute(statement).scalars())
+
+    def list_recent_decisions(self, limit: int = 200) -> Sequence[Decision]:
+        """Newest ticks first, across trading days. Read path for the audit page."""
+        with self.session_scope() as session:
+            statement = select(Decision).order_by(Decision.created_at_utc.desc()).limit(limit)
             return list(session.execute(statement).scalars())
 
     def list_regime_reads(self, trading_day: str, limit: int = 100) -> Sequence[RegimeRead]:

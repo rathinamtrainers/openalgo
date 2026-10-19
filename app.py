@@ -78,6 +78,8 @@ from blueprints.vol_surface import vol_surface_bp  # Import the vol surface blue
 from blueprints.latency import latency_bp  # Import the latency blueprint
 from blueprints.leverage import leverage_bp  # Import the leverage blueprint
 from blueprints.health import health_bp  # Import the health monitoring blueprint
+from blueprints.stack_status import stack_status_bp
+from blueprints.strategy_books import strategy_books_bp
 from blueprints.log import log_bp
 from blueprints.logging import logging_bp  # Import the logging blueprint
 from blueprints.master_contract_status import (
@@ -296,6 +298,8 @@ def create_app():
     app.register_blueprint(latency_bp)
     app.register_blueprint(leverage_bp)  # Register Leverage blueprint
     app.register_blueprint(health_bp)  # Register Health monitoring blueprint
+    app.register_blueprint(stack_status_bp)
+    app.register_blueprint(strategy_books_bp)
     app.register_blueprint(strategy_bp)
     app.register_blueprint(master_contract_status_bp)
     app.register_blueprint(websocket_bp)  # Register WebSocket example blueprint
@@ -647,6 +651,7 @@ def setup_environment(app):
             from database.chart_prefs_db import ensure_chart_prefs_tables_exists
             from database.market_calendar_db import ensure_market_calendar_tables_exists
             from database.qty_freeze_db import ensure_qty_freeze_tables_exists
+            from database.strategy_books_db import ensure_strategy_books_tables_exists
             from database.strategy_portfolio_db import (
                 ensure_strategy_portfolio_tables_exists,
             )
@@ -672,6 +677,7 @@ def setup_environment(app):
                 ("Scalping DB", ensure_scalping_tables_exists),
                 ("Leverage DB", ensure_leverage_tables_exists),
                 ("Strategy Portfolio DB", ensure_strategy_portfolio_tables_exists),
+                ("Strategy Books DB", ensure_strategy_books_tables_exists),
             ]
 
             db_init_start = time.time()
@@ -907,6 +913,7 @@ def shutdown_database_sessions(exception=None):
         ("database.scalping_db", "db_session"),
         ("database.leverage_db", "db_session"),
         ("database.strategy_portfolio_db", "db_session"),
+        ("database.strategy_books_db", "db_session"),
         ("database.market_calendar_db", "db_session"),
         ("database.telegram_db", "db_session"),
         ("database.symbol", "db_session"),

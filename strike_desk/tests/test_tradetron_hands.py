@@ -16,3 +16,12 @@ def test_known_actions_are_wired():
     assert BUY_WINGS in _PAIR_MAP
     assert EXIT_ALL in _PAIR_MAP
     assert _PAIR_MAP[BUY_WINGS][0] == ("qs_buy", 1)
+
+
+def test_coa_flags_are_not_quadshield():
+    from strike_desk.tradetron_hands import COA_BUY_CE, COA_EXIT, _COA_MAP
+
+    assert _COA_MAP[COA_BUY_CE][0] == ("ltp_buy_ce", 1)
+    assert _COA_MAP[COA_EXIT][0] == ("ltp_exit", 1)
+    keys = {pair[0] for pairs in _COA_MAP.values() for pair in pairs}
+    assert "qs_buy" not in keys

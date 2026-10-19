@@ -25,10 +25,6 @@ WINGS_TIME = time(9, 15)
 SHORTS_TIME = time(9, 16)
 EXPIRY_NO_NEW = time(14, 20)
 EXPIRY_FLAT = time(14, 30)
-FIRST_MIN_START = time(9, 14)
-FIRST_MIN_END = time(9, 25)
-LATE_START = time(15, 0)
-LATE_END = time(15, 40)
 
 
 @dataclass
@@ -39,6 +35,7 @@ class ShieldState:
     exit_time: float = 0.0
     date: str | None = None
     rollovers: int = 0
+    adjustments_today: int = 0
 
 
 @dataclass(frozen=True)
@@ -152,6 +149,14 @@ def decide(
     if state.set2open:
         reason = short_exit_reason(clock, indicators, state, settings)
         if reason:
+            cap = settings.strikeshield_max_adjustments_per_day
+            if state.adjustments_today >= cap:
+                logger.info(
+                    "strikeshield short exit skipped: daily cap %s (%s)",
+                    cap,
+                    reason,
+                )
+                return []
             logger.info("strikeshield short exit: %s", reason)
             actions.append(EXIT_SHORTS)
     return actions
@@ -163,16 +168,19 @@ def short_exit_reason(
     state: ShieldState,
     settings: Settings,
 ) -> str | None:
+    del clock  # clock gates stay in decide(); exits are move/vol only
     eup = state.eup if state.eup is not None else indicators.spot
-    if abs(indicators.spot - eup) > settings.strikeshield_spot_atr_mult * indicators.atr:
-        return f"spot move {abs(indicators.spot - eup):.1f}"
+    move = abs(indicators.spot - eup)
+    threshold = max(
+        settings.strikeshield_spot_atr_mult * indicators.atr,
+        settings.strikeshield_min_spot_move,
+    )
+    if move > threshold:
+        return f"spot move {move:.1f}"
     if indicators.prev_atr > 0 and indicators.atr > indicators.prev_atr * settings.strikeshield_atr_spike:
         return "ATR spike"
     if indicators.adx > settings.strikeshield_adx_exit:
         return f"ADX>{settings.strikeshield_adx_exit:g}"
-    window = (FIRST_MIN_START < clock < FIRST_MIN_END) or (LATE_START < clock < LATE_END)
-    if window and abs(indicators.spot - eup) > settings.strikeshield_first_min_move:
-        return "session-window move"
     return None
 
 
@@ -190,6 +198,7 @@ def apply_actions(state: ShieldState, actions: list[str], now: datetime, spot: f
         elif action == EXIT_SHORTS:
             next_state.set2open = False
             next_state.rollovers += 1
+            next_state.adjustments_today += 1
             next_state.exit_time = now.timestamp()
         elif action == EXIT_ALL:
             next_state.set1 = False
@@ -208,11 +217,21 @@ def load_state(path, today: str) -> ShieldState:
             exit_time=float(raw.get("exit_time") or 0),
             date=raw.get("date"),
             rollovers=int(raw.get("rollovers") or 0),
+            adjustments_today=int(raw.get("adjustments_today") or 0),
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         state = ShieldState()
     if state.date != today:
-        return ShieldState(date=today)
+        # Positional book: keep wings/shorts memory, reset the daily roll budget.
+        return ShieldState(
+            set1=state.set1,
+            set2open=state.set2open,
+            eup=state.eup,
+            exit_time=state.exit_time,
+            date=today,
+            rollovers=state.rollovers,
+            adjustments_today=0,
+        )
     return state
 
 
@@ -233,7 +252,7 @@ def read_indicators(client: OpenAlgoClient, settings: Settings, today: date) -> 
     start = today - timedelta(days=7)
     index = settings.index_symbol
     spot_ex = settings.index_spot_exchange
-    bars = client.history(index, spot_ex, "5m", start, today)
+    bars = client.history(index, spot_ex, "5m", start.isoformat(), today.isoformat())
     if len(bars) < settings.strikeshield_adx_period * 2 + 3:
         raise ValueError(f"need more 5m bars for ADX/ATR, got {len(bars)}")
     highs, lows, closes = ohlc_columns(bars)
@@ -241,7 +260,7 @@ def read_indicators(client: OpenAlgoClient, settings: Settings, today: date) -> 
     if len(atrs) < 2:
         raise ValueError("not enough ATR values")
     adx = adx_last(highs, lows, closes, settings.strikeshield_adx_period)
-    vix_bars = client.history(settings.vix_symbol, spot_ex, "5m", start, today)
+    vix_bars = client.history(settings.vix_symbol, spot_ex, "5m", start.isoformat(), today.isoformat())
     if not vix_bars:
         raise ValueError("no VIX 5m bars")
     _vh, _vl, vix_closes = ohlc_columns(vix_bars)
@@ -279,15 +298,18 @@ class StrikeShieldRunner:
         now = now or datetime.now(tz=IST)
         if self._settings.kill_switch_path.exists():
             logger.info("strikeshield skipped: %s", KILL_SWITCH)
+            self._touch_heartbeat(now)
             return []
         window = self._trading_window(now.date()) if self._trading_window is not None else None
         if window is None and not self._is_trading_day(now.date()):
             logger.info("strikeshield skipped: %s", MARKET_CLOSED)
+            self._touch_heartbeat(now)
             return []
         if window is not None:
             start, end = window
             if not (start <= now <= end):
                 logger.info("strikeshield skipped: %s", MARKET_CLOSED)
+                self._touch_heartbeat(now)
                 return []
 
         today = now.astimezone(IST).date()
@@ -298,6 +320,7 @@ class StrikeShieldRunner:
             indicators = read_indicators(self._client, self._settings, today)
         except Exception:
             logger.exception("strikeshield indicators unavailable")
+            self._touch_heartbeat(now)
             return []
 
         actions = decide(
@@ -317,6 +340,7 @@ class StrikeShieldRunner:
                 indicators.atr,
                 indicators.spot,
             )
+            self._touch_heartbeat(now)
             return []
 
         sent: list[str] = []
@@ -325,4 +349,10 @@ class StrikeShieldRunner:
             sent.append(action)
             state = apply_actions(state, [action], now, indicators.spot)
         save_state(self._settings.strikeshield_state_path, state)
+        self._touch_heartbeat(now)
         return sent
+
+    def _touch_heartbeat(self, now: datetime) -> None:
+        path = self._settings.strikeshield_heartbeat_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(now.astimezone(IST).isoformat(), encoding="utf-8")

@@ -31,6 +31,14 @@ export default function LogsIndex() {
       countLabel: 'testing',
     },
     {
+      title: 'Analyzer Decision Log',
+      description: 'Strike Desk NIFTY Analyzer timeline — every 15-minute tick and sandbox fill',
+      icon: FileText,
+      href: '/logs/desk-decisions',
+      color: 'bg-emerald-500',
+      countLabel: 'audit',
+    },
+    {
       title: 'Latency Monitor',
       description: 'Track order execution latency and performance metrics',
       icon: Clock,

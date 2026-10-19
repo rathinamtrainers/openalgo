@@ -1,0 +1,195 @@
+//@version=6
+strategy("Strike Desk UT Bot + LinReg (NIFTY)", overlay = true, max_labels_count = 100, max_lines_count = 200, max_bars_back = 5000, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100, explicit_plot_zorder = true)
+
+// Directional overlay for NIFTY / NIFTY FUT. Not an options book.
+// Changes vs the source indicator:
+//   ATR length 14 (was 1). One trail (dual trails were identical).
+//   Labels + orders use bar close only. LinReg is a regime FILTER.
+//   Longevity zones block entries (supply/demand), drawings off by default.
+//   NSE session 09:20-15:15 Asia/Kolkata. Optional 60m EMA 9/21 gate.
+//   Min bars between flips. No 14 S/R lines. No 10-TF dashboard.
+
+groupUT = "UT Bot"
+atrLen = input.int(14, "ATR period", minval = 2, group = groupUT, tooltip = "Do not use 1 on NIFTY. 14 is the enhanced default.")
+atrMult = input.float(2.0, "ATR multiplier", minval = 0.1, step = 0.1, group = groupUT)
+showTrail = input.bool(true, "Show trailing stop", group = groupUT)
+minBarsBetween = input.int(5, "Min bars between flips", minval = 1, group = groupUT)
+
+groupLR = "LinReg filter"
+useLinReg = input.bool(true, "Require LinReg regime", group = groupLR)
+linregLength = input.int(11, "LinReg length", minval = 1, maxval = 200, group = groupLR)
+signalLength = input.int(7, "Signal length", minval = 1, maxval = 200, group = groupLR)
+smaSignal = input.bool(true, "SMA signal (off = EMA)", group = groupLR)
+showLinRegCandles = input.bool(true, "Show LinReg candles in position", group = groupLR)
+
+groupZ = "Longevity zone filter"
+useZones = input.bool(true, "Block longs in supply / shorts in demand", group = groupZ)
+showZones = input.bool(false, "Draw zones", group = groupZ)
+zoneLen = input.int(5, "Pivot length", minval = 2, group = groupZ)
+colUpper = input.color(color.new(color.red, 75), "Supply color", group = groupZ)
+colLower = input.color(color.new(color.green, 75), "Demand color", group = groupZ)
+
+groupHTF = "HTF + session"
+useHtf = input.bool(true, "Require HTF EMA 9 > 21 (long) / < 21 (short)", group = groupHTF)
+htfTf = input.timeframe("60", "HTF", group = groupHTF)
+useSession = input.bool(true, "NSE cash/F&O session 09:20-15:15 IST", group = groupHTF)
+flattenAtClose = input.bool(true, "Flatten at 15:15 IST", group = groupHTF)
+
+groupUi = "Panel"
+dashOn = input.bool(true, "Compact status table", group = groupUi)
+
+src = close
+nLoss = atrMult * ta.atr(atrLen)
+var float trail = na
+prevTrail = nz(trail[1], src)
+if src > prevTrail and src[1] > prevTrail
+    trail := math.max(prevTrail, src - nLoss)
+else if src < prevTrail and src[1] < prevTrail
+    trail := math.min(prevTrail, src + nLoss)
+else
+    trail := src > prevTrail ? src - nLoss : src + nLoss
+
+crossUp = ta.crossover(src, trail)
+crossDn = ta.crossunder(src, trail)
+
+bOpen = ta.linreg(open, linregLength, 0)
+bHigh = ta.linreg(high, linregLength, 0)
+bLow = ta.linreg(low, linregLength, 0)
+bClose = ta.linreg(close, linregLength, 0)
+sig = smaSignal ? ta.sma(bClose, signalLength) : ta.ema(bClose, signalLength)
+linUp = bClose > sig
+linDn = bClose < sig
+linOkLong = not useLinReg or linUp
+linOkShort = not useLinReg or linDn
+
+type level
+    float top
+    float bot
+    int start
+
+var array<level> upper = array.new<level>()
+var array<level> lower = array.new<level>()
+hh = ta.highest(zoneLen)
+ll = ta.lowest(zoneLen)
+highPivot = high[1] == hh[1] and high < hh[1]
+lowPivot = low[1] == ll[1] and low > ll[1]
+halfAtr = ta.atr(20) * 0.5
+
+if barstate.isconfirmed
+    if highPivot
+        array.push(upper, level.new(hh[1], hh[1] - halfAtr, bar_index - 1))
+    if lowPivot
+        array.push(lower, level.new(ll[1] + halfAtr, ll[1], bar_index - 1))
+    if array.size(upper) > 10
+        array.shift(upper)
+    if array.size(lower) > 10
+        array.shift(lower)
+    if array.size(upper) > 0
+        for i = array.size(upper) - 1 to 0
+            z = array.get(upper, i)
+            if high > z.top and bar_index > z.start
+                array.remove(upper, i)
+    if array.size(lower) > 0
+        for i = array.size(lower) - 1 to 0
+            z = array.get(lower, i)
+            if low < z.bot and bar_index > z.start
+                array.remove(lower, i)
+
+inSupply = false
+inDemand = false
+if array.size(upper) > 0
+    for i = 0 to array.size(upper) - 1
+        z = array.get(upper, i)
+        if close <= z.top and close >= z.bot
+            inSupply := true
+if array.size(lower) > 0
+    for i = 0 to array.size(lower) - 1
+        z = array.get(lower, i)
+        if close <= z.top and close >= z.bot
+            inDemand := true
+zoneOkLong = not useZones or not inSupply
+zoneOkShort = not useZones or not inDemand
+
+htfBull = request.security(syminfo.tickerid, htfTf, ta.ema(close, 9) > ta.ema(close, 21), barmerge.gaps_off, barmerge.lookahead_off)
+htfBear = request.security(syminfo.tickerid, htfTf, ta.ema(close, 9) < ta.ema(close, 21), barmerge.gaps_off, barmerge.lookahead_off)
+htfOkLong = not useHtf or htfBull
+htfOkShort = not useHtf or htfBear
+
+hIst = hour(time, "Asia/Kolkata")
+mIst = minute(time, "Asia/Kolkata")
+inSess = not useSession or not timeframe.isintraday or ((hIst > 9 or (hIst == 9 and mIst >= 20)) and (hIst < 15 or (hIst == 15 and mIst < 15)))
+flatNow = flattenAtClose and timeframe.isintraday and hIst == 15 and mIst >= 15
+
+var int lastSigBar = na
+coolOk = na(lastSigBar) or (bar_index - lastSigBar >= minBarsBetween)
+
+buyGo = barstate.isconfirmed and inSess and coolOk and crossUp and src > trail and linOkLong and zoneOkLong and htfOkLong and strategy.position_size <= 0
+sellGo = barstate.isconfirmed and inSess and coolOk and crossDn and src < trail and linOkShort and zoneOkShort and htfOkShort and strategy.position_size >= 0
+
+if buyGo
+    strategy.entry("Long", strategy.long, comment = "UT+LR long")
+    lastSigBar := bar_index
+if sellGo
+    strategy.entry("Short", strategy.short, comment = "UT+LR short")
+    lastSigBar := bar_index
+if flatNow and strategy.position_size != 0
+    strategy.close_all(comment = "1515 IST")
+
+plotshape(buyGo, title = "Long", style = shape.labelup, location = location.belowbar, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny, text = "L")
+plotshape(sellGo, title = "Short", style = shape.labeldown, location = location.abovebar, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny, text = "S")
+barcolor(buyGo ? color.new(color.green, 70) : sellGo ? color.new(color.red, 70) : na)
+plot(showTrail ? trail : na, title = "UT trail", color = src > trail ? color.new(color.green, 0) : color.new(color.red, 0), linewidth = 1)
+plot(sig, title = "LinReg signal", color = color.new(color.blue, 0), linewidth = 2)
+
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+plotcandle(inLong ? bOpen : na, inLong ? bHigh : na, inLong ? bLow : na, inLong ? bClose : na, title = "LinReg long", color = color.green, wickcolor = color.green, bordercolor = color.green, display = showLinRegCandles ? display.all : display.none)
+plotcandle(inShort ? bOpen : na, inShort ? bHigh : na, inShort ? bLow : na, inShort ? bClose : na, title = "LinReg short", color = color.red, wickcolor = color.red, bordercolor = color.red, display = showLinRegCandles ? display.all : display.none)
+
+type drawing
+    line top
+    line bot
+    linefill fill
+
+var array<drawing> upperDraw = array.new<drawing>()
+var array<drawing> lowerDraw = array.new<drawing>()
+
+clearDraws(array<drawing> arr) =>
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            d = array.get(arr, i)
+            line.delete(d.top)
+            line.delete(d.bot)
+            if not na(d.fill)
+                linefill.delete(d.fill)
+        array.clear(arr)
+
+if barstate.islast
+    clearDraws(upperDraw)
+    clearDraws(lowerDraw)
+    if showZones and array.size(upper) > 0
+        for i = 0 to array.size(upper) - 1
+            z = array.get(upper, i)
+            l1 = line.new(z.start, z.top, bar_index, z.top, color = colUpper, width = 2)
+            l2 = line.new(z.start, z.bot, bar_index, z.bot, color = colUpper, width = 2)
+            array.push(upperDraw, drawing.new(l1, l2, linefill.new(l1, l2, color = colUpper)))
+    if showZones and array.size(lower) > 0
+        for i = 0 to array.size(lower) - 1
+            z = array.get(lower, i)
+            l1 = line.new(z.start, z.top, bar_index, z.top, color = colLower, width = 2)
+            l2 = line.new(z.start, z.bot, bar_index, z.bot, color = colLower, width = 2)
+            array.push(lowerDraw, drawing.new(l1, l2, linefill.new(l1, l2, color = colLower)))
+
+var table dash = na
+if dashOn
+    if na(dash)
+        dash := table.new(position.top_right, 1, 1, border_width = 1)
+    posTxt = inLong ? "LONG" : inShort ? "SHORT" : "FLAT"
+    table.cell(dash, 0, 0, "UT+LR  " + posTxt + "\nTrail  " + str.tostring(trail, format.mintick) + "\nLinReg  " + (linUp ? "UP" : linDn ? "DOWN" : "FLAT") + "\nZone  " + (inSupply ? "SUPPLY" : inDemand ? "DEMAND" : "CLEAR") + "\nHTF  " + (htfBull ? "BULL" : htfBear ? "BEAR" : "FLAT") + "\nSess  " + (inSess ? "OPEN" : "OUT"), text_color = color.white, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1e222d, 20))
+else if not na(dash)
+    table.delete(dash)
+    dash := na
+
+alertcondition(buyGo, title = "UT+LR Long", message = "Strike Desk UT+LR long")
+alertcondition(sellGo, title = "UT+LR Short", message = "Strike Desk UT+LR short")
+alertcondition(flatNow and strategy.position_size != 0, title = "UT+LR flatten 1515", message = "Strike Desk UT+LR flatten 1515 IST")

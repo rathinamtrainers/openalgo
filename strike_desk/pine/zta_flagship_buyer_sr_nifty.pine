@@ -1,0 +1,106 @@
+//@version=6
+strategy("ZTA Flagship Buyer 2H S/R (NIFTY)", overlay = true, max_labels_count = 50, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100)
+
+// NIFTY — 2h confirmed S/R, 10m reclaim. Original rules, not a third-party S/R pack.
+// Support = low of a completed 2h bar with body >= 100. Resistance = high of a completed 2h bar with body <= -100.
+// Long: 2h close > EMA, 10m tests support and closes back above, close not into resistance.
+// Break = 10m close through the level (a wick poke is not a break). Exit: support break, chandelier, 15:15.
+
+groupSr = "2h S/R"
+bodyPts = input.float(100.0, "Min 2h body to stamp a level", minval = 20, step = 10, group = groupSr)
+htfTf = input.timeframe("120", "HTF", group = groupSr)
+htfEmaLen = input.int(20, "HTF EMA length", minval = 2, group = groupSr)
+
+groupVol = "Volume"
+useVol = input.bool(false, "Require 10m volume > SMA", group = groupVol)
+volLen = input.int(20, "Volume SMA length", minval = 2, group = groupVol)
+
+groupCe = "Chandelier"
+useChandelier = input.bool(true, "Chandelier exit 22/3", group = groupCe)
+ceLen = input.int(22, "Period", minval = 2, group = groupCe)
+ceMult = input.float(3.0, "ATR multiplier", minval = 0.5, step = 0.5, group = groupCe)
+
+groupSess = "Session IST"
+useSession = input.bool(true, "09:20–15:15 Asia/Kolkata", group = groupSess)
+lastEntryHm = input.int(1400, "Last new entry HHMM", minval = 920, maxval = 1515, group = groupSess)
+flattenHm = input.int(1515, "Flatten HHMM", minval = 920, maxval = 1530, group = groupSess)
+onePerDir = input.bool(true, "One entry per direction per day", group = groupSess)
+
+htfClose = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_off)
+htfOpen = request.security(syminfo.tickerid, htfTf, open[1], lookahead = barmerge.lookahead_off)
+htfHigh = request.security(syminfo.tickerid, htfTf, high[1], lookahead = barmerge.lookahead_off)
+htfLow = request.security(syminfo.tickerid, htfTf, low[1], lookahead = barmerge.lookahead_off)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off)
+
+htfChg = ta.change(htfClose)
+newHtf = not na(htfClose) and htfChg != 0
+body = not na(htfClose) and not na(htfOpen) ? htfClose - htfOpen : 0.0
+emaLong = not na(htfClose) and not na(htfEma) and htfClose > htfEma
+emaShort = not na(htfClose) and not na(htfEma) and htfClose < htfEma
+
+var float demand = na
+var float supply = na
+if newHtf
+    if body >= bodyPts and not na(htfLow)
+        demand := htfLow
+    if body <= -bodyPts and not na(htfHigh)
+        supply := htfHigh
+
+supportBreak = not na(demand) and close < demand
+resistBreak = not na(supply) and close > supply
+if supportBreak
+    demand := na
+if resistBreak
+    supply := na
+
+reclaimLong = not na(demand) and low <= demand and close > demand
+reclaimShort = not na(supply) and high >= supply and close < supply
+clearOfResist = na(supply) or close < supply
+clearOfDemand = na(demand) or close > demand
+
+volSma = ta.sma(volume, volLen)
+volOk = not useVol or volume > volSma
+
+istHm = hour(time, "Asia/Kolkata") * 100 + minute(time, "Asia/Kolkata")
+inSession = not useSession or (istHm >= 920 and istHm < flattenHm)
+canEnter = not useSession or (istHm >= 920 and istHm <= lastEntryHm)
+flattenBar = useSession and istHm >= flattenHm
+
+newDay = ta.change(time("D")) != 0
+var int longsToday = 0
+var int shortsToday = 0
+if newDay
+    longsToday := 0
+    shortsToday := 0
+longSlot = not onePerDir or longsToday == 0
+shortSlot = not onePerDir or shortsToday == 0
+
+ceAtr = ta.atr(ceLen)
+ceLongStop = ta.highest(high, ceLen) - ceMult * ceAtr
+ceShortStop = ta.lowest(low, ceLen) + ceMult * ceAtr
+
+longEntry = reclaimLong and emaLong and clearOfResist and volOk and canEnter and inSession and longSlot and strategy.position_size == 0
+shortEntry = reclaimShort and emaShort and clearOfDemand and volOk and canEnter and inSession and shortSlot and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("CE proxy", strategy.long)
+    longsToday += 1
+if shortEntry
+    strategy.entry("PE proxy", strategy.short)
+    shortsToday += 1
+
+if strategy.position_size > 0
+    if supportBreak or flattenBar
+        strategy.close("CE proxy", comment = flattenBar ? "flat" : "sup break")
+    else if useChandelier and close < ceLongStop
+        strategy.close("CE proxy", comment = "ce")
+if strategy.position_size < 0
+    if resistBreak or flattenBar
+        strategy.close("PE proxy", comment = flattenBar ? "flat" : "res break")
+    else if useChandelier and close > ceShortStop
+        strategy.close("PE proxy", comment = "ce")
+
+plot(demand, "Demand", color.new(color.teal, 0), linewidth = 2)
+plot(supply, "Supply", color.new(color.red, 0), linewidth = 2)
+plotshape(longEntry, title = "Reclaim long", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
+plotshape(shortEntry, title = "Reclaim short", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny)

@@ -12,6 +12,8 @@ from strike_desk.strikeshield import (
     apply_actions,
     atr_series,
     decide,
+    load_state,
+    save_state,
     short_exit_reason,
 )
 from strike_desk.tradetron_hands import BUY_WINGS, EXIT_ALL, EXIT_SHORTS, SELL_SHORTS
@@ -51,12 +53,31 @@ def test_shorts_need_wings_adx_and_vix(settings):
     assert decide(_now("09:20"), _ind(adx=25, vix=10), state, settings, is_expiry_day=False) == []
 
 
-def test_short_exit_on_atr_multiple(settings):
+def test_short_exit_ignores_sub_threshold_chop(settings):
     state = ShieldState(set1=True, set2open=True, eup=24500.0)
-    reason = short_exit_reason(time(10, 0), _ind(spot=24580, atr=20), state, settings)
+    # 80 pts used to fire (3.5× 5m ATR). That lunch chop is why today's roll paid round-trip.
+    assert short_exit_reason(time(10, 0), _ind(spot=24580, atr=20), state, settings) is None
+    assert decide(_now("10:00"), _ind(spot=24580, atr=20), state, settings, is_expiry_day=False) == []
+
+
+def test_short_exit_on_min_spot_move(settings):
+    state = ShieldState(set1=True, set2open=True, eup=24500.0)
+    reason = short_exit_reason(time(10, 0), _ind(spot=24700, atr=20), state, settings)
     assert reason and reason.startswith("spot move")
-    actions = decide(_now("10:00"), _ind(spot=24580, atr=20), state, settings, is_expiry_day=False)
+    actions = decide(_now("10:00"), _ind(spot=24700, atr=20), state, settings, is_expiry_day=False)
     assert actions == [EXIT_SHORTS]
+
+
+def test_short_exit_skips_after_daily_cap(settings):
+    state = ShieldState(set1=True, set2open=True, eup=24500.0, adjustments_today=1)
+    actions = decide(_now("10:00"), _ind(spot=24700, atr=20), state, settings, is_expiry_day=False)
+    assert actions == []
+
+
+def test_session_window_50pt_no_longer_exits(settings):
+    state = ShieldState(set1=True, set2open=True, eup=24500.0)
+    assert short_exit_reason(time(9, 20), _ind(spot=24560, atr=20), state, settings) is None
+    assert decide(_now("09:20"), _ind(spot=24560, atr=20), state, settings, is_expiry_day=False) == []
 
 
 def test_apply_actions_latches_set1_and_eup(settings):
@@ -66,6 +87,29 @@ def test_apply_actions_latches_set1_and_eup(settings):
     state = apply_actions(state, [SELL_SHORTS], now, 24510.0)
     assert state.set2open is True
     assert state.eup == 24510.0
+    state = apply_actions(state, [EXIT_SHORTS], now, 24510.0)
+    assert state.set2open is False
+    assert state.adjustments_today == 1
+    assert state.rollovers == 1
+
+
+def test_load_state_keeps_positional_book_across_midnight(settings):
+    yesterday = ShieldState(
+        set1=True,
+        set2open=True,
+        eup=22700.0,
+        date="2026-10-13",
+        rollovers=2,
+        adjustments_today=1,
+    )
+    save_state(settings.strikeshield_state_path, yesterday)
+    loaded = load_state(settings.strikeshield_state_path, "2026-10-14")
+    assert loaded.set1 is True
+    assert loaded.set2open is True
+    assert loaded.eup == 22700.0
+    assert loaded.rollovers == 2
+    assert loaded.adjustments_today == 0
+    assert loaded.date == "2026-10-14"
 
 
 def test_atr_and_adx_from_synthetic_trend():
@@ -124,7 +168,9 @@ def test_runner_respects_kill_switch(settings):
         is_trading_day=lambda _day: True,
         expiry_date_for=lambda _day: None,
     )
-    assert runner.step(_now("09:20")) == []
+    now = _now("09:20")
+    assert runner.step(now) == []
+    assert settings.strikeshield_heartbeat_path.exists()
 
 
 def test_runner_skips_outside_nfo_hours(settings, monkeypatch):
@@ -144,3 +190,4 @@ def test_runner_skips_outside_nfo_hours(settings, monkeypatch):
     )
     assert runner.step(now) == []
     assert hands.sent == []
+    assert settings.strikeshield_heartbeat_path.exists()

@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { APP_NAME } from '@/config/branding'
 import { useAuthStore } from '@/stores/authStore'
 import { showToast } from '@/utils/toast'
 
@@ -225,7 +226,7 @@ export default function Login() {
                 <img src="/logo.png" alt="OpenAlgo" className="h-20 w-20" />
               </div>
               <CardTitle className="text-2xl">Welcome Back</CardTitle>
-              <CardDescription>Sign in to your OpenAlgo account</CardDescription>
+              <CardDescription>Sign in to your {APP_NAME} account</CardDescription>
             </CardHeader>
             <CardContent>
               {step === 'password' ? (
@@ -370,7 +371,7 @@ export default function Login() {
           {/* Welcome Content - Second on mobile */}
           <div className="flex-1 max-w-xl text-center lg:text-left order-2 lg:order-1">
             <h1 className="text-4xl lg:text-5xl font-bold mb-6">
-              Welcome to <span className="text-primary">OpenAlgo</span>
+              Welcome to <span className="text-primary">{APP_NAME}</span>
             </h1>
             <p className="text-lg lg:text-xl mb-8 text-muted-foreground">
               Sign in to your account to access your trading dashboard and manage your algorithmic

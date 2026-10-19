@@ -1,0 +1,98 @@
+//@version=6
+strategy("ZTA Flagship Buyer Renko (NIFTY)", overlay = true, max_labels_count = 50, process_orders_on_close = true, calc_on_every_tick = false, pyramiding = 0, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 100, commission_type = strategy.commission.percent, commission_value = 0.03, slippage = 2, margin_long = 100, margin_short = 100)
+
+// NIFTY — traditional Renko bricks from 10m close, plus 60m EMA direction.
+// Chart-type Renko is not used (TV flips to 1D ATR-200 and the tester lies).
+// Exit: opposite brick, chandelier 22/3, or 15:15 IST. One entry per direction per day.
+
+groupRk = "Renko"
+boxSize = input.float(25.0, "Brick size (points)", minval = 5, step = 5, group = groupRk)
+
+groupHtf = "HTF direction"
+useHtf = input.bool(true, "Require HTF close > EMA (long) / < EMA (short)", group = groupHtf)
+htfTf = input.timeframe("60", "HTF", group = groupHtf)
+htfEmaLen = input.int(20, "HTF EMA length", minval = 2, group = groupHtf)
+
+groupCe = "Chandelier"
+useChandelier = input.bool(true, "Chandelier exit 22/3", group = groupCe)
+ceLen = input.int(22, "Period", minval = 2, group = groupCe)
+ceMult = input.float(3.0, "ATR multiplier", minval = 0.5, step = 0.5, group = groupCe)
+
+groupSess = "Session IST"
+useSession = input.bool(true, "09:20–15:15 Asia/Kolkata", group = groupSess)
+lastEntryHm = input.int(1400, "Last new entry HHMM", minval = 920, maxval = 1515, group = groupSess)
+flattenHm = input.int(1515, "Flatten HHMM", minval = 920, maxval = 1530, group = groupSess)
+onePerDir = input.bool(true, "One entry per direction per day", group = groupSess)
+
+var float lastBrick = na
+var int dir = 0
+var int upPrint = 0
+var int dnPrint = 0
+upPrint := 0
+dnPrint := 0
+
+if na(lastBrick)
+    lastBrick := math.round(close / boxSize) * boxSize
+
+if not na(close)
+    for i = 0 to 19
+        nextUp = dir == -1 ? lastBrick + 2.0 * boxSize : lastBrick + boxSize
+        nextDn = dir == 1 ? lastBrick - 2.0 * boxSize : lastBrick - boxSize
+        if close >= nextUp
+            lastBrick := nextUp
+            dir := 1
+            upPrint += 1
+        else if close <= nextDn
+            lastBrick := nextDn
+            dir := -1
+            dnPrint += 1
+        else
+            break
+
+htfClose = request.security(syminfo.tickerid, htfTf, close[1], lookahead = barmerge.lookahead_off)
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_off)
+htfLong = not useHtf or (not na(htfClose) and not na(htfEma) and htfClose > htfEma)
+htfShort = not useHtf or (not na(htfClose) and not na(htfEma) and htfClose < htfEma)
+
+istHm = hour(time, "Asia/Kolkata") * 100 + minute(time, "Asia/Kolkata")
+inSession = not useSession or (istHm >= 920 and istHm < flattenHm)
+canEnter = not useSession or (istHm >= 920 and istHm <= lastEntryHm)
+flattenBar = useSession and istHm >= flattenHm
+
+newDay = ta.change(time("D")) != 0
+var int longsToday = 0
+var int shortsToday = 0
+if newDay
+    longsToday := 0
+    shortsToday := 0
+longSlot = not onePerDir or longsToday == 0
+shortSlot = not onePerDir or shortsToday == 0
+
+ceAtr = ta.atr(ceLen)
+ceLongStop = ta.highest(high, ceLen) - ceMult * ceAtr
+ceShortStop = ta.lowest(low, ceLen) + ceMult * ceAtr
+
+longEntry = upPrint > 0 and htfLong and canEnter and inSession and longSlot and strategy.position_size == 0
+shortEntry = dnPrint > 0 and htfShort and canEnter and inSession and shortSlot and strategy.position_size == 0
+
+if longEntry
+    strategy.entry("CE proxy", strategy.long)
+    longsToday += 1
+if shortEntry
+    strategy.entry("PE proxy", strategy.short)
+    shortsToday += 1
+
+if strategy.position_size > 0
+    if dnPrint > 0 or flattenBar
+        strategy.close("CE proxy", comment = flattenBar ? "flat" : "brick")
+    else if useChandelier and close < ceLongStop
+        strategy.close("CE proxy", comment = "ce")
+if strategy.position_size < 0
+    if upPrint > 0 or flattenBar
+        strategy.close("PE proxy", comment = flattenBar ? "flat" : "brick")
+    else if useChandelier and close > ceShortStop
+        strategy.close("PE proxy", comment = "ce")
+
+plot(lastBrick, "Last brick", color.new(color.aqua, 30))
+plotshape(longEntry, title = "Long brick", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
+plotshape(shortEntry, title = "Short brick", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0), size = size.tiny)

@@ -1,5 +1,7 @@
 import { Search, Sparkles } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { getStrategyBooks, type StrategyBook } from '@/api/strategy-books'
 import { Input } from '@/components/ui/input'
 import { type Direction, STRATEGY_TEMPLATES, type StrategyTemplate } from '@/lib/strategyTemplates'
 import { cn } from '@/lib/utils'
@@ -68,7 +70,23 @@ function MiniPayoffIcon({ path, direction }: { path: string; direction: Directio
 }
 
 export function TemplateGrid({ direction, onDirectionChange, onPick }: TemplateGridProps) {
+  const navigate = useNavigate()
   const [query, setQuery] = useState('')
+  const [books, setBooks] = useState<StrategyBook[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    getStrategyBooks()
+      .then((rows) => {
+        if (!cancelled) setBooks(rows)
+      })
+      .catch(() => {
+        if (!cancelled) setBooks([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const counts = useMemo(() => {
     const c: Record<Direction, number> = { BULLISH: 0, BEARISH: 0, NON_DIRECTIONAL: 0 }
@@ -82,6 +100,11 @@ export function TemplateGrid({ direction, onDirectionChange, onPick }: TemplateG
       (t) => t.direction === direction && (!q || t.name.toLowerCase().includes(q))
     )
   }, [direction, query])
+
+  const yourBooks = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return books.filter((b) => !q || b.name.toLowerCase().includes(q))
+  }, [books, query])
 
   return (
     <div className="space-y-4">
@@ -111,6 +134,42 @@ export function TemplateGrid({ direction, onDirectionChange, onPick }: TemplateG
           />
         </div>
       </div>
+
+      {yourBooks.length > 0 && (
+        <div className="space-y-2">
+          <div>
+            <h4 className="text-xs font-semibold">Your strategies</h4>
+            <p className="text-[11px] text-muted-foreground">
+              Books you created. Status only — click opens My Strategies. Does not add legs.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
+            {yourBooks.map((book) => (
+              <button
+                key={book.id}
+                type="button"
+                onClick={() => navigate('/strategy')}
+                className={cn(
+                  'flex flex-col gap-2 rounded-xl border bg-card p-3 text-left transition-all',
+                  'hover:-translate-y-[1px] hover:border-foreground/30',
+                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
+                )}
+              >
+                <h4 className="line-clamp-2 text-xs font-semibold leading-tight">{book.name}</h4>
+                <p className="text-[11px] text-muted-foreground">{book.detail}</p>
+                <div className="flex flex-wrap gap-1">
+                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide">
+                    {book.run_status.replace('-', ' ')}
+                  </span>
+                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide">
+                    {book.underlying}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Direction tabs with counts */}
       <div className="flex flex-wrap gap-1.5">
