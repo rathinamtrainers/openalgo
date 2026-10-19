@@ -11,7 +11,6 @@ import httpx
 
 from .config import Settings
 from .errors import AnalyzerOff, OpenAlgoError
-from .ltp_coa_replay import expiry_token
 from .openalgo_client import OpenAlgoClient
 
 logger = logging.getLogger(__name__)
@@ -20,6 +19,11 @@ STRATEGY = "OFA"
 STATUS_PATH = "/api/v1/analyzer"
 PLACE_PATH = "/api/v1/placeorder"
 TOGGLE_PATH = "/api/v1/analyzer/toggle"
+
+
+def expiry_token(day: date) -> str:
+    """OpenAlgo weekly expiry token, e.g. 15OCT25."""
+    return day.strftime("%d%b%y").upper()
 
 
 @dataclass(frozen=True)

@@ -58,6 +58,13 @@ class OfaRunner:
         day = (now or datetime.now(tz=IST)).date()
         return monthly_fut_symbol(self._settings.index_symbol, day), exchange
 
+    def touch_heartbeat(self, now: datetime | None = None) -> None:
+        """Prove the OFA loop is alive for the session watchdog."""
+        stamp = (now or datetime.now(tz=IST)).astimezone(IST).isoformat()
+        path = self._settings.ofa_heartbeat_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(stamp, encoding="utf-8")
+
     def step(self, now: datetime | None = None) -> OfaSnapshot:
         now = now or datetime.now(tz=IST)
         symbol, exchange = self.symbol(now)
@@ -76,6 +83,7 @@ class OfaRunner:
         )
         _save_state(self._state_path, nxt)
         self.last_actions = self._act(snap, now)
+        self.touch_heartbeat(now)
         logger.info(
             "ofa %s signal=%s of_long=%s of_short=%s of_exit=%s %s",
             symbol,

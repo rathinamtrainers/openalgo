@@ -458,6 +458,7 @@ def _cmd_ofa(settings: Settings, args: argparse.Namespace) -> int:
                 snap = runner.step()
                 print(render(snap, runner.last_actions))
             except OpenAlgoError as exc:
+                runner.touch_heartbeat()
                 print(f"OFA read failed: {exc}", file=sys.stderr)
             time.sleep(settings.ofa_interval_seconds)
     except KeyboardInterrupt:

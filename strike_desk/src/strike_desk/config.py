@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     slots: str = ""
 
     # --- OFA (mind + Analyzer fill + Tradetron Hands) -----------------------
+    ofa_enabled: bool = False
     ofa_symbol: str = ""
     ofa_exchange: str = "NFO"
     ofa_tick: float = Field(default=0.05, gt=0, le=10)
@@ -211,6 +212,10 @@ class Settings(BaseSettings):
     @property
     def ofa_state_path(self) -> Path:
         return self.state_dir / "ofa.json"
+
+    @property
+    def ofa_heartbeat_path(self) -> Path:
+        return self.state_dir / "ofa.heartbeat"
 
 
 @lru_cache(maxsize=1)

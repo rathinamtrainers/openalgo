@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 
 STACK_STATUS_PATH = Path(os.getenv("STRIKE_DESK_STACK_STATUS", "/var/tmp/strike-desk-stack.json"))
 SHIELD_STALE_SECONDS = 90
+OFA_STALE_SECONDS = 90
 
 
 def _now() -> datetime:
@@ -75,6 +76,13 @@ def build_stack_status(*, analyze_mode: bool, broker: str | None, broker_connect
         heartbeat_age_s = float(heartbeat_age) if heartbeat_age is not None else None
     except (TypeError, ValueError):
         heartbeat_age_s = None
+    ofa_enabled = bool(snapshot.get("ofa_enabled"))
+    ofa_heartbeat_age = snapshot.get("ofa_heartbeat_age_s")
+    try:
+        ofa_heartbeat_age_s = float(ofa_heartbeat_age) if ofa_heartbeat_age is not None else None
+    except (TypeError, ValueError):
+        ofa_heartbeat_age_s = None
+    ofa_unit_active = str(snapshot.get("ofa_active") or "") == "active"
     snap_age = _age_seconds(snapshot.get("ts"))
     if snap_age is not None and snap_age > 180:
         desk_active = False
@@ -89,6 +97,13 @@ def build_stack_status(*, analyze_mode: bool, broker: str | None, broker_connect
         book = "shorts open"
     else:
         book = "flat"
+
+    ofa_fresh = (
+        ofa_enabled
+        and ofa_unit_active
+        and ofa_heartbeat_age_s is not None
+        and ofa_heartbeat_age_s <= OFA_STALE_SECONDS
+    )
 
     components = [
         _component(
@@ -136,6 +151,16 @@ def build_stack_status(*, analyze_mode: bool, broker: str | None, broker_connect
             ),
         ),
         _component(
+            "ofa",
+            "OFA",
+            "pass" if ofa_fresh else ("warn" if not ofa_enabled else "fail"),
+            (
+                f"step {int(ofa_heartbeat_age_s)}s ago"
+                if ofa_heartbeat_age_s is not None
+                else ("off" if not ofa_enabled else "no heartbeat")
+            ),
+        ),
+        _component(
             "hands",
             "Hands book",
             "pass" if desk_active else "fail",
@@ -165,6 +190,9 @@ def write_desk_snapshot(
     strikeshield_heartbeat_age_s: float | None,
     set1: bool = False,
     set2open: bool = False,
+    ofa_enabled: bool = False,
+    ofa_active: str = "inactive",
+    ofa_heartbeat_age_s: float | None = None,
 ) -> None:
     """Called by the host watchdog (root) so OpenAlgo can read the mind."""
     payload = {
@@ -173,6 +201,9 @@ def write_desk_snapshot(
         "strike_desk": strike_desk,
         "strikeshield_enabled": strikeshield_enabled,
         "strikeshield_heartbeat_age_s": strikeshield_heartbeat_age_s,
+        "ofa_enabled": ofa_enabled,
+        "ofa_active": ofa_active,
+        "ofa_heartbeat_age_s": ofa_heartbeat_age_s,
         "set1": set1,
         "set2open": set2open,
     }
