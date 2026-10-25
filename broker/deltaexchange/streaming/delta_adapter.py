@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any
 
+from broker.deltaexchange.api.baseurl import get_delta_api_secret
 from broker.deltaexchange.streaming.delta_websocket import DeltaWebSocket
 from broker.deltaexchange.streaming.delta_mapping import (
     DeltaCapabilityRegistry,
@@ -71,7 +72,7 @@ class DeltaWebSocketAdapter(BaseBrokerWebSocketAdapter):
         else:
             # OpenAlgo stores the api_key as the auth token
             api_key    = get_auth_token(user_id, bypass_cache=True) or ""
-            api_secret = os.getenv("BROKER_API_SECRET", "")
+            api_secret = get_delta_api_secret()
 
         if not api_key:
             raise ValueError(f"No API key found for user {user_id}")

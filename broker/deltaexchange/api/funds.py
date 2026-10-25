@@ -7,9 +7,7 @@
 # Note: Delta Exchange India's wallet/balances does not expose session P&L fields.
 # P&L is aggregated from the positions endpoint instead.
 
-import os
-
-from broker.deltaexchange.api.baseurl import BASE_URL, get_auth_headers
+from broker.deltaexchange.api.baseurl import BASE_URL, get_auth_headers, get_delta_api_secret
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
 
@@ -103,10 +101,10 @@ def get_margin_data(auth_token):
         dict: OpenAlgo standard margin dict, or DEFAULT_MARGIN_RESPONSE on failure.
     """
     api_key = auth_token
-    api_secret = os.getenv("BROKER_API_SECRET", "")
+    api_secret = get_delta_api_secret()
 
     if not api_key or not api_secret:
-        logger.error("[DeltaExchange] BROKER_API_KEY / BROKER_API_SECRET not set")
+        logger.error("[DeltaExchange] DELTA_INDIA_API_KEY / DELTA_INDIA_API_SECRET not set")
         return DEFAULT_MARGIN_RESPONSE
 
     path = "/v2/wallet/balances"

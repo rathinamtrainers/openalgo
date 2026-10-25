@@ -1,6 +1,9 @@
-import os
-
-from broker.deltaexchange.api.baseurl import BASE_URL, get_auth_headers, get_url
+from broker.deltaexchange.api.baseurl import (
+    get_auth_headers,
+    get_delta_api_key,
+    get_delta_api_secret,
+    get_url,
+)
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
 
@@ -24,13 +27,13 @@ def authenticate_broker(code):
         (None, error_message)   on failure
     """
     try:
-        api_key = os.getenv("BROKER_API_KEY", "").strip()
-        api_secret = os.getenv("BROKER_API_SECRET", "").strip()
+        api_key = get_delta_api_key()
+        api_secret = get_delta_api_secret()
 
         if not api_key:
-            return None, "BROKER_API_KEY is not set in environment variables"
+            return None, "DELTA_INDIA_API_KEY is not set in environment variables"
         if not api_secret:
-            return None, "BROKER_API_SECRET is not set in environment variables"
+            return None, "DELTA_INDIA_API_SECRET is not set in environment variables"
 
         # Verify credentials with a live signed request to GET /v2/profile
         path = "/v2/profile"
@@ -68,7 +71,10 @@ def authenticate_broker(code):
                 return None, msg
 
         elif response.status_code == 401:
-            msg = "Invalid API key or signature — check BROKER_API_KEY and BROKER_API_SECRET"
+            msg = (
+                "Invalid API key or signature — check DELTA_INDIA_API_KEY "
+                "and DELTA_INDIA_API_SECRET"
+            )
             logger.error(msg)
             return None, msg
 

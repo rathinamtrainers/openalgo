@@ -4,7 +4,7 @@ import random
 import threading
 import time
 
-from broker.deltaexchange.api.baseurl import get_auth_headers, get_url
+from broker.deltaexchange.api.baseurl import get_auth_headers, get_delta_api_secret, get_url
 from broker.deltaexchange.mapping.transform_data import (
     map_exchange_type,
     map_product_type,
@@ -25,7 +25,7 @@ def get_api_response(endpoint, auth, method="GET", payload="", params=None):
 
     Args:
         endpoint: API path, e.g. "/v2/orders"
-        auth:     api_key (BROKER_API_KEY stored in OpenAlgo DB after login)
+        auth:     api_key (DELTA_INDIA_API_KEY stored in OpenAlgo DB after login)
         method:   HTTP method (GET, POST, PUT, DELETE)
         payload:  JSON body string for POST/PUT/DELETE requests (pass "" for GET)
         params:   Dict of query parameters (GET only)
@@ -34,7 +34,7 @@ def get_api_response(endpoint, auth, method="GET", payload="", params=None):
         Parsed JSON dict from Delta Exchange.
         On error returns {"success": False, "error": {"code": ..., "message": ...}}
     """
-    api_secret = os.getenv("BROKER_API_SECRET", "")
+    api_secret = get_delta_api_secret()
 
     # Build query string manually so the signature and the URL are always in sync.
     # Delta Exchange signature formula: METHOD + timestamp + path + query_string + body

@@ -2,9 +2,7 @@
 # Delta Exchange margin calculation
 # Endpoint: GET /v2/products/{product_id}/margin_required  (authenticated)
 
-import os
-
-from broker.deltaexchange.api.baseurl import BASE_URL, get_auth_headers
+from broker.deltaexchange.api.baseurl import BASE_URL, get_auth_headers, get_delta_api_secret
 from broker.deltaexchange.mapping.margin_data import parse_margin_response, transform_margin_positions
 from utils.httpx_client import get_httpx_client
 from utils.logging import get_logger
@@ -29,7 +27,7 @@ def get_margin_mode(auth: str) -> str:
     separate margin allocation.
     """
     api_key    = auth
-    api_secret = os.getenv("BROKER_API_SECRET", "")
+    api_secret = get_delta_api_secret()
     if not api_key or not api_secret:
         return "unknown"
 
@@ -78,7 +76,7 @@ def calculate_margin_api(positions, auth):
         Tuple of (MockResponse, response_data) matching OpenAlgo broker interface.
     """
     api_key = auth
-    api_secret = os.getenv("BROKER_API_SECRET", "")
+    api_secret = get_delta_api_secret()
 
     class MockResponse:
         def __init__(self, code):
@@ -88,7 +86,7 @@ def calculate_margin_api(positions, auth):
     if not api_key or not api_secret:
         return MockResponse(401), {
             "status": "error",
-            "message": "BROKER_API_KEY / BROKER_API_SECRET not configured",
+            "message": "DELTA_INDIA_API_KEY / DELTA_INDIA_API_SECRET not configured",
         }
 
     # Detect margin mode; log it so operators can see whether cross or isolated margin is active

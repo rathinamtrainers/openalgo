@@ -9,6 +9,26 @@ import time
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
 
 
+def get_delta_api_key() -> str:
+    """Return the Delta India API key without touching the cash-broker slot.
+
+    Dedicated ``DELTA_INDIA_API_KEY`` wins so this connection stays separate
+    from ``BROKER_API_KEY`` (Zerodha/Fyers/etc. on the same instance).
+    """
+    return (
+        os.getenv("DELTA_INDIA_API_KEY", "").strip()
+        or os.getenv("BROKER_API_KEY", "").strip()
+    )
+
+
+def get_delta_api_secret() -> str:
+    """Return the Delta India API secret without touching the cash-broker slot."""
+    return (
+        os.getenv("DELTA_INDIA_API_SECRET", "").strip()
+        or os.getenv("BROKER_API_SECRET", "").strip()
+    )
+
+
 def get_url(endpoint):
     """
     Constructs a full URL by combining the base URL and the endpoint.
@@ -62,14 +82,16 @@ def get_auth_headers(
         path:         Endpoint path, e.g. '/v2/orders'
         query_string: Raw query string including '?' prefix, or '' if none
         payload:      Request body as a JSON string, or '' for GET requests
-        api_key:      API key override (falls back to BROKER_API_KEY env var)
-        api_secret:   API secret override (falls back to BROKER_API_SECRET env var)
+        api_key:      API key override (falls back to DELTA_INDIA_API_KEY,
+                      then BROKER_API_KEY)
+        api_secret:   API secret override (falls back to DELTA_INDIA_API_SECRET,
+                      then BROKER_API_SECRET)
 
     Returns:
         dict of headers ready to pass to httpx / requests
     """
-    key = api_key or os.getenv("BROKER_API_KEY", "")
-    secret = api_secret or os.getenv("BROKER_API_SECRET", "")
+    key = api_key or get_delta_api_key()
+    secret = api_secret or get_delta_api_secret()
 
     timestamp = str(int(time.time()))
     signature_data = method.upper() + timestamp + path + query_string + payload
