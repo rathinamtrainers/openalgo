@@ -24,7 +24,7 @@ class ReadOnlyViolation(StrikeDeskError):
 
 
 class AnalyzerOff(StrikeDeskError):
-    """OpenAlgo is not in analyze mode; OFA will not place an order."""
+    """OpenAlgo is not in analyze mode; Analyze arms will not place an order."""
 
 
 class BookStateUnavailable(StrikeDeskError):

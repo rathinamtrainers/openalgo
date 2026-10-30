@@ -15,7 +15,7 @@ from opentelemetry.trace import Status, StatusCode
 from .book_state import read_book_state
 from .config import Settings
 from .errors import BookStateUnavailable, SpecialistTimeout, SpecialistUnavailable
-from .journal import SCHEMA_VERSION, Journal, append_decision_export
+from .journal import SCHEMA_VERSION, Journal
 from .observability import JournalSpanProcessor, get_tracer
 from .openalgo_client import OpenAlgoClient
 from .prompt_registry import PromptRegistry
@@ -368,10 +368,6 @@ def build_tick_graph(deps: TickDeps) -> Any:
                 "schema_version": SCHEMA_VERSION,
             }
             deps.journal.record_decision(**decision_fields)
-            try:
-                append_decision_export(decision_fields)
-            except OSError:
-                logger.warning("decision export unwritable — journal still holds the audit row")
             span.set_attribute("journal.latency_ms", latency_ms)
             span.set_attribute("journal.trace_complete", trace_complete)
             logger.info(

@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from .config import IST
 from .ltp_coa import NIFTY_STRIKE_STEP, CoaSnapshot, evaluate
 from .ltp_coa_exits import OpenTrade, can_reenter, decide_exit, in_entry_window
+from .ltp_coa_intel import IntelState, apply_handbook, atm_oi
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ def replay(
     report = ReplayReport()
     open_pos: _OpenPos | None = None
     last_exit: datetime | None = None
+    intel = IntelState()
 
     for bar in tape:
         report.bars += 1
@@ -242,6 +244,10 @@ def replay(
         bucket = report.by_day.setdefault(day, DayBucket())
         bucket.bars += 1
         snap = evaluate(bar.rows, bar.spot, atm=bar.atm, extension_pts=extension_pts)
+        call_oi, put_oi = atm_oi(bar.rows, bar.atm)
+        snap, intel = apply_handbook(
+            snap, intel, bar.ts, call_oi=call_oi, put_oi=put_oi
+        )
         if snap.signal != "FLAT":
             report.signals += 1
             bucket.signals += 1

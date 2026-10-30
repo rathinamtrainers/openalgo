@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CoA buy alert</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, Segoe UI, sans-serif;
+      background: #07111c;
+      color: #d7e6ef;
+    }
+    main { max-width: 720px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { font-size: 1.15rem; letter-spacing: 0.08em; text-transform: uppercase; color: #8dffc4; }
+    p.note { color: #8aa0ad; font-size: 0.92rem; line-height: 1.45; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 22px; }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 20px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    #arm { background: #22c55e; color: #052012; }
+    #arm.off { background: #334155; color: #e2e8f0; }
+    #ack { background: #f43f5e; color: #fff; display: none; }
+    #test { background: #1e293b; color: #e2e8f0; }
+    .board {
+      border: 1px solid #1f3344;
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      background: #0c1a27;
+    }
+    .board.buy { border-color: #22c55e; box-shadow: 0 0 0 1px #22c55e inset; }
+    .board header { display: flex; justify-content: space-between; gap: 12px; }
+    .chip { font-weight: 800; letter-spacing: 0.04em; }
+    .buy .chip { color: #4ade80; }
+    .muted { color: #7b93a3; font-size: 0.85rem; }
+    #status { margin-top: 8px; color: #8aa0ad; font-size: 0.85rem; }
+    body.alarming { background: #3b0d16; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>CoA buy alert</h1>
+    <p class="note">
+      Keep this tab open (volume up). It watches Strike Desk CoA on Nifty, Bank Nifty,
+      Sensex and BTC. Alerts are on by default. A siren starts when a board flips to
+      CALL TAGGED or PUT TAGGED — that is a Hands-confirmed buy, not a map-only watch.
+      Silence snoozes 5 minutes, then alerts arm again. Browsers need one click to
+      allow sound. Not a recommendation.
+    </p>
+    <div class="row">
+      <button id="arm" type="button" class="off">Alerts armed</button>
+      <button id="ack" type="button">Silence this alert</button>
+      <button id="test" type="button">Test siren</button>
+    </div>
+    <div id="boards"></div>
+    <p id="status">Alerts armed. First snapshot is the baseline; the next new tag sounds the siren.</p>
+  </main>
+  <script>
+    const BOARDS = [
+      { slug: "nifty", name: "Nifty", url: "/public-brief.json" },
+      { slug: "banknifty", name: "Bank Nifty", url: "/public-brief-banknifty.json" },
+      { slug: "sensex", name: "Sensex", url: "/public-brief-sensex.json" },
+      { slug: "crudeoil", name: "Crude", url: "/public-brief-crudeoil.json" },
+      { slug: "natgas", name: "Natgas", url: "/public-brief-natgas.json" },
+      { slug: "btc-options", name: "BTC Options", url: "/public-brief-btc-options.json" },
+    ];
+    const POLL_MS = 3000;
+    const SNOOZE_MS = 5 * 60 * 1000;
+
+    const boardsEl = document.getElementById("boards");
+    const statusEl = document.getElementById("status");
+    const armBtn = document.getElementById("arm");
+    const ackBtn = document.getElementById("ack");
+    const testBtn = document.getElementById("test");
+
+    let armed = true;
+    let primed = false;
+    let last = {};
+    let audioCtx = null;
+    let sirenTimer = null;
+    let snoozeTimer = null;
+    let snoozeUntil = 0;
+    let oscA = null;
+    let oscB = null;
+    let gain = null;
+    let hi = true;
+
+    function fmtSnooze(ms) {
+      const total = Math.max(0, Math.ceil(ms / 1000));
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      return minutes + ":" + String(seconds).padStart(2, "0");
+    }
+
+    function setArmedUi() {
+      armed = true;
+      primed = false;
+      last = {};
+      snoozeUntil = 0;
+      if (snoozeTimer) {
+        clearTimeout(snoozeTimer);
+        snoozeTimer = null;
+      }
+      armBtn.textContent = "Alerts armed";
+      armBtn.classList.add("off");
+      statusEl.textContent = "Armed. First snapshot is the baseline; the next new tag sounds the siren.";
+    }
+
+    function isBuy(label) {
+      const t = String(label || "").toUpperCase().trim();
+      return t === "CALL TAGGED" || t === "PUT TAGGED";
+    }
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    }
+
+    function stopSiren() {
+      if (sirenTimer) {
+        clearInterval(sirenTimer);
+        sirenTimer = null;
+      }
+      if (oscA) { try { oscA.stop(); } catch (e) {} oscA = null; }
+      if (oscB) { try { oscB.stop(); } catch (e) {} oscB = null; }
+      gain = null;
+      document.body.classList.remove("alarming");
+      ackBtn.style.display = "none";
+      document.title = "CoA buy alert";
+    }
+
+    function startSiren(label) {
+      const ctx = ensureAudio();
+      stopSiren();
+      gain = ctx.createGain();
+      gain.gain.value = 0.9;
+      gain.connect(ctx.destination);
+      oscA = ctx.createOscillator();
+      oscB = ctx.createOscillator();
+      oscA.type = "square";
+      oscB.type = "square";
+      oscA.frequency.value = 880;
+      oscB.frequency.value = 1320;
+      oscA.connect(gain);
+      oscB.connect(gain);
+      oscA.start();
+      oscB.start();
+      sirenTimer = setInterval(() => {
+        hi = !hi;
+        if (oscA) oscA.frequency.setValueAtTime(hi ? 880 : 660, ctx.currentTime);
+        if (oscB) oscB.frequency.setValueAtTime(hi ? 1480 : 990, ctx.currentTime);
+        document.title = hi ? "BUY — " + label : "CoA buy alert";
+      }, 280);
+      document.body.classList.add("alarming");
+      ackBtn.style.display = "inline-block";
+      try {
+        if (Notification.permission === "granted") {
+          new Notification("CoA buy tagged", { body: label, requireInteraction: true });
+        }
+      } catch (e) {}
+    }
+
+    function render(rows) {
+      boardsEl.innerHTML = rows.map((row) => {
+        const buy = isBuy(row.chip);
+        return (
+          '<article class="board' + (buy ? " buy" : "") + '">' +
+            "<header><strong>" + row.name + "</strong><span class=\"chip\">" +
+            (row.chip || "—") + "</span></header>" +
+            '<div class="muted">' + (row.line || row.error || "waiting") +
+            (row.asOf ? " · " + row.asOf : "") + "</div>" +
+          "</article>"
+        );
+      }).join("");
+    }
+
+    async function poll() {
+      const rows = [];
+      const freshBuys = [];
+      for (const board of BOARDS) {
+        let row = { name: board.name, slug: board.slug, chip: "—", line: "", asOf: "" };
+        try {
+          const res = await fetch(board.url + "?t=" + Date.now(), { cache: "no-store" });
+          if (!res.ok) {
+            row.error = res.status === 404 ? "board not publishing" : "http " + res.status;
+          } else {
+            const data = await res.json();
+            row.chip = data.scenario_label || "—";
+            row.line = data.do_now || data.line || "";
+            row.asOf = data.as_of_ist || "";
+          }
+        } catch (err) {
+          row.error = "unreachable";
+        }
+        const prev = last[board.slug];
+        if (armed && primed && isBuy(row.chip) && (!prev || prev !== row.chip)) {
+          freshBuys.push(board.name + " " + row.chip);
+        }
+        last[board.slug] = row.chip;
+        rows.push(row);
+      }
+      primed = true;
+      render(rows);
+      if (freshBuys.length) {
+        startSiren(freshBuys.join(" · "));
+        statusEl.textContent = "BUY tagged: " + freshBuys.join(" · ");
+      } else if (armed) {
+        statusEl.textContent = "Armed. Polling every 3s. Siren only on a new CALL/PUT TAGGED.";
+      } else if (snoozeUntil) {
+        statusEl.textContent = "Snoozed. Alerts arm again in " + fmtSnooze(snoozeUntil - Date.now()) + ".";
+      }
+    }
+
+    armBtn.addEventListener("click", async () => {
+      ensureAudio();
+      setArmedUi();
+      try { await Notification.requestPermission(); } catch (e) {}
+      poll();
+    });
+    ackBtn.addEventListener("click", () => {
+      stopSiren();
+      armed = false;
+      snoozeUntil = Date.now() + SNOOZE_MS;
+      if (snoozeTimer) clearTimeout(snoozeTimer);
+      snoozeTimer = setTimeout(() => {
+        snoozeTimer = null;
+        setArmedUi();
+        poll();
+      }, SNOOZE_MS);
+      armBtn.textContent = "Snoozed 5:00";
+      armBtn.classList.remove("off");
+      statusEl.textContent = "Silenced. Alerts arm again in 5 minutes.";
+    });
+    testBtn.addEventListener("click", () => {
+      ensureAudio();
+      startSiren("TEST");
+      statusEl.textContent = "Test siren. Click Silence when you have heard it.";
+    });
+    window.addEventListener("pointerdown", () => { ensureAudio(); }, { once: true });
+    window.addEventListener("keydown", () => { ensureAudio(); }, { once: true });
+
+    render(BOARDS.map((b) => ({ name: b.name, chip: "—", line: "waiting" })));
+    poll();
+    setInterval(() => {
+      if (armed) poll();
+      else if (snoozeUntil) {
+        const left = snoozeUntil - Date.now();
+        armBtn.textContent = left > 0 ? "Snoozed " + fmtSnooze(left) : "Alerts armed";
+      }
+    }, POLL_MS);
+  </script>
+</body>
+</html>

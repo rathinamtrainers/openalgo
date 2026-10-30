@@ -1,5 +1,7 @@
 import {
+  Activity,
   BarChart3,
+  Beaker,
   Bell,
   BookOpen,
   ClipboardList,
@@ -16,6 +18,7 @@ import {
   type LucideIcon,
   MessageCircle,
   MessageSquare,
+  Radio,
   Search,
   Settings,
   TrendingUp,
@@ -61,6 +64,9 @@ export const mobileSheetItems = navItems.filter((item) => !bottomNavPaths.includ
 
 // Profile dropdown menu items
 export const profileMenuItems: NavItem[] = [
+  { href: 'https://lab.zerotouchalgo.com/', label: 'Lab', icon: Beaker },
+  { href: 'https://ltp.zerotouchalgo.com/', label: 'LTP', icon: Activity },
+  { href: 'https://zerotouchalgo.com/ltp', label: 'LTP Board', icon: Radio },
   { href: '/profile', label: 'Profile', icon: User },
   { href: '/apikey', label: 'API Key', icon: Key },
   { href: '/master-contract', label: 'Master Contract', icon: FileStack },
@@ -80,7 +86,14 @@ export const profileMenuItems: NavItem[] = [
 
 // External links
 export const externalLinks = {
+  lab: { href: 'https://lab.zerotouchalgo.com/', label: 'Lab', icon: Beaker },
+  ltp: { href: 'https://ltp.zerotouchalgo.com/', label: 'LTP', icon: Activity },
+  ltpBoard: { href: 'https://zerotouchalgo.com/ltp', label: 'LTP Board', icon: Radio },
   docs: { href: 'https://docs.openalgo.in', label: 'Docs', icon: BookOpen },
+}
+
+export function isExternalNav(href: string): boolean {
+  return href.startsWith('https://') || href.startsWith('http://')
 }
 
 // Shared utility to check if a route is active

@@ -2,8 +2,9 @@ import { BarChart3, BookOpen, LogOut, Menu, Moon, Sun, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { authApi } from '@/api/auth'
-import { StackStatusLamp } from '@/components/StackStatus'
 import { LogoutConfirmDialog } from '@/components/auth/LogoutConfirmDialog'
+import { ProfileDropdownItems, ProfileSheetItems } from '@/components/layout/ProfileMenuItems'
+import { StackStatusLamp } from '@/components/StackStatus'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -128,22 +129,11 @@ export function Navbar() {
                 <div className="px-3 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   Quick Access
                 </div>
-                {filteredProfileMenuItems.map((item) => (
-                  <Link
-                    key={item.href}
-                    to={item.href}
-                    onClick={() => setMobileOpen(false)}
-                    className={cn(
-                      'flex items-center gap-3 rounded-lg px-3 py-3 text-sm transition-colors min-h-[44px] touch-manipulation',
-                      isActive(item.href)
-                        ? 'bg-primary text-primary-foreground'
-                        : 'hover:bg-muted active:bg-muted'
-                    )}
-                  >
-                    <item.icon className="h-4 w-4" />
-                    {item.label}
-                  </Link>
-                ))}
+                <ProfileSheetItems
+                  items={filteredProfileMenuItems}
+                  isActive={isActive}
+                  onClick={() => setMobileOpen(false)}
+                />
                 <a
                   href="https://docs.openalgo.in"
                   target="_blank"
@@ -260,16 +250,7 @@ export function Navbar() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              {filteredProfileMenuItems.map((item) => (
-                <DropdownMenuItem
-                  key={item.href}
-                  onSelect={() => navigate(item.href)}
-                  className="cursor-pointer"
-                >
-                  <item.icon className="h-4 w-4 mr-2" />
-                  {item.label}
-                </DropdownMenuItem>
-              ))}
+              <ProfileDropdownItems items={filteredProfileMenuItems} onNavigate={navigate} />
               <DropdownMenuItem asChild>
                 <a
                   href="https://docs.openalgo.in"

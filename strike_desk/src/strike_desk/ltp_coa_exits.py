@@ -52,8 +52,10 @@ def can_reenter(now: datetime, last_exit: datetime | None) -> bool:
     return now >= last_exit + REENTRY
 
 
-def in_entry_window(clock: time) -> bool:
-    return ENTRY_OPEN <= clock <= ENTRY_CLOSE
+def in_entry_window(
+    clock: time, *, start: time = ENTRY_OPEN, end: time = ENTRY_CLOSE
+) -> bool:
+    return start <= clock <= end
 
 
 def decide_exit(
@@ -62,10 +64,14 @@ def decide_exit(
     ltp: float,
     trade: OpenTrade,
     live: CoaSnapshot,
+    *,
+    spot_sl_buffer: float = EOS_SL_BUFFER,
+    reclaim_trail: float = RECLAIM_TRAIL,
+    flatten_at: time | None = FLAT_TIME,
 ) -> str | None:
     """First matching rule wins. Empty string never returned."""
-    if clock >= FLAT_TIME:
-        return "15:15 flatten"
+    if flatten_at is not None and clock >= flatten_at:
+        return f"{flatten_at.strftime('%H:%M')} flatten"
     if ltp <= 0 or trade.entry <= 0:
         return None
 
@@ -75,11 +81,11 @@ def decide_exit(
     if _spot_target(trade, live, spot):
         return "spot target opposite S/R"
 
-    if _hard_spot_sl(trade, spot):
+    if _hard_spot_sl(trade, spot, spot_sl_buffer):
         return "spot SL extension broken"
 
     _mark_reclaim(trade, live, spot)
-    if _reclaim_trail(trade, live, spot):
+    if _reclaim_trail(trade, live, spot, reclaim_trail):
         return "spot TSL live S/R"
 
     if ltp <= trade.entry * PREMIUM_FUSE:
@@ -111,11 +117,11 @@ def _spot_target(trade: OpenTrade, live: CoaSnapshot, spot: float) -> bool:
     return False
 
 
-def _hard_spot_sl(trade: OpenTrade, spot: float) -> bool:
+def _hard_spot_sl(trade: OpenTrade, spot: float, buffer: float = EOS_SL_BUFFER) -> bool:
     if trade.side == "CE" and trade.eos is not None:
-        return spot < trade.eos - EOS_SL_BUFFER
+        return spot < trade.eos - buffer
     if trade.side == "PE" and trade.eor is not None:
-        return spot > trade.eor + EOR_SL_BUFFER
+        return spot > trade.eor + buffer
     return False
 
 
@@ -128,15 +134,20 @@ def _mark_reclaim(trade: OpenTrade, live: CoaSnapshot, spot: float) -> None:
         trade.reclaimed = True
 
 
-def _reclaim_trail(trade: OpenTrade, live: CoaSnapshot, spot: float) -> bool:
+def _reclaim_trail(
+    trade: OpenTrade,
+    live: CoaSnapshot,
+    spot: float,
+    trail: float = RECLAIM_TRAIL,
+) -> bool:
     if not trade.reclaimed:
         return False
     support = _level(live.support) or trade.support
     resistance = _level(live.resistance) or trade.resistance
     if trade.side == "CE" and support is not None:
-        return spot < support - RECLAIM_TRAIL
+        return spot < support - trail
     if trade.side == "PE" and resistance is not None:
-        return spot > resistance + RECLAIM_TRAIL
+        return spot > resistance + trail
     return False
 
 

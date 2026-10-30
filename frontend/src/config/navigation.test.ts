@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   bottomNavItems,
   isActiveRoute,
+  isExternalNav,
   mobileSheetItems,
   navItems,
   profileMenuItems,
@@ -63,9 +64,21 @@ describe('Navigation Config', () => {
   describe('profileMenuItems', () => {
     it('contains profile-related menu items', () => {
       const labels = profileMenuItems.map((item) => item.label)
+      expect(labels).toContain('Lab')
+      expect(labels).toContain('LTP')
+      expect(labels).toContain('LTP Board')
       expect(labels).toContain('Profile')
       expect(labels).toContain('API Key')
       expect(labels).toContain('Holdings')
+    })
+
+    it('opens Lab, LTP, and the public LTP board as external URLs', () => {
+      const byLabel = Object.fromEntries(profileMenuItems.map((item) => [item.label, item.href]))
+      expect(byLabel.Lab).toBe('https://lab.zerotouchalgo.com/')
+      expect(byLabel.LTP).toBe('https://ltp.zerotouchalgo.com/')
+      expect(byLabel['LTP Board']).toBe('https://zerotouchalgo.com/ltp')
+      expect(isExternalNav(byLabel.Lab)).toBe(true)
+      expect(isExternalNav('/profile')).toBe(false)
     })
   })
 

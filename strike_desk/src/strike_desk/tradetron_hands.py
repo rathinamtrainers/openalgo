@@ -48,10 +48,38 @@ COA_BUY_CE = "buy_ce"
 COA_BUY_PE = "buy_pe"
 COA_EXIT = "exit"
 
+# Per-board webhook suffix. Nifty stays unsuffixed so the live template
+# keeps firing the same flags. Never copy Nifty onto Banknifty or Sensex.
+# BTC uses the same unsuffixed names on a *different* auth token.
+_COA_SUFFIX = {
+    "nifty": "",
+    "banknifty": "_bn",
+    "sensex": "_sx",
+    "crudeoil": "_cl",
+    "natgas": "_ng",
+    "btc-options": "",
+}
+CASH_HANDS_BOARDS = frozenset({"nifty", "banknifty", "sensex"})
+MCX_HANDS_BOARDS = frozenset({"crudeoil", "natgas"})
+BTC_HANDS_BOARDS = frozenset({"btc-options"})
+
+
+def coa_flag_pairs(action: str, suffix: str = "") -> tuple[tuple[str, int], ...]:
+    buy_ce = f"ltp_buy_ce{suffix}"
+    buy_pe = f"ltp_buy_pe{suffix}"
+    exit_k = f"ltp_exit{suffix}"
+    if action == COA_BUY_CE:
+        return ((buy_ce, 1), (buy_pe, 0), (exit_k, 0))
+    if action == COA_BUY_PE:
+        return ((buy_pe, 1), (buy_ce, 0), (exit_k, 0))
+    if action == COA_EXIT:
+        return ((exit_k, 1), (buy_ce, 0), (buy_pe, 0))
+    raise ValueError(f"unknown CoA hands action {action!r}")
+
+
 _COA_MAP: dict[str, tuple[tuple[str, int], ...]] = {
-    COA_BUY_CE: (("ltp_buy_ce", 1), ("ltp_buy_pe", 0), ("ltp_exit", 0)),
-    COA_BUY_PE: (("ltp_buy_pe", 1), ("ltp_buy_ce", 0), ("ltp_exit", 0)),
-    COA_EXIT: (("ltp_exit", 1), ("ltp_buy_ce", 0), ("ltp_buy_pe", 0)),
+    action: coa_flag_pairs(action, "")
+    for action in (COA_BUY_CE, COA_BUY_PE, COA_EXIT)
 }
 
 
@@ -95,22 +123,38 @@ class TradetronHands:
         return HandsResult(action=action, http_status=status, body=text)
 
 
+class NoopCoaHands:
+    """BTC map can run 24x7 without a webhook token. Never posts flags."""
+
+    def send(self, action: str, board: str = "nifty") -> HandsResult:
+        logger.warning("coa hands %s %s skipped: no token", board, action)
+        return HandsResult(action=action, http_status=0, body="skipped")
+
+
 class CoaHands:
     """POST ltp_buy_ce / ltp_buy_pe / ltp_exit to the CoA Hands template."""
 
-    def __init__(self, settings: Settings) -> None:
-        token = ""
-        if settings.tt_auth_token_coa is not None:
-            token = settings.tt_auth_token_coa.get_secret_value().strip()
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        token: str | None = None,
+        boards: frozenset[str] | None = None,
+    ) -> None:
+        if token is None:
+            secret = settings.tt_auth_token_coa
+            token = secret.get_secret_value().strip() if secret is not None else ""
         if not token:
             raise RuntimeError("STRIKE_DESK_TT_AUTH_TOKEN_COA is not set")
         self._token = token
         self._url = settings.tt_webhook_url
+        self._boards = boards if boards is not None else CASH_HANDS_BOARDS
 
-    def send(self, action: str) -> HandsResult:
-        pairs = _COA_MAP.get(action)
-        if pairs is None:
-            raise ValueError(f"unknown CoA hands action {action!r}")
+    def send(self, action: str, board: str = "nifty") -> HandsResult:
+        slug = (board or "nifty").strip().lower()
+        if slug not in self._boards:
+            raise ValueError(f"unknown CoA board {board!r}")
+        pairs = coa_flag_pairs(action, _COA_SUFFIX[slug])
         payload = build_payload(self._token, pairs)
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -125,7 +169,7 @@ class CoaHands:
                 status = resp.status
         except urllib.error.HTTPError as exc:
             err = exc.read().decode("utf-8", errors="replace")
-            logger.error("coa hands %s HTTP %s: %s", action, exc.code, err[:300])
+            logger.error("coa hands %s %s HTTP %s: %s", slug, action, exc.code, err[:300])
             raise
-        logger.info("coa hands %s -> %s %s", action, status, text[:160])
+        logger.info("coa hands %s %s -> %s %s", slug, action, status, text[:160])
         return HandsResult(action=action, http_status=status, body=text)

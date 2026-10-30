@@ -255,6 +255,12 @@ def react_gex():
     return serve_react_app()
 
 
+# Greeks Lab - live Greeks, theta decay, what-if
+@react_bp.route("/greekslab")
+def react_greekslab():
+    return serve_react_app()
+
+
 # IV Smile - Implied Volatility smile curve
 @react_bp.route("/ivsmile")
 def react_ivsmile():

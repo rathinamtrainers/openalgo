@@ -27,6 +27,7 @@ READ_ONLY_PATHS = frozenset(
         "/api/v1/quotes",
         "/api/v1/history",
         "/api/v1/optionchain",
+        "/api/v1/expiry",
         "/api/v1/depth",
     }
 )
@@ -158,6 +159,20 @@ class OpenAlgoClient:
         if not isinstance(data, list):
             raise OpenAlgoError("/api/v1/history: 'data' was not a list")
         return [row for row in data if isinstance(row, dict)]
+
+    def expiry_dates(self, symbol: str, exchange: str) -> list[str]:
+        """Listed option expiries (``23-NOV-26``). Empty list if the broker has none."""
+        data = self._post(
+            "/api/v1/expiry",
+            {
+                "symbol": symbol,
+                "exchange": exchange,
+                "instrumenttype": "options",
+            },
+        ).get("data")
+        if not isinstance(data, list):
+            raise OpenAlgoError("/api/v1/expiry: 'data' was not a list")
+        return [str(row) for row in data if row]
 
     def optionchain(
         self,

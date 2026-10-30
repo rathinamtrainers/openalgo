@@ -67,6 +67,7 @@ const StraddleChart = lazy(() => import('@/pages/StraddleChart'))
 const CustomStraddle = lazy(() => import('@/pages/CustomStraddle'))
 const VolSurface = lazy(() => import('@/pages/VolSurface'))
 const GEXDashboard = lazy(() => import('@/pages/GEXDashboard'))
+const GreeksLab = lazy(() => import('@/pages/GreeksLab'))
 const IVSmile = lazy(() => import('@/pages/IVSmile'))
 const OIProfile = lazy(() => import('@/pages/OIProfile'))
 const Arbitrage = lazy(() => import('@/pages/Arbitrage'))
@@ -208,6 +209,7 @@ function App() {
                 <Route path="/straddlepnl" element={<CustomStraddle />} />
                 <Route path="/volsurface" element={<VolSurface />} />
                 <Route path="/gex" element={<GEXDashboard />} />
+                <Route path="/greekslab" element={<GreeksLab />} />
                 <Route path="/ivsmile" element={<IVSmile />} />
                 <Route path="/oiprofile" element={<OIProfile />} />
                 <Route path="/arbitrage" element={<Arbitrage />} />

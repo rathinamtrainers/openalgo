@@ -36,6 +36,7 @@ class SessionGate:
         self._client = client
         self._settings = settings
         self._windows: dict[date, tuple[datetime, datetime] | None] = {}
+        self._ex_windows: dict[tuple[date, str], tuple[datetime, datetime] | None] = {}
 
     def trading_window(self, day: date) -> tuple[datetime, datetime] | None:
         """The configured exchange's IST open/close for ``day``, or None if closed."""
@@ -55,6 +56,36 @@ class SessionGate:
         if len(self._windows) >= _CACHE_LIMIT:
             self._windows.pop(next(iter(self._windows)))
         self._windows[day] = window
+        return window
+
+    def exchange_window(self, day: date, exchange: str) -> tuple[datetime, datetime] | None:
+        """IST open/close for ``exchange`` on ``day``. MCX falls back to 09:00–23:30 weekdays."""
+        from datetime import time as dtime
+
+        code = (exchange or "").upper()
+        key = (day, code)
+        if key in self._ex_windows:
+            return self._ex_windows[key]
+        window: tuple[datetime, datetime] | None = None
+        try:
+            rows = self._client.market_timings(day)
+        except OpenAlgoError:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("exchange", "")).upper() != code:
+                continue
+            start = datetime.fromtimestamp(int(row["start_time"]) / 1000, tz=IST)
+            end = datetime.fromtimestamp(int(row["end_time"]) / 1000, tz=IST)
+            window = (start, end)
+            break
+        if window is None and code == "MCX" and day.weekday() < 6:
+            window = (
+                datetime.combine(day, dtime(9, 0), tzinfo=IST),
+                datetime.combine(day, dtime(23, 30), tzinfo=IST),
+            )
+        if len(self._ex_windows) >= _CACHE_LIMIT * 4:
+            self._ex_windows.pop(next(iter(self._ex_windows)))
+        self._ex_windows[key] = window
         return window
 
     def is_trading_day(self, day: date) -> bool:

@@ -38,10 +38,11 @@ const PAGE_TITLES: Record<string, string> = {
   '/straddlepnl': 'Straddle P&L',
   '/volsurface': 'Vol Surface',
   '/gex': 'GEX Dashboard',
+  '/greekslab': 'Lab',
   '/ivsmile': 'IV Smile',
   '/oiprofile': 'OI Profile',
   '/websocket/test': 'WebSocket Test',
-  '/strategy': 'Strategies',
+  '/strategy': 'Strategy bank',
   '/strategy/new': 'New Strategy',
   '/logs/desk-decisions': 'Analyzer Decision Log',
   '/python': 'Python Strategies',
@@ -77,7 +78,7 @@ const PAGE_TITLES: Record<string, string> = {
 
 /** Dynamic route patterns for parameterized routes */
 const DYNAMIC_TITLES: Array<{ pattern: RegExp; title: string }> = [
-  { pattern: /^\/strategy\/books\/[^/]+$/, title: 'Analyzer Decision Log' },
+  { pattern: /^\/strategy\/books\/[^/]+$/, title: 'Strategy timeline' },
   { pattern: /^\/strategy\/[^/]+\/configure$/, title: 'Configure Strategy' },
   { pattern: /^\/strategy\/[^/]+$/, title: 'View Strategy' },
   { pattern: /^\/python\/[^/]+\/edit$/, title: 'Edit Strategy' },

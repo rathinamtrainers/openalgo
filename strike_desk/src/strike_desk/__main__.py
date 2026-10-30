@@ -11,9 +11,11 @@ import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
+from .coa_analyzer import CoaAnalyzer
 from .config import IST, Settings, get_settings
 from .errors import McpUnavailable, ModelCallFailed, StrikeDeskError
 from .journal import Journal
+from .ltp_coa_live import make_cash_runners, make_mcx_runners
 from .mcp_toolbox import McpToolbox
 from .observability import Redactor, configure_logging, configure_tracing, get_tracer
 from .prompt_registry import PromptRegistry
@@ -21,9 +23,8 @@ from .regime_analyst import build_regime_analyst, build_regime_read_row
 from .service import StrikeDeskService
 from .session import SessionGate
 from .specialists import SpecialistRequest
-from .ltp_coa_live import CoaLiveRunner
 from .strikeshield import StrikeShieldRunner
-from .tradetron_hands import CoaHands, TradetronHands
+from .tradetron_hands import CASH_HANDS_BOARDS, MCX_HANDS_BOARDS, CoaHands, NoopCoaHands, TradetronHands
 
 
 def _today() -> str:
@@ -317,41 +318,81 @@ def _cmd_coa_brief(settings: Settings, _args: argparse.Namespace) -> int:
         secrets.append(settings.anthropic_api_key.get_secret_value())
     redactor = Redactor(secrets)
     configure_logging(settings, redactor)
+    from .coa_boards import SESSION_BOARDS, expiry_date_for_board, pick_listed_expiry
+    from .errors import OpenAlgoError
     from .ltp_coa import evaluate
-    from .ltp_coa_brief import build_brief, update_tape, write_public_brief
+    from .ltp_coa_brief import build_brief, publish_public_brief, update_tape
     from .ltp_coa_replay import expiry_token
     from .openalgo_client import OpenAlgoClient
 
     client = OpenAlgoClient(settings)
     gate = SessionGate(client, settings)
     now = datetime.now(tz=IST)
+    wrote = 0
     try:
-        expiry_day = gate.expiry_date_for(now.date())
-        if expiry_day is None:
-            print("coa brief: no expiry", file=sys.stderr)
-            return 1
-        payload_chain = client.optionchain(
-            settings.index_symbol,
-            settings.index_spot_exchange,
-            expiry_token(expiry_day),
-            strike_count=10,
-        )
-        chain = payload_chain.get("chain") or []
-        spot = float(payload_chain.get("underlying_ltp") or 0)
-        atm = float(payload_chain.get("atm_strike") or 0)
-        if spot <= 0 or atm <= 0 or not chain:
-            print("coa brief: empty chain", file=sys.stderr)
-            return 1
-        snap = evaluate(chain, spot, atm=atm)
-        tape = update_tape(None, snap, now)
-        brief = build_brief(snap, now, tape)
-        write_public_brief(settings.public_brief_path, brief)
-        print(brief["as_of_ist"], brief["stance"])
-        print(brief["body"])
-        for row in brief["opportunities"]:
-            print(f"- {row['side']} {row['status']}: {row['trigger']}")
-        print("wrote", settings.public_brief_path)
-        return 0
+        from .ltp_coa_intel import apply_handbook, atm_oi
+        from .ltp_coa_narrate import polish_brief
+
+        for board in SESSION_BOARDS:
+            try:
+                labels = client.expiry_dates(board.index_symbol, board.option_exchange)
+            except OpenAlgoError:
+                labels = []
+            expiry_day = pick_listed_expiry(
+                now.date(), labels, kind=board.expiry_kind
+            ) or expiry_date_for_board(now.date(), board, gate.is_trading_day)
+            if expiry_day is None:
+                print(f"coa brief {board.slug}: no expiry", file=sys.stderr)
+                continue
+            payload_chain = client.optionchain(
+                board.index_symbol,
+                board.index_spot_exchange,
+                expiry_token(expiry_day),
+                strike_count=10,
+            )
+            chain = payload_chain.get("chain") or []
+            spot = float(payload_chain.get("underlying_ltp") or 0)
+            atm = float(payload_chain.get("atm_strike") or 0)
+            if spot <= 0 or atm <= 0 or not chain:
+                print(f"coa brief {board.slug}: empty chain", file=sys.stderr)
+                continue
+            snap = evaluate(
+                chain,
+                spot,
+                atm=atm,
+                strike_step=board.strike_step,
+                extension_pts=board.extension_pts,
+                expiry_kind=board.expiry_kind,
+            )
+            call_oi, put_oi = atm_oi(chain, atm)
+            snap, _intel = apply_handbook(
+                snap,
+                None,
+                now,
+                call_oi=call_oi,
+                put_oi=put_oi,
+                expiry_kind=board.expiry_kind,
+            )
+            tape = update_tape(None, snap, now)
+            brief = build_brief(
+                snap,
+                now,
+                tape,
+                index_name=board.index_name,
+                strike_step=board.strike_step,
+                market=board.slug,
+                extension_pts=board.extension_pts,
+            )
+            brief = polish_brief(brief, settings)
+            path = settings.state_dir / board.brief_file
+            publish_public_brief(path, brief, settings)
+            print(board.slug, brief["as_of_ist"], brief["stance"])
+            print(brief.get("line") or brief["body"])
+            for row in brief["opportunities"]:
+                print(f"- {row['side']} {row['status']}: {row['trigger']}")
+            print("wrote", path)
+            wrote += 1
+        return 0 if wrote else 1
     finally:
         client.close()
 
@@ -484,33 +525,70 @@ def _cmd_coa_live(settings: Settings, args: argparse.Namespace) -> int:
     secrets = [settings.openalgo_api_key.get_secret_value(), token]
     if settings.anthropic_api_key is not None:
         secrets.append(settings.anthropic_api_key.get_secret_value())
+    mcx_token = (
+        settings.tt_auth_token_coa_mcx.get_secret_value().strip()
+        if settings.tt_auth_token_coa_mcx is not None
+        else ""
+    )
+    if mcx_token:
+        secrets.append(mcx_token)
     redactor = Redactor(secrets)
     configure_logging(settings, redactor)
     from .openalgo_client import OpenAlgoClient
 
     client = OpenAlgoClient(settings)
+    analyzer = CoaAnalyzer(settings, client)
     gate = SessionGate(client, settings)
-    runner = CoaLiveRunner(
+    cash_hands = CoaHands(settings, token=token, boards=CASH_HANDS_BOARDS)
+    if mcx_token:
+        mcx_hands: CoaHands | NoopCoaHands = CoaHands(
+            settings, token=mcx_token, boards=MCX_HANDS_BOARDS
+        )
+    else:
+        mcx_hands = NoopCoaHands()
+    runners = make_cash_runners(
         settings,
         client,
-        CoaHands(settings),
+        cash_hands,
+        analyzer=analyzer,
         is_trading_day=gate.is_trading_day,
-        expiry_date_for=gate.expiry_date_for,
         trading_window=gate.trading_window,
+    )
+    runners.extend(
+        make_mcx_runners(
+            settings,
+            client,
+            mcx_hands,
+            analyzer=analyzer,
+            is_trading_day=lambda day: gate.exchange_window(day, "MCX") is not None,
+            trading_window=lambda day: gate.exchange_window(day, "MCX"),
+        )
     )
     try:
         if args.once:
-            sent = runner.step()
-            print("coa live once:", ", ".join(sent) if sent else "hold")
+            lines = []
+            for runner in runners:
+                sent = runner.step()
+                lines.append(
+                    f"{runner.board.slug}:"
+                    + (", ".join(sent) if sent else "hold")
+                )
+            print("coa live once:", " | ".join(lines))
             return 0
-        print("CoA live running; Ctrl-C to stop")
+        print(
+            "CoA live running boards="
+            + ",".join(r.board.slug for r in runners)
+            + "; Ctrl-C to stop"
+        )
         while True:
-            runner.step()
+            for runner in runners:
+                runner.step()
             time.sleep(settings.coa_interval_seconds)
     except KeyboardInterrupt:
         print("coa live stopped")
         return 0
     finally:
+        analyzer.close()
         client.close()
 
 
@@ -564,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
 
     coa_parser = subparsers.add_parser(
         "coa-live",
-        help="run CoA mind to the separate Tradetron Hands book",
+        help="run CoA mind: OpenAlgo Analyze fill + Tradetron Hands flags",
     )
     coa_parser.add_argument("--once", action="store_true", help="evaluate one step and exit")
 

@@ -107,3 +107,12 @@ def test_append_decision_export_writes_jsonl(tmp_path):
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert "tick-export" in lines[0]
+
+
+def test_record_decision_appends_jsonl_export(journal, tmp_path, monkeypatch):
+    export = tmp_path / "decisions.jsonl"
+    monkeypatch.setenv("STRIKE_DESK_DECISIONS_EXPORT", str(export))
+    journal.record_decision(**make_row("tick-from-journal"))
+    lines = export.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert "tick-from-journal" in lines[0]

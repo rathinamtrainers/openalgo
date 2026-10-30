@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -29,6 +30,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from sqlalchemy.pool import NullPool
 
 from .errors import JournalWriteError
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
 _LINUX_EXPORT = Path("/var/tmp/strike-desk-decisions.jsonl")
@@ -60,18 +63,23 @@ def default_export_path() -> Path | None:
 
 
 def append_decision_export(fields: dict[str, Any], path: Path | None = None) -> None:
-    """World-readable JSONL copy for the OpenAlgo audit page. Fail-soft at the caller."""
-    target = path or default_export_path()
-    if target is None:
-        return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {key: fields.get(key) for key in _EXPORT_FIELDS}
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, default=str) + "\n")
+    """World-readable JSONL copy for the OpenAlgo audit page. Never raises."""
     try:
-        os.chmod(target, 0o644)
+        target = path or default_export_path()
+        if target is None:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {key: fields.get(key) for key in _EXPORT_FIELDS}
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        fd = os.open(target, flags, 0o644)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+        try:
+            os.chmod(target, 0o644)
+        except OSError:
+            pass
     except OSError:
-        pass
+        logger.warning("decision export unwritable — journal still holds the audit row")
 
 
 class Base(DeclarativeBase):
@@ -221,6 +229,7 @@ class Journal:
                 session.add(Decision(**fields))
         except SQLAlchemyError as exc:
             raise JournalWriteError(f"could not append decision: {exc.__class__.__name__}") from exc
+        append_decision_export(fields)
         return str(fields["tick_id"])
 
     def record_span(self, **fields: Any) -> None:

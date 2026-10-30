@@ -2,7 +2,7 @@
 
 ## Application Shell
 
-`frontend/src/App.tsx` defines public, authenticated, standard-layout, and full-width routes. `frontend/src/components/layout/Layout.tsx` owns the standard navigation shell; `FullWidthLayout.tsx` is used for dense workspaces. `frontend/src/config/navigation.ts` determines visible navigation groups.
+`frontend/src/App.tsx` defines public, authenticated, standard-layout, and full-width routes. `frontend/src/components/layout/Layout.tsx` owns the standard navigation shell; `FullWidthLayout.tsx` is used for dense workspaces. `frontend/src/config/navigation.ts` determines visible navigation groups. The profile menu includes Lab (`lab.zerotouchalgo.com`), LTP (`ltp.zerotouchalgo.com`), and the public LTP board (`zerotouchalgo.com/ltp`).
 
 ## Operational Pages
 
@@ -29,6 +29,7 @@ Current routed tools include:
 | `/ivsmile` | Call/put IV smile and skew | `iv_smile_service.py` |
 | `/volsurface` | 3D volatility surface | `vol_surface_service.py` |
 | `/gex` | Gamma exposure by strike | `gex_service.py` |
+| `/greekslab` | CoA map, desk read, live Greeks, plain-language next-hour readout, what-if | `greeks_lab_service.py` |
 | `/gammadensity` | Gamma-times-OI and convexity zones | `gamma_density_service.py` |
 | `/oitracker` | OI bars and PCR | `oi_tracker_service.py` |
 | `/oirange` | Client-side strike-range OI view | Option-chain API |

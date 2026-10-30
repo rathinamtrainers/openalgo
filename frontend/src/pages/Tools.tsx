@@ -29,6 +29,12 @@ const tools = [
     color: 'bg-violet-500',
   },
   {
+    title: 'Lab',
+    description: 'CoA map plus decay / QuadShield / buying vs selling day and live Greeks',
+    href: '/greekslab',
+    color: 'bg-purple-600',
+  },
+  {
     title: 'OI Tracker',
     description: 'Open Interest analysis with CE/PE OI bars, PCR overlay, and ATM strike marker',
     href: '/oitracker',

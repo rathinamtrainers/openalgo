@@ -57,6 +57,9 @@ def _assert_public(payload: dict) -> None:
         [
             payload["body"],
             payload["mood"],
+            payload.get("action") or "",
+            payload.get("do_now") or "",
+            payload.get("line") or "",
             payload["disclaimer"],
             str(payload["opportunities"]),
         ]
@@ -71,6 +74,7 @@ def test_waiting_between_extensions_is_watching():
     snap = evaluate(_strong_chain(), spot=24050, atm=ATM, extension_pts=20)
     tape = update_tape(None, snap, WINDOW)
     payload = build_brief(snap, WINDOW, tape)
+    assert payload["computed_at"] == "2026-10-16T10:00:00+05:30"
     assert payload["stance"] == "watching"
     assert payload["eos"] == 23980
     assert payload["eor"] == 24120
@@ -78,21 +82,39 @@ def test_waiting_between_extensions_is_watching():
     assert sides["call"]["status"] == "waiting"
     assert sides["call"]["trigger"] == "NIFTY at or below 23,980"
     assert sides["put"]["status"] == "waiting"
+    assert sides["call"]["label"] == "Not reached — wait"
+    assert payload["do_now"].startswith("Do nothing yet.")
+    assert "23,980" in payload["line"]
     assert "floor at 24,000" in payload["body"]
     assert "call buy needs a print at or below 23,980" in payload["body"]
     _assert_public(payload)
 
 
-def test_spot_at_eos_is_in_a_trade_and_call_tagged():
+def test_spot_at_eos_is_in_a_trade_but_chip_waits_for_hands():
     snap = evaluate(_strong_chain(), spot=23980, atm=ATM, extension_pts=20)
     tape = update_tape(None, snap, WINDOW)
     payload = build_brief(snap, WINDOW, tape)
     assert payload["stance"] == "in a trade"
+    assert payload["scenario_label"] == "WATCHING"
     assert tape.tagged_eos is True
     sides = {row["side"]: row for row in payload["opportunities"]}
-    assert sides["call"]["status"] == "tagged"
+    assert sides["call"]["status"] == "waiting"
     assert sides["put"]["status"] == "waiting"
+    assert payload["do_now"].startswith("A call buy is armed")
     assert "tagged the call-buy zone" in payload["body"]
+    _assert_public(payload)
+
+
+def test_chip_tags_only_after_hands_post():
+    snap = evaluate(_strong_chain(), spot=23980, atm=ATM, extension_pts=20)
+    payload = build_brief(
+        snap, WINDOW, update_tape(None, snap, WINDOW), hands_posted="CE"
+    )
+    assert payload["scenario_label"] == "CALL TAGGED"
+    sides = {row["side"]: row for row in payload["opportunities"]}
+    assert sides["call"]["status"] == "tagged"
+    assert sides["call"]["label"] == "Buy armed — this is the go"
+    assert sides["put"]["status"] == "waiting"
     _assert_public(payload)
 
 
@@ -109,6 +131,7 @@ def test_mixed_map_stands_aside_with_no_buys():
     payload = build_brief(snap, WINDOW, tape)
     assert payload["stance"] == "standing aside"
     assert payload["opportunities"] == []
+    assert payload["do_now"].startswith("Do nothing.")
     assert "No buy is on the map" in payload["body"]
     _assert_public(payload)
 
@@ -118,9 +141,65 @@ def test_after_hours_blocks_setups_and_points_at_next_window():
     tape = update_tape(None, snap, AFTER)
     payload = build_brief(snap, AFTER, tape)
     assert payload["stance"] == "standing aside"
-    assert all(row["status"] == "blocked" for row in payload["opportunities"])
+    assert all(row["status"] == "waiting" for row in payload["opportunities"])
+    assert all(row["label"] == "Window closed — wait" for row in payload["opportunities"])
+    assert payload["do_now"].startswith("Do nothing.")
+    assert payload["cta"] == payload["do_now"]
+    assert payload["last"] == payload["spot"]
+    assert payload["scenario_label"] == "WATCHING"
+    assert "Cash is closed" in payload["line"]
     assert "09:20" in payload["body"]
+    assert isinstance(payload["opportunities"][0]["conditions"], str)
     _assert_public(payload)
+
+
+def test_put_only_map_does_not_advertise_a_call():
+    chain = _ladder(
+        pe_vol_24000=1000,
+        pe_vol_23900=400,
+        ce_vol_24100=1000,
+        ce_vol_24000=800,
+    )
+    snap = evaluate(chain, spot=24050, atm=ATM, extension_pts=20)
+    payload = build_brief(snap, WINDOW, update_tape(None, snap, WINDOW))
+    assert snap.allow_ce is False
+    assert snap.allow_pe is True
+    sides = {row["side"] for row in payload["opportunities"]}
+    assert sides == {"put"}
+    assert payload["opportunity_source"] == "coa"
+    assert payload["watch_for"] == "24,120 put buy"
+    assert "call buy" not in payload["waiting_for"]
+    assert payload["building"]["call"] == "no call buy on this map"
+    assert payload["strike"] == "24100"
+    _assert_public(payload)
+
+
+def test_push_public_brief_skips_without_token():
+    from strike_desk.ltp_coa_brief import push_public_brief
+
+    class _Settings:
+        coa_publish_url = "https://zerotouchalgo.com/api/public-brief"
+        coa_publish_token = None
+
+    push_public_brief({"line": "x"}, _Settings())
+
+
+def test_banknifty_brief_does_not_say_nifty():
+    snap = evaluate(_strong_chain(), spot=24050, atm=ATM, extension_pts=40)
+    payload = build_brief(
+        snap,
+        WINDOW,
+        update_tape(None, snap, WINDOW),
+        index_name="BANKNIFTY",
+        strike_step=100,
+        market="banknifty",
+        extension_pts=40,
+    )
+    assert payload["market"] == "banknifty"
+    assert payload["index"] == "BANKNIFTY"
+    assert payload["opportunities"][0]["trigger"].startswith("BANKNIFTY ")
+    assert payload["do_now"].startswith("Do nothing yet. BANKNIFTY")
+    assert "minus 40 points" in payload["disclaimer"]
 
 
 def test_write_public_brief_is_world_readable(tmp_path):

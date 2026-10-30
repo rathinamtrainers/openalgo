@@ -80,9 +80,21 @@ def test_coa_1_2_resistance_wtb_is_bearish():
     snap = evaluate(chain, spot=24120, atm=24050, extension_pts=20)
     assert snap.resistance and snap.resistance.state == "wtb"
     assert snap.scenario == "1.2"
-    assert snap.allow_ce is True
+    assert snap.allow_ce is False
     assert snap.allow_pe is True
     assert snap.signal == "BUY_PE"
+
+
+def test_coa_1_2_does_not_buy_ce_at_eos():
+    chain = _ladder(
+        pe_vol_24000=1000,
+        pe_vol_23900=400,
+        ce_vol_24100=1000,
+        ce_vol_24000=800,
+    )
+    snap = evaluate(chain, spot=23980, atm=24050, extension_pts=20)
+    assert snap.scenario == "1.2"
+    assert snap.signal == "FLAT"
 
 
 def test_coa_1_3_resistance_wtt_is_bullish():
@@ -95,7 +107,21 @@ def test_coa_1_3_resistance_wtt_is_bullish():
     snap = evaluate(chain, spot=23980, atm=24000, extension_pts=20)
     assert snap.resistance and snap.resistance.state == "wtt"
     assert snap.scenario == "1.3"
+    assert snap.allow_ce is True
+    assert snap.allow_pe is False
     assert snap.signal == "BUY_CE"
+
+
+def test_coa_1_3_does_not_buy_pe_at_eor():
+    chain = _ladder(
+        pe_vol_24000=1000,
+        pe_vol_23900=400,
+        ce_vol_24000=1000,
+        ce_vol_24100=800,
+    )
+    snap = evaluate(chain, spot=24020, atm=24000, extension_pts=20)
+    assert snap.scenario == "1.3"
+    assert snap.signal == "FLAT"
 
 
 def test_coa_1_6_blood_bath_never_buys_ce():
@@ -177,3 +203,36 @@ def test_yellow_box_requires_75_percent():
     assert snap.support and snap.support.state == "strong"
     assert snap.support.yellow is False
     assert snap.scenario == "1.1"
+
+
+def test_dual_factor_away_weakness_stays_strong():
+    chain = _ladder(
+        pe_vol_24000=1000,
+        pe_oi_24000=1000,
+        pe_vol_23900=800,
+        pe_oi_23900=400,
+        ce_vol_24100=1000,
+        ce_oi_24100=1000,
+        ce_vol_24200=400,
+        ce_oi_24200=400,
+    )
+    snap = evaluate(chain, spot=24050, atm=24050, extension_pts=20)
+    assert snap.support and snap.support.dual is True
+    assert snap.support.state == "strong"
+    assert snap.scenario == "1.1"
+
+
+def test_dual_factor_towards_line_is_weak():
+    chain = _ladder(
+        pe_vol_24000=1000,
+        pe_oi_24000=1000,
+        pe_vol_24100=800,
+        pe_oi_23900=400,
+        ce_vol_24100=1000,
+        ce_oi_24100=1000,
+        ce_vol_24200=400,
+        ce_oi_24200=400,
+    )
+    snap = evaluate(chain, spot=24050, atm=24050, extension_pts=20)
+    assert snap.support and snap.support.dual is True
+    assert snap.support.state == "wtt"

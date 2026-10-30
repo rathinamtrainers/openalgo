@@ -92,6 +92,12 @@ def test_hard_sl_below_eos():
     assert reason == "spot SL extension broken"
 
 
+def test_btc_skips_cash_flatten():
+    trade = _trade()
+    assert decide_exit(time(15, 16), 23980, 100, trade, _live(23980), flatten_at=None) is None
+    assert decide_exit(time(15, 16), 23980, 100, trade, _live(23980)) == "15:15 flatten"
+
+
 def test_reentry_after_five_minutes():
     ts = datetime(2026, 10, 16, 10, 0, tzinfo=IST)
     assert can_reenter(ts, None) is True

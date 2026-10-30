@@ -1,0 +1,39 @@
+[Unit]
+Description=Strike Desk CoA — Chart of Accuracy mind to Tradetron Hands
+After=network-online.target openalgo.service
+Wants=network-online.target
+Wants=openalgo.service
+
+[Service]
+Type=simple
+User=strikedesk
+Group=strikedesk
+WorkingDirectory=/opt/strike-desk/current/strike_desk
+Environment=TZ=Asia/Kolkata
+Environment=PATH=/usr/local/bin:/usr/bin
+Environment=CLOUDSDK_CORE_PROJECT=ztartcopenalgo
+Environment=UV_PYTHON_INSTALL_DIR=/opt/uv-python
+Environment=HOME=/var/lib/strike-desk
+EnvironmentFile=/etc/strike-desk/strike-desk.env
+EnvironmentFile=-/run/strike-desk/env
+ExecStartPre=/usr/local/bin/strike-desk-render-env
+ExecStart=/usr/local/bin/uv run python -m strike_desk.coa_main
+Restart=always
+RestartSec=10s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+StateDirectory=strike-desk
+StateDirectoryMode=0755
+RuntimeDirectory=strike-desk
+RuntimeDirectoryMode=0700
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+MemoryMax=512M
+ReadWritePaths=/opt/strike-desk/current/strike_desk /var/lib/strike-desk /run/strike-desk
+
+[Install]
+WantedBy=multi-user.target

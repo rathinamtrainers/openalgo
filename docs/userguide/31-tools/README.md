@@ -2,7 +2,7 @@
 
 ## Introduction
 
-OpenAlgo ships with **twelve built-in analytical tools** for options trading and market analysis. They live under the `/tools` page and use the active broker's REST and WebSocket market data where each tool requires it.
+OpenAlgo ships with built-in analytical tools for options trading and market analysis. They live under the `/tools` page and use the active broker's REST and WebSocket market data where each tool requires it.
 
 Availability depends on the plugin's supported exchanges, broker response fields, account market-data entitlement, and the symbols or expiries requested. A plugin being installed does not guarantee that every analytical page has the data it needs.
 
@@ -93,7 +93,20 @@ Simulated intraday ATM straddle P&L with automation.
 - Rotate, zoom, and inspect IV across the entire surface
 - Quickly spot skew, term structure, and volatility arbitrage zones
 
-### 10. GEX Dashboard (`/gex`)
+### 10. Lab (`/greekslab`)
+
+Unified CoA map, QuadShield-style desk read, live Greeks, theta decay, and what-if scenarios. Root of `lab.zerotouchalgo.com` and `ltp.zerotouchalgo.com` lands here. The profile menu links Lab, LTP, and the public LTP board (`zerotouchalgo.com/ltp`).
+
+- **CoA map** — live Strike Desk chips and last for Nifty, Bank Nifty, Sensex, Crude, Natgas, and BTC (same CoA mind; click a tile to load Greeks)
+- **Buy alert** — on by default. Siren on a new CALL/PUT TAGGED (Hands-confirmed). Silence snoozes 5 minutes, then alerts arm again. First snapshot is a baseline. Not a recommendation.
+- **Desk read** — decay on/off, QuadShield run vs pause shorts, buying vs selling day, trend stronger/fading (5m ADX/ATR + India VIX, same 40/45 and 11–40 bands)
+- Polls the broker chain (default every 15 seconds) and computes Black-76 Greeks on the selected strike
+- **Next hour in plain words** — one-line map (LLM polish when a key is present; number-locked template otherwise). Not an order.
+- **What-if grid** — spot shocks (±0.5%, ±1%) crossed with IV shocks (±2 vol points) at that horizon
+- ±1σ expected move for the chosen horizon from ATM IV
+- These are Black-76 revaluations, **not** a forecast of where spot or IV will go
+
+### 11. GEX Dashboard (`/gex`)
 
 Gamma Exposure (GEX) analysis for market-maker positioning.
 
@@ -102,7 +115,7 @@ Gamma Exposure (GEX) analysis for market-maker positioning.
 - **Top Gamma Strikes** ranking
 - Useful for identifying expected support/resistance zones
 
-### 11. IV Smile (`/ivsmile`)
+### 12. IV Smile (`/ivsmile`)
 
 Implied Volatility smile curve with skew analysis.
 
@@ -111,7 +124,7 @@ Implied Volatility smile curve with skew analysis.
 - Skew measurement between OTM puts and OTM calls
 - Per-expiry toggle
 
-### 12. OI Profile (`/oiprofile`)
+### 13. OI Profile (`/oiprofile`)
 
 Futures candlestick with OI profile overlay.
 

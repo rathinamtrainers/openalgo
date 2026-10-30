@@ -104,6 +104,77 @@ def parse_underlying_symbol(underlying: str) -> tuple[str, str | None]:
     return underlying.upper(), None
 
 
+def _parse_expiry_token(value: str) -> datetime | None:
+    compact = (value or "").upper().replace(" ", "").replace("-", "")
+    for fmt in ("%d%b%y", "%d%b%Y"):
+        try:
+            return datetime.strptime(compact, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _is_fut_for_base(symbol: str, base: str) -> bool:
+    text = (symbol or "").upper()
+    root = (base or "").upper()
+    if not text.startswith(root) or not text.endswith("FUT"):
+        return False
+    rest = text[len(root) :]
+    return bool(rest) and rest[0].isdigit()
+
+
+def choose_futures_quote_symbol(
+    base_symbol: str, expiry_date: str, rows: list[dict[str, Any]]
+) -> str | None:
+    """Pick the MCX/CDS futures contract to quote when there is no cash symbol."""
+    base = (base_symbol or "").upper()
+    compact = (expiry_date or "").upper().replace("-", "")
+    exact = f"{base}{compact}FUT"
+    target = _parse_expiry_token(expiry_date)
+    dated: list[tuple[datetime, str]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper()
+        if not _is_fut_for_base(symbol, base):
+            continue
+        if symbol == exact:
+            return symbol
+        parsed = _parse_expiry_token(str(row.get("expiry") or ""))
+        if parsed:
+            dated.append((parsed, symbol))
+    if not dated:
+        return None
+    dated.sort()
+    if target:
+        after = [item for item in dated if item[0] >= target]
+        if after:
+            return after[0][1]
+        return dated[-1][1]
+    return dated[0][1]
+
+
+def resolve_futures_quote_symbol(base_symbol: str, expiry_date: str, exchange: str) -> str | None:
+    """Look up the futures symbol used for MCX/CDS LTP. GOLDM is not quotable as cash."""
+    code = (exchange or "").upper()
+    base = (base_symbol or "").upper()
+    if code not in ("MCX", "CDS") or not base:
+        return None
+    rows = (
+        db_session.query(SymToken)
+        .filter(SymToken.exchange == code)
+        .filter(SymToken.instrumenttype.in_(("FUT", "FUTCOM", "FUTCUR", "FUTIDX")))
+        .filter((SymToken.name == base) | (SymToken.symbol.like(f"{base}%FUT")))
+        .all()
+    )
+    chosen = choose_futures_quote_symbol(
+        base, expiry_date, [{"symbol": row.symbol, "expiry": row.expiry} for row in rows]
+    )
+    if chosen:
+        logger.info("MCX/CDS LTP via futures %s (base %s expiry %s)", chosen, base, expiry_date)
+    else:
+        logger.warning("No MCX/CDS futures found for %s %s on %s", base, expiry_date, code)
+    return chosen
+
+
 def get_atm_strike(ltp: float, strike_int: int) -> float:
     """
     Calculate ATM strike price based on LTP and strike interval.
@@ -616,6 +687,10 @@ def get_option_symbol(
                 quote_symbol = base_symbol
         else:
             quote_symbol = underlying
+        if exchange.upper() in ["MCX", "CDS"] and not str(quote_symbol).upper().endswith("FUT"):
+            fut = resolve_futures_quote_symbol(base_symbol, final_expiry, exchange.upper())
+            if fut:
+                quote_symbol = fut
 
         # Step 3: Get LTP of underlying (use provided LTP if available to avoid rate limits)
         if underlying_ltp is not None:

@@ -116,10 +116,23 @@ class Settings(BaseSettings):
     tt_auth_token_overlay: SecretStr | None = None
     tt_auth_token_bn: SecretStr | None = None
     tt_auth_token_coa: SecretStr | None = None
+    # BTC Hands (template 999305026). Never reuse the NSE/BSE CoA token —
+    # both books listen on unsuffixed ltp_buy_ce / ltp_buy_pe / ltp_exit.
+    tt_auth_token_coa_btc: SecretStr | None = None
+    # MCX Hands (template 999310646). Own token — NSE CoA UE would flatten
+    # Crude/Natgas at 15:15. Qty on TT is 1 LOT, not 1250 units.
+    tt_auth_token_coa_mcx: SecretStr | None = None
     tt_auth_token_ofa: SecretStr | None = None
+    tt_auth_token_analyzer: SecretStr | None = None
     tt_webhook_url: str = "https://api.tradetron.tech/api?"
     tt_hands: bool = False
-    coa_interval_seconds: int = Field(default=300, ge=60, le=900)
+    # CoA: Analyze fill (tag COA, never toggles live) + Tradetron Hands.
+    coa_enabled: bool = False
+    coa_interval_seconds: int = Field(default=60, ge=60, le=900)
+    coa_lots: int = Field(default=1, ge=1, le=20)
+    coa_product: str = "MIS"
+    coa_publish_url: str = "https://zerotouchalgo.com/api/public-brief"
+    coa_publish_token: SecretStr | None = None
     tt_map: str = ""
     slots: str = ""
 
@@ -208,6 +221,10 @@ class Settings(BaseSettings):
     @property
     def public_brief_path(self) -> Path:
         return self.state_dir / "public-brief.json"
+
+    @property
+    def coa_heartbeat_path(self) -> Path:
+        return self.state_dir / "coa.heartbeat"
 
     @property
     def ofa_state_path(self) -> Path:

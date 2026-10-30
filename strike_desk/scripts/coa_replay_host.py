@@ -15,13 +15,15 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 _here = Path(__file__).resolve()
-try:
-    OA_ROOT = _here.parents[2]
-except IndexError:
-    OA_ROOT = Path("/opt/openalgo/current")
+OA_ROOT = Path(os.environ.get("OPENALGO_ROOT") or "/opt/openalgo/current")
 if not (OA_ROOT / "app.py").exists():
-    OA_ROOT = Path(os.environ.get("OPENALGO_ROOT", "/opt/openalgo/current"))
-DESK_SRC = Path(os.environ.get("STRIKE_DESK_SRC", OA_ROOT / "strike_desk" / "src"))
+    try:
+        candidate = _here.parents[2]
+    except IndexError:
+        candidate = OA_ROOT
+    if (candidate / "app.py").exists():
+        OA_ROOT = candidate
+DESK_SRC = Path(os.environ.get("STRIKE_DESK_SRC", str(OA_ROOT / "strike_desk" / "src")))
 sys.path.insert(0, str(DESK_SRC))
 sys.path.insert(0, str(OA_ROOT))
 
@@ -81,20 +83,30 @@ def _parse_expiry_label(raw: str) -> date | None:
         return None
 
 
-def nifty_expiry_labels() -> list[tuple[date, str]]:
+def expiry_labels(underlying: str, option_exchange: str) -> list[tuple[date, str]]:
+    """Listed CE expiries whose OpenAlgo symbol starts with the index then a date."""
+    prefix = underlying.upper()
     rows = (
-        SymToken.query.filter(SymToken.exchange == "NFO")
-        .filter(SymToken.symbol.like("NIFTY%CE"))
-        .with_entities(SymToken.expiry)
+        SymToken.query.filter(SymToken.exchange == option_exchange)
+        .filter(SymToken.symbol.like(f"{prefix}%CE"))
+        .with_entities(SymToken.symbol, SymToken.expiry)
         .distinct()
         .all()
     )
     found: dict[date, str] = {}
-    for (raw,) in rows:
+    for symbol, raw in rows:
+        text = str(symbol or "").upper()
+        rest = text[len(prefix) :]
+        if not rest or not rest[0].isdigit():
+            continue
         parsed = _parse_expiry_label(str(raw))
         if parsed is not None:
             found.setdefault(parsed, str(raw))
     return sorted(found.items(), key=lambda item: item[0])
+
+
+def nifty_expiry_labels() -> list[tuple[date, str]]:
+    return expiry_labels("NIFTY", "NFO")
 
 
 def nifty_expiries_from_master() -> list[date]:
@@ -209,15 +221,23 @@ def seed_symbol(
     return "empty", 0, "no 1m bars"
 
 
-def _spot_band(start: date, end: date, pad_strikes: int) -> tuple[float, float]:
+def _spot_band(
+    start: date,
+    end: date,
+    pad_strikes: int,
+    *,
+    symbol: str = "NIFTY",
+    exchange: str = "NSE_INDEX",
+    step: float = NIFTY_STRIKE_STEP,
+) -> tuple[float, float] | None:
     start_ts, end_ts = _epoch_range(start, end)
-    frame = get_ohlcv("NIFTY", "NSE_INDEX", "1m", start_ts, end_ts)
+    frame = get_ohlcv(symbol, exchange, "1m", start_ts, end_ts)
     if frame is None or getattr(frame, "empty", True):
-        return 22000.0, 24000.0
-    step = NIFTY_STRIKE_STEP
-    pad = pad_strikes * step
-    low = round(float(frame["close"].min()) / step) * step
-    high = round(float(frame["close"].max()) / step) * step
+        return None
+    width = float(step or NIFTY_STRIKE_STEP)
+    pad = pad_strikes * width
+    low = round(float(frame["close"].min()) / width) * width
+    high = round(float(frame["close"].max()) / width) * width
     return low - pad, high + pad
 
 
@@ -251,7 +271,11 @@ def seed_historify(
         print(f"spot 1m download failed: {status[2]}", file=sys.stderr)
         return 1
 
-    lo, hi = _spot_band(start, end, strikes)
+    band = _spot_band(start, end, strikes)
+    if band is None:
+        print("spot 1m empty after download", file=sys.stderr)
+        return 1
+    lo, hi = band
     print(f"strike band {lo:.0f}-{hi:.0f} (spot range plus ATM+/-{strikes})")
     for day, label in near:
         ok, payload, _code = get_option_chain_symbols(

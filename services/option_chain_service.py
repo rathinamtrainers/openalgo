@@ -57,6 +57,7 @@ from services.option_symbol_service import (
     get_available_strikes,
     get_option_exchange,
     parse_underlying_symbol,
+    resolve_futures_quote_symbol,
 )
 from services.quotes_service import get_multiquotes, get_quotes, import_broker_module
 from utils.constants import CRYPTO_EXCHANGES, INSTRUMENT_PERPFUT
@@ -284,6 +285,10 @@ def get_option_chain(
         if exchange.upper() not in CRYPTO_EXCHANGES:
             # Use base symbol for index quotes (non-Delta)
             quote_symbol = base_symbol if embedded_expiry else underlying
+            if exchange.upper() in ("MCX", "CDS") and not str(quote_symbol).upper().endswith("FUT"):
+                fut = resolve_futures_quote_symbol(base_symbol, final_expiry, exchange.upper())
+                if fut:
+                    quote_symbol = fut
 
         # Step 3: Fetch underlying LTP
         logger.info(f"Fetching LTP for {quote_symbol} on {quote_exchange}")
