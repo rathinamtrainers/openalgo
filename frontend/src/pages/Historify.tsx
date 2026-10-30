@@ -31,6 +31,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { authApi } from '@/api/auth'
 import { LogoutConfirmDialog } from '@/components/auth/LogoutConfirmDialog'
+import { ProfileDropdownItems } from '@/components/layout/ProfileMenuItems'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -1624,16 +1625,7 @@ export default function Historify() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
-                {profileMenuItems.map((item) => (
-                  <DropdownMenuItem
-                    key={item.href}
-                    onSelect={() => navigate(item.href)}
-                    className="cursor-pointer"
-                  >
-                    <item.icon className="h-4 w-4 mr-2" />
-                    {item.label}
-                  </DropdownMenuItem>
-                ))}
+                <ProfileDropdownItems items={profileMenuItems} onNavigate={navigate} />
                 <DropdownMenuItem asChild>
                   <a
                     href="https://docs.openalgo.in"

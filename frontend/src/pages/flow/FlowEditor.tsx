@@ -55,6 +55,7 @@ import {
   type LogEntry,
   NodePalette,
 } from '@/components/flow/panels'
+import { ProfileDropdownItems } from '@/components/layout/ProfileMenuItems'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -479,16 +480,7 @@ function FlowEditorContent() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
-              {profileMenuItems.map((item) => (
-                <DropdownMenuItem
-                  key={item.href}
-                  onSelect={() => navigate(item.href)}
-                  className="cursor-pointer"
-                >
-                  <item.icon className="h-4 w-4 mr-2" />
-                  {item.label}
-                </DropdownMenuItem>
-              ))}
+              <ProfileDropdownItems items={profileMenuItems} onNavigate={navigate} />
               <DropdownMenuItem asChild>
                 <a
                   href="https://docs.openalgo.in"
