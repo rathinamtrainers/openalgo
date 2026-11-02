@@ -1,12 +1,17 @@
 import { Check, ChevronsUpDown } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  boardHasGreeks,
+  boardSessionExchange,
   type CoaBoard,
+  type CoaTrade,
   type DeskInsightChip,
   type GreeksLabLeg,
   type GreeksLabResponse,
   greeksLabApi,
 } from '@/api/greeks-lab'
+import { CoaMap } from '@/components/greeks-lab/CoaMap'
+import { CoaTradeLog } from '@/components/greeks-lab/CoaTradeLog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -26,7 +31,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
 import { isCoaBuy, useCoaBuySiren } from '@/hooks/useCoaBuySiren'
+import { useMarketStatus } from '@/hooks/useMarketStatus'
 import { useSupportedExchanges } from '@/hooks/useSupportedExchanges'
 import { showToast } from '@/utils/toast'
 
@@ -131,6 +138,7 @@ function CoaBoardGrid({
   activeSlug: string | null
   onSelect: (board: CoaBoard) => void
 }) {
+  const { isMarketOpen, isLoading: timingsLoading } = useMarketStatus()
   if (boards.length === 0) return null
   return (
     <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
@@ -140,6 +148,7 @@ function CoaBoardGrid({
         const active = board.slug === activeSlug
         const tagged = isCoaBuy(board.scenario_label)
         const put = (board.scenario_label || '').toUpperCase().includes('PUT')
+        const closed = !timingsLoading && !isMarketOpen(boardSessionExchange(board))
         return (
           <button
             key={board.slug}
@@ -153,14 +162,20 @@ function CoaBoardGrid({
                 : active
                   ? 'border-primary bg-muted/40'
                   : 'border-border hover:bg-muted/30'
-            }`}
+            } ${closed ? (tagged ? 'opacity-80' : 'opacity-50 grayscale-[25%]') : ''}`}
           >
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs font-semibold tracking-wide">{board.title}</div>
               <span
-                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${chipTone(board.scenario_label)}`}
+                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                  closed && !tagged
+                    ? 'bg-muted text-muted-foreground'
+                    : chipTone(board.scenario_label)
+                }`}
               >
-                {board.scenario_label || (board.missing ? '—' : 'WATCHING')}
+                {closed && !tagged
+                  ? 'CLOSED'
+                  : board.scenario_label || (board.missing ? '—' : 'WATCHING')}
               </span>
             </div>
             <div
@@ -234,6 +249,11 @@ function CoaActiveCard({
           <span className="text-xs text-muted-foreground">{active.as_of_ist}</span>
         </div>
         <p className="text-sm">{active.do_now || active.line || 'Map, not an order.'}</p>
+        {active.mood && !(active.do_now || '').toLowerCase().includes(active.mood.toLowerCase()) ? (
+          <p className="text-xs text-muted-foreground">{active.mood}</p>
+        ) : null}
+        <CoaMap board={active} />
+        <Separator />
         {active.source === 'quote' ? (
           <p className="text-[11px] text-muted-foreground">
             Quote tile only. CoA buy siren stays on Nifty, Bank Nifty, Sensex, and BTC.
@@ -353,6 +373,7 @@ export default function GreeksLab() {
   const [side, setSide] = useState<'ce' | 'pe'>('ce')
   const [data, setData] = useState<GreeksLabResponse | null>(null)
   const [coaBoards, setCoaBoards] = useState<CoaBoard[]>([])
+  const [coaTrades, setCoaTrades] = useState<CoaTrade[]>([])
   const [coaSlug, setCoaSlug] = useState<string | null>('nifty')
   const [isLoading, setIsLoading] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -360,6 +381,8 @@ export default function GreeksLab() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const coaIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pendingUnderlyingRef = useRef<string | null>(null)
+  const activeBoard = coaBoards.find((board) => board.slug === coaSlug) || coaBoards[0]
+  const greeksEnabled = boardHasGreeks(activeBoard)
 
   useEffect(() => {
     setSelectedExchange((prev) =>
@@ -459,9 +482,15 @@ export default function GreeksLab() {
 
   const fetchCoa = useCallback(async () => {
     try {
-      const response = await greeksLabApi.getCoaBoards()
-      if (response.status === 'success' && response.boards) {
-        setCoaBoards(response.boards)
+      const [boards, trades] = await Promise.all([
+        greeksLabApi.getCoaBoards().catch(() => ({ status: 'error' as const, boards: [] })),
+        greeksLabApi.getCoaTrades().catch(() => ({ status: 'error' as const, trades: [] })),
+      ])
+      if (boards.status === 'success' && boards.boards) {
+        setCoaBoards(boards.boards)
+      }
+      if (trades.status === 'success' && trades.trades) {
+        setCoaTrades(trades.trades)
       }
     } catch {
       // Board is optional; Greeks still load
@@ -470,10 +499,12 @@ export default function GreeksLab() {
 
   const selectCoaBoard = useCallback((board: CoaBoard) => {
     setCoaSlug(board.slug)
-    if (board.greeks_exchange && board.greeks_underlying) {
+    if (boardHasGreeks(board)) {
       pendingUnderlyingRef.current = board.greeks_underlying
-      setSelectedExchange(board.greeks_exchange)
-      setSelectedUnderlying(board.greeks_underlying)
+      setSelectedExchange(board.greeks_exchange as string)
+      setSelectedUnderlying(board.greeks_underlying as string)
+    } else {
+      setData(null)
     }
   }, [])
 
@@ -488,16 +519,16 @@ export default function GreeksLab() {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: expiry/strike/horizon drive the fetch; fetchSnapshot identity is enough
   useEffect(() => {
-    if (selectedExpiry) {
+    if (greeksEnabled && selectedExpiry) {
       fetchSnapshot()
     }
-  }, [selectedExpiry, selectedStrike, horizon])
+  }, [greeksEnabled, selectedExpiry, selectedStrike, horizon])
 
   useEffect(() => {
     if (!autoRefresh) return
     intervalRef.current = setInterval(() => {
       if (!armed) fetchCoa()
-      if (selectedExpiry) fetchSnapshot()
+      if (greeksEnabled && selectedExpiry) fetchSnapshot()
     }, AUTO_REFRESH_INTERVAL)
     return () => {
       if (intervalRef.current) {
@@ -505,7 +536,7 @@ export default function GreeksLab() {
         intervalRef.current = null
       }
     }
-  }, [autoRefresh, fetchSnapshot, fetchCoa, selectedExpiry, armed])
+  }, [autoRefresh, fetchSnapshot, fetchCoa, selectedExpiry, armed, greeksEnabled])
 
   useEffect(() => {
     if (!armed) return
@@ -529,109 +560,116 @@ export default function GreeksLab() {
         <div>
           <h1 className="text-2xl font-bold">Lab</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            CoA map first. Alerts stay armed. Silence a siren to snooze 5 minutes, then the desk
-            read and next-hour line.
+            {greeksEnabled
+              ? 'CoA map first. Alerts stay armed. Silence a siren to snooze 5 minutes, then the desk read and next-hour line.'
+              : `${activeBoard?.title || 'BTC'} CoA map from Delta India. This OpenAlgo session has no crypto option chain, so the Nifty desk read stays off this tile.`}
           </p>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
-          <Select value={selectedExchange} onValueChange={setSelectedExchange}>
-            <SelectTrigger className="w-[100px]">
-              <SelectValue placeholder="Exchange" />
-            </SelectTrigger>
-            <SelectContent>
-              {fnoExchanges.map((ex) => (
-                <SelectItem key={ex.value} value={ex.value}>
-                  {ex.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {greeksEnabled ? (
+            <>
+              <Select value={selectedExchange} onValueChange={setSelectedExchange}>
+                <SelectTrigger className="w-[100px]">
+                  <SelectValue placeholder="Exchange" />
+                </SelectTrigger>
+                <SelectContent>
+                  {fnoExchanges.map((ex) => (
+                    <SelectItem key={ex.value} value={ex.value}>
+                      {ex.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-          <Popover open={underlyingOpen} onOpenChange={setUnderlyingOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                variant="outline"
-                role="combobox"
-                aria-expanded={underlyingOpen}
-                className="w-[160px] justify-between"
+              <Popover open={underlyingOpen} onOpenChange={setUnderlyingOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={underlyingOpen}
+                    className="w-[160px] justify-between"
+                  >
+                    {selectedUnderlying || 'Underlying'}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-48 p-0" align="start">
+                  <Command>
+                    <CommandInput placeholder="Search underlying..." />
+                    <CommandList>
+                      <CommandEmpty>No underlying found</CommandEmpty>
+                      <CommandGroup>
+                        {underlyings.map((u) => (
+                          <CommandItem
+                            key={u}
+                            value={u}
+                            onSelect={() => {
+                              setSelectedUnderlying(u)
+                              setUnderlyingOpen(false)
+                            }}
+                          >
+                            <Check
+                              className={`mr-2 h-4 w-4 ${selectedUnderlying === u ? 'opacity-100' : 'opacity-0'}`}
+                            />
+                            {u}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+
+              <Select
+                value={selectedExpiry}
+                onValueChange={setSelectedExpiry}
+                disabled={expiries.length === 0}
               >
-                {selectedUnderlying || 'Underlying'}
-                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-48 p-0" align="start">
-              <Command>
-                <CommandInput placeholder="Search underlying..." />
-                <CommandList>
-                  <CommandEmpty>No underlying found</CommandEmpty>
-                  <CommandGroup>
-                    {underlyings.map((u) => (
-                      <CommandItem
-                        key={u}
-                        value={u}
-                        onSelect={() => {
-                          setSelectedUnderlying(u)
-                          setUnderlyingOpen(false)
-                        }}
-                      >
-                        <Check
-                          className={`mr-2 h-4 w-4 ${selectedUnderlying === u ? 'opacity-100' : 'opacity-0'}`}
-                        />
-                        {u}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                </CommandList>
-              </Command>
-            </PopoverContent>
-          </Popover>
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue placeholder="Expiry" />
+                </SelectTrigger>
+                <SelectContent>
+                  {expiries.map((e) => (
+                    <SelectItem key={e} value={e}>
+                      {e}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-          <Select
-            value={selectedExpiry}
-            onValueChange={setSelectedExpiry}
-            disabled={expiries.length === 0}
-          >
-            <SelectTrigger className="w-[160px]">
-              <SelectValue placeholder="Expiry" />
-            </SelectTrigger>
-            <SelectContent>
-              {expiries.map((e) => (
-                <SelectItem key={e} value={e}>
-                  {e}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+              <Select
+                value={selectedStrike === null ? '' : String(selectedStrike)}
+                onValueChange={(value) => setSelectedStrike(Number(value))}
+                disabled={strikes.length === 0}
+              >
+                <SelectTrigger className="w-[120px]">
+                  <SelectValue placeholder="Strike" />
+                </SelectTrigger>
+                <SelectContent>
+                  {strikes.map((strike) => (
+                    <SelectItem key={strike} value={String(strike)}>
+                      {strike}
+                      {strike === data?.atm_strike ? ' ATM' : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
-          <Select
-            value={selectedStrike === null ? '' : String(selectedStrike)}
-            onValueChange={(value) => setSelectedStrike(Number(value))}
-            disabled={strikes.length === 0}
-          >
-            <SelectTrigger className="w-[120px]">
-              <SelectValue placeholder="Strike" />
-            </SelectTrigger>
-            <SelectContent>
-              {strikes.map((strike) => (
-                <SelectItem key={strike} value={String(strike)}>
-                  {strike}
-                  {strike === data?.atm_strike ? ' ATM' : ''}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select value={horizon} onValueChange={setHorizon}>
-            <SelectTrigger className="w-[110px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="15">15 min</SelectItem>
-              <SelectItem value="30">30 min</SelectItem>
-              <SelectItem value="60">60 min</SelectItem>
-              <SelectItem value="120">2 hours</SelectItem>
-            </SelectContent>
-          </Select>
+              <Select value={horizon} onValueChange={setHorizon}>
+                <SelectTrigger className="w-[110px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="15">15 min</SelectItem>
+                  <SelectItem value="30">30 min</SelectItem>
+                  <SelectItem value="60">60 min</SelectItem>
+                  <SelectItem value="120">2 hours</SelectItem>
+                </SelectContent>
+              </Select>
+            </>
+          ) : (
+            <Badge variant="outline">{activeBoard?.title || 'BTC'} · CoA map</Badge>
+          )}
 
           <Button
             variant={autoRefresh ? 'default' : 'outline'}
@@ -645,7 +683,7 @@ export default function GreeksLab() {
             size="sm"
             onClick={() => {
               fetchCoa()
-              fetchSnapshot()
+              if (greeksEnabled) fetchSnapshot()
             }}
             disabled={isLoading}
           >
@@ -690,8 +728,9 @@ export default function GreeksLab() {
         alarming={alarming}
         snoozeLeftMs={snoozeLeftMs}
       />
+      <CoaTradeLog trades={coaTrades} />
 
-      {data?.status === 'success' && (
+      {greeksEnabled && data?.status === 'success' && (
         <div className="flex flex-wrap gap-2">
           <Badge variant="secondary">Spot {fmt(data.spot_price, 1)}</Badge>
           <Badge variant="secondary">ATM {data.atm_strike}</Badge>
@@ -704,12 +743,15 @@ export default function GreeksLab() {
       )}
 
       <p className="text-xs text-muted-foreground">
-        {data?.insights?.disclaimer ||
-          data?.disclaimer ||
-          'Desk read from the live ATM straddle plus 5m ADX/ATR and India VIX. Not an order.'}
+        {greeksEnabled
+          ? data?.insights?.disclaimer ||
+            data?.disclaimer ||
+            'Desk read from the live ATM straddle plus 5m ADX/ATR and India VIX. Not an order.'
+          : activeBoard?.disclaimer ||
+            'BTC desk is the CoA map (Delta India). India VIX and QuadShield stay on the cash indexes. Not an order.'}
       </p>
 
-      {data?.insights && (
+      {greeksEnabled && data?.insights && (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
           <InsightCard chip={data.insights.decay} />
           <InsightCard chip={data.insights.quadshield} />
@@ -718,132 +760,138 @@ export default function GreeksLab() {
         </div>
       )}
 
-      <ReadoutCard line={data?.readout?.line} sitStill={data?.readout?.sit_still} />
+      {greeksEnabled ? (
+        <ReadoutCard line={data?.readout?.line} sitStill={data?.readout?.sit_still} />
+      ) : null}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <GreekCard title="Call" leg={data?.watched?.ce} />
-        <GreekCard title="Put" leg={data?.watched?.pe} />
-      </div>
-
-      <Card>
-        <CardContent className="p-4 space-y-3">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <h3 className="font-semibold text-sm">
-              What-if at +{data?.horizon_minutes || 60} min (model premium)
-            </h3>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant={side === 'ce' ? 'default' : 'outline'}
-                onClick={() => setSide('ce')}
-              >
-                Call
-              </Button>
-              <Button
-                size="sm"
-                variant={side === 'pe' ? 'default' : 'outline'}
-                onClick={() => setSide('pe')}
-              >
-                Put
-              </Button>
-            </div>
+      {greeksEnabled ? (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <GreekCard title="Call" leg={data?.watched?.ce} />
+            <GreekCard title="Put" leg={data?.watched?.pe} />
           </div>
-          {whatif.length > 0 && data?.spot_shocks_pct && data.iv_shocks_pts ? (
-            <div className="overflow-x-auto">
+
+          <Card>
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h3 className="font-semibold text-sm">
+                  What-if at +{data?.horizon_minutes || 60} min (model premium)
+                </h3>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant={side === 'ce' ? 'default' : 'outline'}
+                    onClick={() => setSide('ce')}
+                  >
+                    Call
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={side === 'pe' ? 'default' : 'outline'}
+                    onClick={() => setSide('pe')}
+                  >
+                    Put
+                  </Button>
+                </div>
+              </div>
+              {whatif.length > 0 && data?.spot_shocks_pct && data.iv_shocks_pts ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="text-left p-2">Spot \ IV</th>
+                        {data.iv_shocks_pts.map((ivPts) => (
+                          <th key={ivPts} className="p-2 text-right">
+                            {ivPts > 0 ? '+' : ''}
+                            {ivPts} vol
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.spot_shocks_pct.map((spotPct, rowIndex) => (
+                        <tr key={spotPct} className="border-t">
+                          <td className="p-2 font-medium">
+                            {spotPct > 0 ? '+' : ''}
+                            {spotPct}%
+                          </td>
+                          {(whatif[rowIndex] || []).map((price, colIndex) => {
+                            const delta = liveLtp != null && price != null ? price - liveLtp : 0
+                            const tone =
+                              price == null
+                                ? ''
+                                : delta > 0
+                                  ? 'text-emerald-500'
+                                  : delta < 0
+                                    ? 'text-red-500'
+                                    : ''
+                            return (
+                              <td
+                                key={`${spotPct}-${data.iv_shocks_pts?.[colIndex]}`}
+                                className={`p-2 text-right ${tone}`}
+                              >
+                                {fmt(price)}
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No what-if grid for this strike.</p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="p-4 overflow-x-auto">
+              <h3 className="font-semibold text-sm mb-3">Live chain Greeks</h3>
               <table className="w-full text-sm">
                 <thead>
-                  <tr>
-                    <th className="text-left p-2">Spot \ IV</th>
-                    {data.iv_shocks_pts.map((ivPts) => (
-                      <th key={ivPts} className="p-2 text-right">
-                        {ivPts > 0 ? '+' : ''}
-                        {ivPts} vol
-                      </th>
-                    ))}
+                  <tr className="text-muted-foreground">
+                    <th className="text-right p-2">CE θ</th>
+                    <th className="text-right p-2">CE Δ</th>
+                    <th className="text-right p-2">CE IV</th>
+                    <th className="text-right p-2">CE LTP</th>
+                    <th className="text-center p-2">Strike</th>
+                    <th className="text-left p-2">PE LTP</th>
+                    <th className="text-left p-2">PE IV</th>
+                    <th className="text-left p-2">PE Δ</th>
+                    <th className="text-left p-2">PE θ</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.spot_shocks_pct.map((spotPct, rowIndex) => (
-                    <tr key={spotPct} className="border-t">
-                      <td className="p-2 font-medium">
-                        {spotPct > 0 ? '+' : ''}
-                        {spotPct}%
-                      </td>
-                      {(whatif[rowIndex] || []).map((price, colIndex) => {
-                        const delta = liveLtp != null && price != null ? price - liveLtp : 0
-                        const tone =
-                          price == null
-                            ? ''
-                            : delta > 0
-                              ? 'text-emerald-500'
-                              : delta < 0
-                                ? 'text-red-500'
-                                : ''
-                        return (
-                          <td
-                            key={`${spotPct}-${data.iv_shocks_pts?.[colIndex]}`}
-                            className={`p-2 text-right ${tone}`}
-                          >
-                            {fmt(price)}
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  ))}
+                  {(data?.chain || []).map((row) => {
+                    const active = row.strike === data?.selected_strike
+                    return (
+                      <tr
+                        key={row.strike}
+                        className={`border-t cursor-pointer hover:bg-muted/40 ${active ? 'bg-muted/60' : ''}`}
+                        onClick={() => setSelectedStrike(row.strike)}
+                      >
+                        <td className="p-2 text-right">{fmt(row.ce?.theta, 2)}</td>
+                        <td className="p-2 text-right">{fmt(row.ce?.delta, 3)}</td>
+                        <td className="p-2 text-right">{fmt(row.ce?.iv, 1)}</td>
+                        <td className="p-2 text-right">{fmt(row.ce?.ltp)}</td>
+                        <td className="p-2 text-center font-semibold">
+                          {row.strike}
+                          {row.strike === data?.atm_strike ? ' *' : ''}
+                        </td>
+                        <td className="p-2">{fmt(row.pe?.ltp)}</td>
+                        <td className="p-2">{fmt(row.pe?.iv, 1)}</td>
+                        <td className="p-2">{fmt(row.pe?.delta, 3)}</td>
+                        <td className="p-2">{fmt(row.pe?.theta, 2)}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No what-if grid for this strike.</p>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="p-4 overflow-x-auto">
-          <h3 className="font-semibold text-sm mb-3">Live chain Greeks</h3>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-muted-foreground">
-                <th className="text-right p-2">CE θ</th>
-                <th className="text-right p-2">CE Δ</th>
-                <th className="text-right p-2">CE IV</th>
-                <th className="text-right p-2">CE LTP</th>
-                <th className="text-center p-2">Strike</th>
-                <th className="text-left p-2">PE LTP</th>
-                <th className="text-left p-2">PE IV</th>
-                <th className="text-left p-2">PE Δ</th>
-                <th className="text-left p-2">PE θ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.chain || []).map((row) => {
-                const active = row.strike === data?.selected_strike
-                return (
-                  <tr
-                    key={row.strike}
-                    className={`border-t cursor-pointer hover:bg-muted/40 ${active ? 'bg-muted/60' : ''}`}
-                    onClick={() => setSelectedStrike(row.strike)}
-                  >
-                    <td className="p-2 text-right">{fmt(row.ce?.theta, 2)}</td>
-                    <td className="p-2 text-right">{fmt(row.ce?.delta, 3)}</td>
-                    <td className="p-2 text-right">{fmt(row.ce?.iv, 1)}</td>
-                    <td className="p-2 text-right">{fmt(row.ce?.ltp)}</td>
-                    <td className="p-2 text-center font-semibold">
-                      {row.strike}
-                      {row.strike === data?.atm_strike ? ' *' : ''}
-                    </td>
-                    <td className="p-2">{fmt(row.pe?.ltp)}</td>
-                    <td className="p-2">{fmt(row.pe?.iv, 1)}</td>
-                    <td className="p-2">{fmt(row.pe?.delta, 3)}</td>
-                    <td className="p-2">{fmt(row.pe?.theta, 2)}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
     </div>
   )
 }

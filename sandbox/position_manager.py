@@ -27,6 +27,7 @@ from sandbox.fund_manager import FundManager
 from sandbox.holdings_manager import HoldingsManager
 from services.market_data_service import get_market_data_service
 from services.quotes_service import get_multiquotes, get_quotes
+from services.strategy_books_service import label_order_strategies
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -344,6 +345,31 @@ class PositionManager:
 
         logger.info(f"Expired position {symbol} settled successfully for user {position.user_id}")
 
+    def _strategies_for_session(self, session_start: datetime) -> dict[tuple[str, str, str], list[str]]:
+        """Map (symbol, exchange, product) → unique placeorder strategy tags this session."""
+        by_key: dict[tuple[str, str, str], list[str]] = {}
+        try:
+            trades = (
+                SandboxTrades.query.filter(
+                    SandboxTrades.user_id == self.user_id,
+                    SandboxTrades.trade_timestamp >= session_start,
+                )
+                .order_by(SandboxTrades.trade_timestamp.asc())
+                .all()
+            )
+        except Exception:
+            logger.exception("position strategy lookup failed")
+            return by_key
+        for trade in trades:
+            tag = (trade.strategy or "").strip()
+            if not tag:
+                continue
+            key = (trade.symbol, trade.exchange, trade.product)
+            seen = by_key.setdefault(key, [])
+            if tag not in seen:
+                seen.append(tag)
+        return by_key
+
     def get_open_positions(self, update_mtm=True):
         """
         Get all open positions for the user
@@ -475,6 +501,8 @@ class PositionManager:
             except Exception:
                 _cv_map = {}
 
+            strategy_map = self._strategies_for_session(last_session_expiry)
+
             for position in positions:
                 unrealized_pnl = Decimal(str(position.pnl))  # Current unrealized P&L from MTM
                 today_realized = Decimal(str(position.today_realized_pnl or 0))
@@ -524,6 +552,11 @@ class PositionManager:
                         "today_realized_pnl": float(today_realized),
                         "total_pnl_today": float(position_total_pnl_today),
                         "lot_size": pos_cv,  # contract_value multiplier (e.g. 0.01 for ETHUSD.P)
+                        "strategy": label_order_strategies(
+                            strategy_map.get(
+                                (position.symbol, position.exchange, position.product), []
+                            )
+                        ),
                     }
                 )
 

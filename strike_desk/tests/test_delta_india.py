@@ -60,3 +60,31 @@ def test_chain_clips_far_strikes_so_coa_stays_near_atm():
     assert 60000.0 not in strikes
     assert 120000.0 not in strikes
     assert strikes == [80800.0, 81000.0]
+
+
+def test_expiry_dates_are_openalgo_labels_and_candles_sort_ascending():
+    from time import monotonic
+
+    from strike_desk.delta_india import DeltaIndiaChain, _oa_label, _parse_candle
+
+    assert _oa_label(date(2026, 10, 31)) == "31-OCT-26"
+    older = _parse_candle(
+        {"time": 100, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 9}
+    )
+    newer = _parse_candle(
+        {"time": 200, "open": 1.5, "high": 3, "low": 1, "close": 2, "volume": 4}
+    )
+    assert older is not None and newer is not None
+    rows = [newer, older]
+    rows.sort(key=lambda item: item["time"])
+    assert [row["time"] for row in rows] == [100, 200]
+    delta = DeltaIndiaChain.__new__(DeltaIndiaChain)
+    delta._tickers_cache = (
+        monotonic(),
+        "BTC",
+        [
+            _ticker("C-BTC-81000-311026", "81000", close=500, volume=1, oi="0.2", spot="80910"),
+            _ticker("C-BTC-81000-011126", "81000", close=600, volume=1, oi="0.2", spot="80910"),
+        ],
+    )
+    assert delta.expiry_dates("BTC", "CRYPTO") == ["31-OCT-26", "01-NOV-26"]

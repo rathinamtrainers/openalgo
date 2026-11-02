@@ -1,21 +1,13 @@
-import {
-  Activity,
-  AlertTriangle,
-  BarChart3,
-  CheckCircle,
-  Download,
-  Eye,
-  Filter,
-  Users,
-} from 'lucide-react'
+import { AlertTriangle, CheckCircle, Download, Eye, Filter } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import type { StrategyPerformanceReport } from '@/api/strategy-books'
+import { StrategySandboxReport } from '@/components/strategy/StrategySandboxReport'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { JsonEditor } from '@/components/ui/json-editor'
-import { Label } from '@/components/ui/label'
 import {
   Table,
   TableBody,
@@ -59,6 +51,10 @@ interface AnalyzerData {
   stats: Stats
 }
 
+function todayIst(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+}
+
 const EXCHANGE_COLORS: Record<string, string> = {
   NSE: 'bg-cyan-500/10 text-cyan-600 border-cyan-500/30',
   NFO: 'bg-purple-500/10 text-purple-600 border-purple-500/30',
@@ -76,16 +72,46 @@ const EXCHANGE_COLORS: Record<string, string> = {
 
 export default function Analyzer() {
   const [data, setData] = useState<AnalyzerData | null>(null)
+  const [performance, setPerformance] = useState<StrategyPerformanceReport | null>(null)
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [filterMode, setFilterMode] = useState<'till' | 'range'>('till')
+  const [tillDate, setTillDate] = useState(todayIst)
   const [startDate, setStartDate] = useState('')
-  const [endDate, setEndDate] = useState('')
+  const [endDate, setEndDate] = useState(todayIst)
   const [selectedRequest, setSelectedRequest] = useState<ApiRequest | null>(null)
   const [showDetailsDialog, setShowDetailsDialog] = useState(false)
 
+  const filterDates = (): { start: string; end: string } => {
+    if (filterMode === 'till') {
+      return { start: '', end: tillDate || todayIst() }
+    }
+    return { start: startDate, end: endDate }
+  }
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: one-time data load on mount; subsequent fetches are triggered explicitly by the filter form
   useEffect(() => {
-    fetchData()
+    const end = todayIst()
+    fetchData('', end)
+    fetchPerformance('', end)
   }, [])
+
+  const fetchPerformance = async (start?: string, end?: string) => {
+    try {
+      const params = new URLSearchParams()
+      if (start) params.append('start_date', start)
+      if (end) params.append('end_date', end)
+      const url = params.toString()
+        ? `/analyzer/api/performance?${params}`
+        : '/analyzer/api/performance'
+      const response = await fetch(url, { credentials: 'include' })
+      if (!response.ok) return
+      const result = await response.json()
+      if (result.status === 'success' && result.data?.strategies) {
+        setPerformance(result.data)
+      }
+    } catch (_error) {}
+  }
 
   const fetchData = async (start?: string, end?: string) => {
     setIsLoading(true)
@@ -114,16 +140,29 @@ export default function Analyzer() {
 
   const handleFilter = (e: React.FormEvent) => {
     e.preventDefault()
-    fetchData(startDate, endDate)
+    const { start, end } = filterDates()
+    fetchData(start, end)
+    fetchPerformance(start, end)
   }
 
   const handleExport = () => {
+    const { start, end } = filterDates()
     const params = new URLSearchParams()
-    if (startDate) params.append('start_date', startDate)
-    if (endDate) params.append('end_date', endDate)
+    if (start) params.append('start_date', start)
+    if (end) params.append('end_date', end)
 
     const url = params.toString() ? `/analyzer/export?${params}` : '/analyzer/export'
     window.location.href = url
+  }
+
+  const switchMode = (mode: 'till' | 'range') => {
+    setFilterMode(mode)
+    if (mode === 'till' && !tillDate) {
+      setTillDate(todayIst())
+    }
+    if (mode === 'range' && !endDate) {
+      setEndDate(tillDate || todayIst())
+    }
   }
 
   const viewDetails = (request: ApiRequest) => {
@@ -166,125 +205,86 @@ export default function Analyzer() {
 
   return (
     <div className="container mx-auto py-6 px-4">
-      {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold">Sandbox Request Monitor</h1>
-        <p className="text-muted-foreground mt-1">
-          Review and validate your sandbox API requests before going live
-        </p>
-      </div>
-
-      {/* Date Filter */}
-      <Card className="mb-6">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Filter className="h-4 w-4" />
-            Filters
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleFilter} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
-            <div className="space-y-2">
-              <Label htmlFor="start_date" className="text-sm font-medium">
-                Start Date
-              </Label>
+      <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Sandbox</h1>
+          <p className="text-sm text-muted-foreground">How the strategies did, then the request log.</p>
+        </div>
+        <form onSubmit={handleFilter} className="flex flex-wrap items-end gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={filterMode === 'till' ? 'default' : 'outline'}
+            onClick={() => switchMode('till')}
+          >
+            Till date
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={filterMode === 'range' ? 'default' : 'outline'}
+            onClick={() => switchMode('range')}
+          >
+            Date range
+          </Button>
+          {filterMode === 'till' ? (
+            <Input
+              id="till_date"
+              type="date"
+              value={tillDate}
+              onChange={(e) => setTillDate(e.target.value)}
+              className="date-input-styled w-[11.5rem]"
+            />
+          ) : (
+            <>
               <Input
                 id="start_date"
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="date-input-styled"
+                className="date-input-styled w-[11.5rem]"
               />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="end_date" className="text-sm font-medium">
-                End Date
-              </Label>
               <Input
                 id="end_date"
                 type="date"
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
-                className="date-input-styled"
+                className="date-input-styled w-[11.5rem]"
               />
-            </div>
-            <div className="flex gap-2 pt-6">
-              <Button type="submit">
-                <Filter className="h-4 w-4 mr-2" />
-                Filter
-              </Button>
-              <Button type="button" variant="secondary" onClick={handleExport}>
-                <Download className="h-4 w-4 mr-2" />
-                Export CSV
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Activity className="h-4 w-4" />
-              Total Requests
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-primary">{stats.total_requests}</div>
-            <Badge className="mt-1">Last 24 hours</Badge>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4" />
-              Issues Found
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-yellow-500">{stats.issues.total}</div>
-            <Badge variant="secondary" className="mt-1">
-              Needs Attention
-            </Badge>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <BarChart3 className="h-4 w-4" />
-              Unique Symbols
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats.symbols.length}</div>
-            <Badge variant="outline" className="mt-1">
-              Tracked
-            </Badge>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Users className="h-4 w-4" />
-              Active Sources
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats.sources.length}</div>
-            <Badge variant="outline" className="mt-1">
-              Connected
-            </Badge>
-          </CardContent>
-        </Card>
+            </>
+          )}
+          <Button type="submit" size="sm">
+            <Filter className="h-4 w-4 mr-1" />
+            Filter
+          </Button>
+          <Button type="button" size="sm" variant="secondary" onClick={handleExport}>
+            <Download className="h-4 w-4 mr-1" />
+            CSV
+          </Button>
+        </form>
       </div>
 
-      {/* Requests Table */}
+      <StrategySandboxReport
+        report={performance}
+        selectedId={selectedStrategyId}
+        onSelect={(id) => setSelectedStrategyId((current) => (current === id ? null : id))}
+      />
+
       <Card>
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle>Request details</CardTitle>
+              <CardDescription>Each placeorder and close stays its own line.</CardDescription>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+              <Badge variant="outline">{requests.length} rows</Badge>
+              <Badge variant="outline">{stats.issues.total} issues</Badge>
+              <Badge variant="outline">{stats.symbols.length} symbols</Badge>
+              <Badge variant="outline">{stats.sources.length} sources</Badge>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <Table>

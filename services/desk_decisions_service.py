@@ -252,6 +252,8 @@ def list_decisions(
             journal = None
 
     if not rows:
+        if journal is None:
+            logger.debug("strike desk journal unreadable; falling back to %s", export)
         export_rows, export_days = _read_jsonl(export, day=day, outcome=outcome, limit=capped)
         if export_rows:
             rows = export_rows

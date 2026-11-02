@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,9 +64,19 @@ class SessionTape:
     tagged_resistance: bool = False
 
 
-def update_tape(raw: dict[str, Any] | None, snap: CoaSnapshot, now: datetime) -> SessionTape:
-    """Roll a session tape. New IST day starts a fresh tape."""
-    day = now.astimezone(IST).date().isoformat()
+def update_tape(
+    raw: dict[str, Any] | None,
+    snap: CoaSnapshot,
+    now: datetime,
+    *,
+    session: str = "cash",
+    session_key: str | None = None,
+) -> SessionTape:
+    """Roll a session tape. Cash/MCX reset at IST midnight; crypto follows expiry."""
+    if session == "crypto":
+        day = session_key or now.astimezone(timezone.utc).date().isoformat()
+    else:
+        day = now.astimezone(IST).date().isoformat()
     tape = _tape_from_dict(raw)
     if tape.session_date != day:
         tape = SessionTape(session_date=day)

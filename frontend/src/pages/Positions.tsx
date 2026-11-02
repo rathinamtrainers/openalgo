@@ -483,6 +483,7 @@ export default function Positions() {
         'Symbol',
         'Exchange',
         ...(isCrypto ? [] : ['Product']),
+        'Strategy',
         'Quantity',
         'Avg Price',
         'LTP',
@@ -493,6 +494,7 @@ export default function Positions() {
         sanitizeCSV(p.symbol),
         sanitizeCSV(p.exchange),
         ...(isCrypto ? [] : [sanitizeCSV(p.product)]),
+        sanitizeCSV(p.strategy || ''),
         sanitizeCSV(p.quantity),
         sanitizeCSV(p.average_price),
         sanitizeCSV(p.ltp),
@@ -888,6 +890,7 @@ export default function Positions() {
                     <SortableHeader column={0} label="Symbol" className="w-[140px]" />
                     <TableHead className="w-[80px]">Exchange</TableHead>
                     {!isCrypto && <TableHead className="w-[80px]">Product</TableHead>}
+                    <TableHead className="w-[180px]">Strategy</TableHead>
                     <SortableHeader column={3} label="Qty" className="w-[80px] text-right" />
                     <SortableHeader column={4} label="Avg Price" className="w-[120px] text-right" />
                     <TableHead className="w-[120px] text-right">LTP</TableHead>
@@ -910,7 +913,7 @@ export default function Positions() {
                             className="bg-muted/50 cursor-pointer hover:bg-muted"
                             onClick={() => toggleGroup(groupKey)}
                           >
-                            <TableCell colSpan={6}>
+                            <TableCell colSpan={isCrypto ? 6 : 7}>
                               <div className="flex items-center gap-3 py-1 font-semibold">
                                 {isCollapsed ? (
                                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -970,6 +973,15 @@ export default function Positions() {
                                   </Badge>
                                 </TableCell>
                               )}
+                              <TableCell className="w-[180px]">
+                                {position.strategy ? (
+                                  <Badge variant="outline" className="font-normal">
+                                    {position.strategy}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
                               <TableCell
                                 className={cn(
                                   'w-[80px] text-right font-medium',
@@ -1029,7 +1041,7 @@ export default function Positions() {
                 </TableBody>
                 <TableFooter>
                   <TableRow className="bg-muted/50">
-                    <TableCell colSpan={6} className="text-right text-muted-foreground">
+                    <TableCell colSpan={isCrypto ? 6 : 7} className="text-right text-muted-foreground">
                       Total P&L:
                     </TableCell>
                     <TableCell

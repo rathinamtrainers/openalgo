@@ -37,12 +37,51 @@ SEED_BOOKS = (
         "name": "Strike Desk NIFTY Analyzer",
         "kind": "analyzer",
         "underlying": "NIFTY",
-        "execution_target": "openalgo",
+        "execution_target": "openalgo-tradetron",
         "tt_sid": None,
-        "tt_template_id": None,
+        "tt_template_id": 999229670,
         "parked": False,
-        "notes": "15-min regime ATM PE buyer. Fills in OpenAlgo Analyze. No Tradetron SID.",
+        "notes": (
+            "15-min regime ATM CE/PE. Dual-exec: OpenAlgo Analyze + "
+            "Tradetron Strike Desk NIFTY Analyzer hands (an_ce/an_pe/an_exit). "
+            "Template 999229670. Deploy Live Offline; "
+            "STRIKE_DESK_TT_AUTH_TOKEN_ANALYZER is that template's webhook token."
+        ),
         "sort_order": 5,
+    },
+    {
+        "book_id": "coa-nifty",
+        "name": "Strike Desk CoA NIFTY",
+        "kind": "coa",
+        "underlying": "NIFTY",
+        "execution_target": "openalgo-tradetron",
+        "tt_sid": 999357114,
+        "tt_template_id": 999183250,
+        "parked": False,
+        "notes": (
+            "Mind: strike-desk-coa.service (5-min CoA per cash index). Dual-exec: OpenAlgo Analyze "
+            "(placeorder tag COA, never toggles live) + Tradetron CoA Strike Desk NSE BSE Hands "
+            "(Nifty ltp_buy_ce/pe/exit, Banknifty *_bn, Sensex *_sx; template 999183250, "
+            "Live Offline SID 999357114). Never the Live Auto QuadShield row."
+        ),
+        "sort_order": 6,
+    },
+    {
+        "book_id": "ofa-nifty",
+        "name": "Strike Desk OFA NIFTY",
+        "kind": "ofa",
+        "underlying": "NIFTY",
+        "execution_target": "tradetron-hands",
+        "tt_sid": 999405618,
+        "tt_template_id": 999214946,
+        "parked": False,
+        "notes": (
+            "Mind: Strike Desk OFA (depth). Fills: OpenAlgo Analyze + "
+            "Tradetron ZTA Nifty OF Proxy hands (of_long/of_short/of_exit). "
+            "Deploy Proxy Live Offline; set STRIKE_DESK_TT_AUTH_TOKEN_OFA "
+            "to that template's webhook token."
+        ),
+        "sort_order": 8,
     },
     {
         "book_id": "qs-nifty",
@@ -142,18 +181,37 @@ def _seed_if_empty() -> None:
 
 
 def ensure_missing_books() -> None:
-    """Insert seed rows that are absent. Never updates an existing book."""
+    """Insert missing seed rows and refresh wiring fields from SEED_BOOKS.
+
+    Identity fields (name/kind/underlying/sort) stay user-editable in spirit;
+    execution_target / tt_sid / tt_template_id / notes / parked are treated as
+    the seed source of truth so Hands SIDs stay in sync after deploy.
+    """
     try:
-        existing = {row.book_id for row in db_session.query(StrategyBook.book_id).all()}
+        by_id = {row.book_id: row for row in db_session.query(StrategyBook).all()}
         added = 0
-        for row in SEED_BOOKS:
-            if row["book_id"] in existing:
+        updated = 0
+        wiring_keys = ("execution_target", "tt_sid", "tt_template_id", "notes", "parked")
+        for seed in SEED_BOOKS:
+            book_id = seed["book_id"]
+            existing = by_id.get(book_id)
+            if existing is None:
+                db_session.add(StrategyBook(**seed))
+                added += 1
                 continue
-            db_session.add(StrategyBook(**row))
-            added += 1
-        if added:
+            changed = False
+            for key in wiring_keys:
+                if getattr(existing, key) != seed[key]:
+                    setattr(existing, key, seed[key])
+                    changed = True
+            if existing.name != seed["name"]:
+                existing.name = seed["name"]
+                changed = True
+            if changed:
+                updated += 1
+        if added or updated:
             db_session.commit()
-            logger.info("Added %d missing strategy books", added)
+            logger.info("strategy_books seed: added=%d updated=%d", added, updated)
     except Exception:
         logger.exception("strategy_books ensure_missing failed")
         db_session.rollback()

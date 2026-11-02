@@ -193,6 +193,7 @@ def write_desk_snapshot(
     ofa_enabled: bool = False,
     ofa_active: str = "inactive",
     ofa_heartbeat_age_s: float | None = None,
+    ofa_signal: str = "FLAT",
 ) -> None:
     """Called by the host watchdog (root) so OpenAlgo can read the mind."""
     payload = {
@@ -204,6 +205,7 @@ def write_desk_snapshot(
         "ofa_enabled": ofa_enabled,
         "ofa_active": ofa_active,
         "ofa_heartbeat_age_s": ofa_heartbeat_age_s,
+        "ofa_signal": str(ofa_signal or "FLAT").upper(),
         "set1": set1,
         "set2open": set2open,
     }

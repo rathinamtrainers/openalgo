@@ -6,24 +6,27 @@ Rules follow the public course at howtouseltpcalculator.in (Dr. Vinay Prakash Ti
 support / resistance from ATM-outward option-chain volume or OI, yellow-box WTT/WTB
 at 75% of the column high, then the nine CoA 1.0 scenarios.
 
-Extension-of-support / extension-of-resistance click-prices are proprietary to the
-LTP Calculator app. We approximate EOS as support minus ``extension_pts`` and EOR
-as resistance plus ``extension_pts``.
+EOS / EOR: the public course gets the print by clicking volume on the LTP app.
+On our live chain we use the break-even that click is described as:
+EOS = support − put LTP / |Δ| (raw put LTP if delta is missing),
+EOR = resistance + call LTP / Δ. Fixed ``extension_pts`` is fallback only.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 YELLOW_RATIO = 0.75
 NIFTY_STRIKE_STEP = 50.0
+MIN_ABS_DELTA = 0.20
 
 LevelState = Literal["strong", "wtt", "wtb"]
 Scenario = Literal["1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "1.9"]
 Signal = Literal["BUY_CE", "BUY_PE", "FLAT"]
 Column = Literal["volume", "oi", "both"]
+YellowScope = Literal["chain", "side"]
 
 # Handbook COA 1.0 "Trade at EOS / EOR" columns. Buy CE only at EOS, buy PE only at EOR.
 _TRADE_AT: dict[Scenario, tuple[bool, bool]] = {
@@ -46,6 +49,10 @@ class ChainStrike:
     ce_oi: float
     pe_volume: float
     pe_oi: float
+    ce_ltp: float = 0.0
+    pe_ltp: float = 0.0
+    ce_delta: float = 0.0
+    pe_delta: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,10 @@ def parse_chain(rows: list[dict[str, Any]]) -> list[ChainStrike]:
                 ce_oi=_num(ce.get("oi")),
                 pe_volume=_num(pe.get("volume")),
                 pe_oi=_num(pe.get("oi")),
+                ce_ltp=_num(ce.get("ltp")),
+                pe_ltp=_num(pe.get("ltp")),
+                ce_delta=_num(ce.get("delta")),
+                pe_delta=_num(pe.get("delta")),
             )
         )
     out.sort(key=lambda item: item.strike)
@@ -113,8 +124,13 @@ def evaluate(
     extension_pts: float = 20.0,
     yellow_ratio: float = YELLOW_RATIO,
     expiry_kind: str = "weekly",
+    yellow_scope: YellowScope = "chain",
 ) -> CoaSnapshot:
-    """Map a NIFTY option chain + spot onto a CoA 1.0 snapshot and a buyer signal."""
+    """Map a NIFTY option chain + spot onto a CoA 1.0 snapshot and a buyer signal.
+
+    ``yellow_scope='chain'`` is the handbook default (cash and MCX). BTC 0DTE
+    passes ``'side'`` so PE volume above ATM cannot yellow support.
+    """
     chain = rows if rows and isinstance(rows[0], ChainStrike) else parse_chain(rows)  # type: ignore[arg-type]
     if not chain or spot <= 0:
         return CoaSnapshot(
@@ -133,12 +149,40 @@ def evaluate(
         )
 
     atm_strike = float(atm) if atm is not None else _nearest_strike(spot, strike_step)
-    support = _find_level(chain, atm_strike, side="support", yellow_ratio=yellow_ratio)
-    resistance = _find_level(chain, atm_strike, side="resistance", yellow_ratio=yellow_ratio)
+    support = _find_level(
+        chain,
+        atm_strike,
+        side="support",
+        yellow_ratio=yellow_ratio,
+        yellow_scope=yellow_scope,
+    )
+    resistance = _find_level(
+        chain,
+        atm_strike,
+        side="resistance",
+        yellow_ratio=yellow_ratio,
+        yellow_scope=yellow_scope,
+    )
     scenario = _scenario(support, resistance)
     allow_ce, allow_pe = _allows(scenario)
-    eos = (support.strike - extension_pts) if support else None
-    eor = (resistance.strike + extension_pts) if resistance else None
+    pe_ltp, pe_delta = _premium_at(chain, support.strike, "pe") if support else (0.0, 0.0)
+    ce_ltp, ce_delta = (
+        _premium_at(chain, resistance.strike, "ce") if resistance else (0.0, 0.0)
+    )
+    eos = (
+        extension_level(
+            support.strike, pe_ltp, pe_delta, below=True, fallback=extension_pts
+        )
+        if support
+        else None
+    )
+    eor = (
+        extension_level(
+            resistance.strike, ce_ltp, ce_delta, below=False, fallback=extension_pts
+        )
+        if resistance
+        else None
+    )
     signal, reason = _signal(spot, scenario, allow_ce, allow_pe, eos, eor)
     return CoaSnapshot(
         spot=spot,
@@ -154,6 +198,87 @@ def evaluate(
         reason=reason,
         action=_action_text(signal, scenario, allow_ce, allow_pe, expiry_kind),
     )
+
+
+def extension_level(
+    strike: float,
+    ltp: float,
+    delta: float,
+    *,
+    below: bool,
+    fallback: float,
+) -> float:
+    """Spot extension from strike ± LTP/|Δ|, else ± LTP, else ± fallback pts."""
+    offset = float(fallback)
+    premium = max(float(ltp or 0), 0.0)
+    if premium > 0:
+        abs_delta = abs(float(delta or 0))
+        offset = premium / abs_delta if abs_delta >= MIN_ABS_DELTA else premium
+    return round(float(strike) - offset, 2) if below else round(float(strike) + offset, 2)
+
+
+def apply_premium_extension(
+    snap: CoaSnapshot,
+    rows: list[dict[str, Any]] | list[ChainStrike],
+    *,
+    fallback_pts: float,
+    expiry_kind: str = "weekly",
+) -> CoaSnapshot:
+    """Recompute EOS/EOR from live LTP (and delta if present) on the raw chain."""
+    if snap.support is None and snap.resistance is None:
+        return snap
+    chain = rows if rows and isinstance(rows[0], ChainStrike) else parse_chain(rows)  # type: ignore[arg-type]
+    pe_ltp, pe_delta = (
+        _premium_at(chain, snap.support.strike, "pe") if snap.support else (0.0, 0.0)
+    )
+    ce_ltp, ce_delta = (
+        _premium_at(chain, snap.resistance.strike, "ce") if snap.resistance else (0.0, 0.0)
+    )
+    eos = (
+        extension_level(
+            snap.support.strike, pe_ltp, pe_delta, below=True, fallback=fallback_pts
+        )
+        if snap.support
+        else None
+    )
+    eor = (
+        extension_level(
+            snap.resistance.strike,
+            ce_ltp,
+            ce_delta,
+            below=False,
+            fallback=fallback_pts,
+        )
+        if snap.resistance
+        else None
+    )
+    if eos == snap.eos and eor == snap.eor:
+        return snap
+    signal, reason = _signal(
+        snap.spot, snap.scenario, snap.allow_ce, snap.allow_pe, eos, eor
+    )
+    return replace(
+        snap,
+        eos=eos,
+        eor=eor,
+        signal=signal,
+        reason=reason,
+        action=_action_text(
+            signal, snap.scenario, snap.allow_ce, snap.allow_pe, expiry_kind
+        ),
+    )
+
+
+def _premium_at(
+    chain: list[ChainStrike], strike: float, side: Literal["ce", "pe"]
+) -> tuple[float, float]:
+    for row in chain:
+        if abs(row.strike - float(strike)) > 0.01:
+            continue
+        if side == "pe":
+            return row.pe_ltp, row.pe_delta
+        return row.ce_ltp, row.ce_delta
+    return 0.0, 0.0
 
 
 def _num(value: Any) -> float:
@@ -173,6 +298,7 @@ def _find_level(
     *,
     side: Literal["support", "resistance"],
     yellow_ratio: float,
+    yellow_scope: YellowScope = "chain",
 ) -> Level | None:
     """Highest volume or OI closest to ATM, walking OTM from the imaginary line."""
     if side == "support":
@@ -213,11 +339,12 @@ def _find_level(
         if chosen_row is None:
             return None
 
+    yellow_rows = window if yellow_scope == "side" else chain
     vol_second_strike, vol_second = _second_highest(
-        [(row.strike, vol_of(row)) for row in chain], chosen_row.strike
+        [(row.strike, vol_of(row)) for row in yellow_rows], chosen_row.strike
     )
     oi_second_strike, oi_second = _second_highest(
-        [(row.strike, oi_of(row)) for row in chain], chosen_row.strike
+        [(row.strike, oi_of(row)) for row in yellow_rows], chosen_row.strike
     )
     vol_high = vol_of(chosen_row)
     oi_high = oi_of(chosen_row)

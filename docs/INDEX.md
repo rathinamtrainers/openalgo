@@ -38,6 +38,7 @@ need → drill into the specific file. Don't load everything at once.
 
 | Feature | Entry point |
 |---|---|
+| Strategy bank (`/strategy`) | Running books: current status, latest events, decisions, audit |
 | Scalping Terminal (`/scalping`) | [scalping/PRD.md](scalping/PRD.md) |
 | Scanner architecture | [scanner-architecture.md](scanner-architecture.md) |
 | WhatsApp alerts | [whatsapp.md](whatsapp.md) |
@@ -57,6 +58,7 @@ need → drill into the specific file. Don't load everything at once.
 | Benchmarks | [benchmarks/](benchmarks/) |
 | Migration plans | [migration/](migration/) |
 | Implementation plans | [plans/](plans/) |
+| OTM bid-anomaly executor (Delta India, Phase 0) | [specs/phase0-report.md](specs/phase0-report.md) · [specs/otm-anomaly-executor.md](specs/otm-anomaly-executor.md) |
 | Testing guides | [test/](test/) |
 | XTS API | [xtsapi.md](xtsapi.md) |
 

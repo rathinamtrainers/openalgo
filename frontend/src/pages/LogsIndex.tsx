@@ -24,7 +24,7 @@ export default function LogsIndex() {
     },
     {
       title: 'Sandbox Logs',
-      description: 'Track and test your trading strategies before going live',
+      description: 'Analyze PnL, RoI per closed trade, and the sandbox API request log',
       icon: FlaskConical,
       href: '/logs/sandbox',
       color: 'bg-purple-500',

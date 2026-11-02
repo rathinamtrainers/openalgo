@@ -1,7 +1,6 @@
 import csv
 import io
 import json
-
 from datetime import datetime, timedelta
 
 import pytz
@@ -19,6 +18,7 @@ from flask import (
 from sqlalchemy import desc, func
 
 from database.analyzer_db import AnalyzerLog, db_session
+from services.strategy_book_performance import sandbox_strategy_report
 from utils.api_analyzer import get_analyzer_stats
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -219,6 +219,24 @@ def analyzer():
         logger.exception(f"Error rendering analyzer: {str(e)}")
         flash("Error loading analyzer dashboard", "error")
         return redirect(url_for("core_bp.home"))
+
+
+@analyzer_bp.route("/api/performance")
+@check_session_validity
+def api_get_performance():
+    """Strategy-wise Analyze PnL plus one summary row per round trip."""
+    try:
+        start_date = request.args.get("start_date") or None
+        end_date = request.args.get("end_date") or None
+        return jsonify(
+            {
+                "status": "success",
+                "data": sandbox_strategy_report(start_date=start_date, end_date=end_date),
+            }
+        )
+    except Exception as e:
+        logger.exception("Error getting sandbox performance: %s", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @analyzer_bp.route("/api/data")

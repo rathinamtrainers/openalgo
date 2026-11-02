@@ -19,8 +19,10 @@ def dashboard():
     AUTH_TOKEN = get_auth_token(login_username)
 
     if AUTH_TOKEN is None:
-        logger.warning(f"No auth token found for user {login_username}")
-        return redirect(url_for("auth.logout"))
+        # App session can outlive the broker token (#1400). Logout here wiped
+        # the reconnect path and bounced the user between dashboard and login.
+        logger.warning(f"No auth token found for user {login_username} — broker reconnect")
+        return redirect("/broker")
 
     broker = session.get("broker")
     if not broker:

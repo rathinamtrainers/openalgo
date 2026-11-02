@@ -1,0 +1,11 @@
+#!/bin/bash
+# Daily copy of the append-only ledger. Never rewrite source files.
+set -euo pipefail
+SRC=/var/lib/zta-desk/ledger
+DST=/var/backups/zta-desk/ledger/$(date +%F)
+mkdir -p "$DST"
+if [ -d "$SRC" ]; then
+  cp -a "$SRC/." "$DST/"
+fi
+find /var/backups/zta-desk/ledger -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} +
+DATA_DIR=/var/lib/zta-desk /usr/bin/python3 /opt/zta-desk/build_ledger_page.py || true

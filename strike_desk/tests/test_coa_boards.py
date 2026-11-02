@@ -79,6 +79,11 @@ def test_sensex_weekly_is_thursday_on_bfo():
 
 
 def test_btc_is_daily_and_always_open():
+    from datetime import datetime, timezone
+
+    from strike_desk.coa_boards import crypto_session_day
+    from strike_desk.config import IST
+
     expiry = expiry_date_for_board(date(2026, 10, 30), BTC, lambda _day: False)
     assert expiry == date(2026, 10, 30)
     assert BTC.always_open is True
@@ -87,6 +92,13 @@ def test_btc_is_daily_and_always_open():
     assert BTC.option_exchange == "CRYPTO"
     assert BTC not in CASH_BOARDS
     assert BTC.flag_suffix == ""
+    assert BTC.extension_pts == 80.0
+    assert BTC.spot_sl_buffer == 60.0
+    assert BTC.reclaim_trail == 40.0
+    assert crypto_session_day(datetime(2026, 10, 31, 0, 30, tzinfo=timezone.utc)) == date(
+        2026, 10, 31
+    )
+    assert crypto_session_day(datetime(2026, 10, 31, 0, 30, tzinfo=IST)) == date(2026, 10, 30)
 
 
 def test_crude_and_natgas_are_mcx_coa_boards():

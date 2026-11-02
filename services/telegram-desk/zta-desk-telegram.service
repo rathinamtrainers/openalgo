@@ -1,0 +1,25 @@
+[Unit]
+Description=ZeroTouchAlgo desk -> Telegram mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zta-desk
+Group=zta-desk
+EnvironmentFile=/opt/zta-desk/config.env
+WorkingDirectory=/opt/zta-desk
+ExecStart=/usr/bin/python3 /opt/zta-desk/zta_telegram_bot.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/zta-desk
+ReadOnlyPaths=/var/lib/strike-desk
+
+[Install]
+WantedBy=multi-user.target

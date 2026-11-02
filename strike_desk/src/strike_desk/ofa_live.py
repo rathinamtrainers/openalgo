@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,19 @@ from .ofa_hands import OFA_BUY_CE, OFA_BUY_PE, OFA_EXIT, OfaHands
 from .openalgo_client import OpenAlgoClient
 
 logger = logging.getLogger(__name__)
+_OFA_EXPORT = Path("/var/tmp/strike-desk-ofa-journal.jsonl")
+
+
+def _append_world_readable_ofa(row: dict[str, Any]) -> None:
+    """OpenAlgo cannot enter /var/lib/strike-desk (0750). Keep a 0644 JSONL copy."""
+    try:
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+        fd = os.open(_OFA_EXPORT, flags, 0o644)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        os.chmod(_OFA_EXPORT, 0o644)
+    except OSError:
+        logger.warning("ofa export unwritable — private journal still holds the row")
 
 
 class OfaRunner:
@@ -84,6 +98,7 @@ class OfaRunner:
         _save_state(self._state_path, nxt)
         self.last_actions = self._act(snap, now)
         self.touch_heartbeat(now)
+        _write_signal_hint(self._settings.state_dir / "ofa_signal.txt", snap.signal)
         logger.info(
             "ofa %s signal=%s of_long=%s of_short=%s of_exit=%s %s",
             symbol,
@@ -98,6 +113,16 @@ class OfaRunner:
     def _act(self, snap: OfaSnapshot, now: datetime) -> list[str]:
         if self._settings.kill_switch_path.exists():
             logger.info("ofa fill skipped: kill switch")
+            _append_journal(
+                self._settings.state_dir,
+                kind="status",
+                title="Kill switch — fills skipped",
+                reason_code="ofa-hold",
+                outcome="hold",
+                detail=snap.reason,
+                signal=snap.signal,
+                now=now,
+            )
             return []
         if not self._in_session(now):
             return []
@@ -115,6 +140,16 @@ class OfaRunner:
                 exec_state["analyzer_symbol"] = ""
                 exec_state["analyzer_qty"] = 0
                 _save_exec(self._exec_path, exec_state)
+                _append_journal(
+                    self._settings.state_dir,
+                    kind="action",
+                    title="Exited Analyze book",
+                    reason_code="ofa-exit",
+                    outcome="hold",
+                    detail=snap.reason,
+                    signal=snap.signal,
+                    now=now,
+                )
                 return ["exit"]
             actions.append("exit")
         if snap.signal == "LONG":
@@ -122,11 +157,31 @@ class OfaRunner:
             self._send_hands(OFA_BUY_CE)
             exec_state["acted_signal"] = "LONG"
             actions.append("buy_ce")
+            _append_journal(
+                self._settings.state_dir,
+                kind="decision",
+                title="Buy CE · LONG",
+                reason_code="ofa-long",
+                outcome="enter",
+                detail=snap.reason,
+                signal=snap.signal,
+                now=now,
+            )
         elif snap.signal == "SHORT":
             self._open_analyzer(exec_state, "PE", expiry_day)
             self._send_hands(OFA_BUY_PE)
             exec_state["acted_signal"] = "SHORT"
             actions.append("buy_pe")
+            _append_journal(
+                self._settings.state_dir,
+                kind="decision",
+                title="Buy PE · SHORT",
+                reason_code="ofa-short",
+                outcome="enter",
+                detail=snap.reason,
+                signal=snap.signal,
+                now=now,
+            )
         _save_exec(self._exec_path, exec_state)
         return actions
 
@@ -226,6 +281,47 @@ def _load_exec(path: Path) -> dict[str, Any]:
 def _save_exec(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _write_signal_hint(path: Path, signal: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(signal or "FLAT").upper(), encoding="utf-8")
+
+
+def _append_journal(
+    state_dir: Path,
+    *,
+    kind: str,
+    title: str,
+    reason_code: str,
+    outcome: str,
+    detail: str,
+    signal: str,
+    now: datetime,
+) -> None:
+    """Append one plain-language row for the My Strategies OFA timeline."""
+    path = state_dir / "ofa_journal.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = now.astimezone(IST).isoformat()
+    day = now.astimezone(IST).date().isoformat()
+    row = {
+        "event_id": f"ofa:{stamp}:{reason_code}:{signal}",
+        "ts": stamp,
+        "trading_day": day,
+        "kind": kind,
+        "title": title,
+        "reason_code": reason_code,
+        "outcome": outcome,
+        "explanation": detail,
+        "detail": f"signal={signal} · {detail}".strip(" ·"),
+        "signal": signal,
+    }
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.exception("ofa journal append failed")
+    _append_world_readable_ofa(row)
 
 
 def render(snap: OfaSnapshot, actions: list[str] | None = None) -> str:

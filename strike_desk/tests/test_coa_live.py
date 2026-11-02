@@ -110,6 +110,19 @@ def test_coa_live_fires_analyzer_then_hands(settings, monkeypatch):
     assert analyzer.placed == [("NIFTY27OCT2622700CE", "BUY", 65)]
     state = (settings.state_dir / "coa_live.json").read_text(encoding="utf-8")
     assert "NIFTY27OCT2622700CE" in state
+    blotter = json.loads(
+        (settings.state_dir / "coa-trades.jsonl")
+        .read_text(encoding="utf-8")
+        .strip()
+        .splitlines()[-1]
+    )
+    assert blotter["open"] is True
+    assert blotter["in_label"] == "CE on CoA 1.1"
+    assert blotter["strike"] == 22700.0
+    assert blotter["lot_size"] == 65
+    assert blotter["qty"] == 65
+    assert blotter["atm_pnl"] is None
+    assert blotter["margin_used"] == 7800.0
 
 
 def test_coa_live_hands_still_fire_when_analyze_off(settings, monkeypatch):
@@ -142,6 +155,20 @@ def test_coa_live_exit_sells_analyzer_then_hands(settings, monkeypatch):
     assert sent == [COA_EXIT]
     assert hands.sent == [COA_EXIT]
     assert analyzer.placed == [("NIFTY27OCT2622700CE", "SELL", 65)]
+    closed = json.loads(
+        (settings.state_dir / "coa-trades.jsonl")
+        .read_text(encoding="utf-8")
+        .strip()
+        .splitlines()[-1]
+    )
+    assert closed["open"] is False
+    assert closed["rule"] == "stop"
+    assert closed["in_label"] == "CE on CoA 1.1"
+    assert closed["qty"] == 65
+    assert closed["peak_ltp"] == 130.0
+    assert closed["atm_pnl"] == 0.0
+    assert closed["mfe"] == 650.0
+    assert closed["margin_used"] == 7800.0
 
 
 def test_coa_live_banknifty_posts_own_flags(settings, monkeypatch):
@@ -239,6 +266,7 @@ def test_cash_chip_stays_watching_when_hands_fail(settings, monkeypatch):
     assert sent == []
     brief = json.loads((settings.state_dir / "public-brief.json").read_text(encoding="utf-8"))
     assert brief["scenario_label"] == "WATCHING"
+    assert not (settings.state_dir / "coa-trades.jsonl").exists()
 
 
 def test_btc_runs_after_cash_hours_and_does_not_flatten(settings, monkeypatch):
@@ -274,6 +302,61 @@ def test_btc_runs_after_cash_hours_and_does_not_flatten(settings, monkeypatch):
     assert json.loads((settings.state_dir / "coa_live_btc.json").read_text(encoding="utf-8"))[
         "open"
     ]["side"] == "CE"
+
+
+class _BtcListedQuotes(_FakeQuotes):
+    def expiry_dates(self, symbol, exchange):
+        assert symbol == "BTC"
+        assert exchange == "CRYPTO"
+        return ["31-OCT-26", "01-NOV-26"]
+
+
+def test_btc_uses_listed_delta_daily_not_ist_calendar(settings, monkeypatch):
+    monkeypatch.setattr("strike_desk.ltp_coa_live.evaluate", lambda *_a, **_k: _snap("FLAT"))
+    monkeypatch.setattr("strike_desk.ltp_coa_live.apply_handbook", _passthrough_handbook)
+    quotes = _BtcListedQuotes()
+    runner = CoaLiveRunner(
+        settings,
+        client=quotes,
+        hands=_FakeHands(),
+        analyzer=None,
+        board=BTC,
+        is_trading_day=lambda _day: True,
+        expiry_date_for=lambda _day: date(2026, 10, 30),
+        trading_window=None,
+    )
+    runner.step(datetime(2026, 10, 31, 0, 30, tzinfo=IST))
+    assert quotes.calls[0][2] == "31OCT26"
+
+
+def test_btc_evaluate_uses_side_yellow_and_skips_coa2(settings, monkeypatch):
+    seen: dict = {}
+
+    def _eval(*_a, **kwargs):
+        seen["yellow_scope"] = kwargs.get("yellow_scope")
+        seen["extension_pts"] = kwargs.get("extension_pts")
+        return _snap("FLAT")
+
+    def _handbook(snap, _state, now, **kwargs):
+        seen["session"] = kwargs.get("session")
+        return snap, IntelState(session_date=now.astimezone(IST).date().isoformat())
+
+    monkeypatch.setattr("strike_desk.ltp_coa_live.evaluate", _eval)
+    monkeypatch.setattr("strike_desk.ltp_coa_live.apply_handbook", _handbook)
+    runner = CoaLiveRunner(
+        settings,
+        client=_FakeQuotes(),
+        hands=_FakeHands(),
+        analyzer=None,
+        board=BTC,
+        is_trading_day=lambda _day: True,
+        expiry_date_for=lambda _day: date(2026, 10, 30),
+        trading_window=None,
+    )
+    runner.step(datetime(2026, 10, 30, 23, 10, tzinfo=IST))
+    assert seen["yellow_scope"] == "side"
+    assert seen["extension_pts"] == 80.0
+    assert seen["session"] == "crypto"
 
 
 def test_btc_noop_hands_keeps_chip_watching(settings, monkeypatch):

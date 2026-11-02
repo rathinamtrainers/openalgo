@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 _MONTHS = {
     "JAN": 1,
@@ -61,7 +61,8 @@ class CoaBoard:
         return unit * max(int(lots), 1)
 
 
-# Spot buffers scale with strike step (Nifty 50 → 20/15/10). Premium TSL stays %.
+# Spot buffers scale with strike step (Nifty 50 → 20/15/10; BTC 200 → 80/60/40).
+# Premium TSL stays %.
 NIFTY = CoaBoard(
     slug="nifty",
     index_name="NIFTY",
@@ -120,9 +121,9 @@ BTC = CoaBoard(
     index_spot_exchange="CRYPTO",
     option_exchange="CRYPTO",
     strike_step=200.0,
-    extension_pts=200.0,
-    spot_sl_buffer=150.0,
-    reclaim_trail=100.0,
+    extension_pts=80.0,
+    spot_sl_buffer=60.0,
+    reclaim_trail=40.0,
     flag_suffix="",
     expiry_kind="daily",
     expiry_weekday=0,
@@ -232,7 +233,8 @@ def expiry_date_for_board(
 ) -> date | None:
     """Weekly = next expiry weekday; monthly = last that weekday of the month.
 
-    Daily (BTC) is the calendar day itself — crypto does not close on weekends.
+    Daily (BTC) returns the date passed in. The live runner passes a UTC date
+    and prefers Delta's listed book over this calendar fallback.
     """
     if board.expiry_kind == "daily":
         return day
@@ -253,6 +255,12 @@ def expiry_date_for_board(
             return candidate
         candidate -= timedelta(days=1)
     return None
+
+
+def crypto_session_day(now: datetime) -> date:
+    """Delta dailies settle on the UTC date, not IST midnight."""
+    stamp = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc).date()
 
 
 def _last_weekday(day: date, weekday: int) -> date:

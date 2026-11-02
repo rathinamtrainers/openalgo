@@ -1,0 +1,10 @@
+[Unit]
+Description=CoA Historify archive after the cash F&O session
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:40:00
+Persistent=true
+Unit=coa-historify-archive.service
+
+[Install]
+WantedBy=timers.target

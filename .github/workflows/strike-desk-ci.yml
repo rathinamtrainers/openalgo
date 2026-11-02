@@ -2,9 +2,9 @@ name: strike-desk
 
 on:
   push:
-    paths: ["strike_desk/**", ".github/workflows/strike-desk-ci.yml"]
+    paths: ["strike_desk/**", "services/telegram-desk/**", ".github/workflows/strike-desk-ci.yml"]
   pull_request:
-    paths: ["strike_desk/**", ".github/workflows/strike-desk-ci.yml"]
+    paths: ["strike_desk/**", "services/telegram-desk/**", ".github/workflows/strike-desk-ci.yml"]
 
 jobs:
   verify:
@@ -29,6 +29,9 @@ jobs:
 
       - name: Guardrail and regression gate
         run: uv run pytest tests/test_guardrails.py tests/test_guardrails_regime.py tests/regression -q
+
+      - name: Telegram desk bot
+        run: uv run pytest ../services/telegram-desk/tests/test_bot.py -q
 
       - name: Full suite with coverage
         run: uv run pytest --cov=strike_desk --cov-report=term-missing --cov-fail-under=80

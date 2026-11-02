@@ -117,7 +117,8 @@ class Settings(BaseSettings):
     tt_auth_token_bn: SecretStr | None = None
     tt_auth_token_coa: SecretStr | None = None
     # BTC Hands (template 999305026). Never reuse the NSE/BSE CoA token —
-    # both books listen on unsuffixed ltp_buy_ce / ltp_buy_pe / ltp_exit.
+    # CoA listens on unsuffixed ltp_buy_ce / ltp_buy_pe / ltp_exit.
+    # M1 Sniper is an extra mind on the same token (m1_buy_ce / m1_buy_pe / m1_exit).
     tt_auth_token_coa_btc: SecretStr | None = None
     # MCX Hands (template 999310646). Own token — NSE CoA UE would flatten
     # Crude/Natgas at 15:15. Qty on TT is 1 LOT, not 1250 units.

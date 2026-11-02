@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -18,6 +19,21 @@ from .errors import OpenAlgoError
 logger = logging.getLogger(__name__)
 
 DELTA_INDIA = "https://api.india.delta.exchange"
+_TICKERS_TTL = 15.0
+_MONTH_ABBR = (
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC",
+)
 _SYMBOL = re.compile(
     r"^(?P<kind>[CP])-(?P<under>[A-Z]+)-(?P<strike>[0-9]+(?:\.[0-9]+)?)-(?P<exp>\d{6})$"
 )
@@ -35,6 +51,7 @@ class DeltaIndiaChain:
     ) -> None:
         self._strike_step = strike_step
         self._owned = client is None
+        self._tickers_cache: tuple[float, str, list[Any]] | None = None
         self._client = client or httpx.Client(
             base_url=DELTA_INDIA,
             timeout=httpx.Timeout(timeout),
@@ -57,12 +74,76 @@ class DeltaIndiaChain:
         strike_count: int = 10,
     ) -> dict[str, Any]:
         del exchange
+        tickers = self._load_tickers(underlying.upper())
+        wanted = _expiry_from_token(expiry_date)
+        return chain_from_tickers(
+            tickers,
+            underlying=underlying.upper(),
+            expiry=wanted,
+            strike_count=strike_count,
+            strike_step=self._strike_step,
+        )
+
+    def expiry_dates(self, underlying: str, exchange: str) -> list[str]:
+        """OpenAlgo-shaped labels for listed Delta dailies (``31-OCT-26``)."""
+        del exchange
+        days = sorted(
+            {
+                parsed[0]
+                for raw in self._load_tickers(underlying.upper())
+                if isinstance(raw, dict)
+                and (parsed := _parse_ticker(raw, underlying.upper()))
+            }
+        )
+        return [_oa_label(day) for day in days]
+
+    def candles(
+        self,
+        symbol: str,
+        resolution: str,
+        start: int,
+        end: int,
+    ) -> list[dict[str, Any]]:
+        """Public OHLC. ``time`` is bar open unix seconds. Never posts orders."""
+        try:
+            response = self._client.get(
+                "/v2/history/candles",
+                params={
+                    "symbol": symbol,
+                    "resolution": resolution,
+                    "start": int(start),
+                    "end": int(end),
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise OpenAlgoError(f"delta india candles failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise OpenAlgoError(
+                f"delta india candles http {response.status_code}",
+                status_code=response.status_code,
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise OpenAlgoError("delta india candles were not JSON") from exc
+        rows = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise OpenAlgoError("delta india candles: 'result' was not a list")
+        parsed = [row for raw in rows if (row := _parse_candle(raw))]
+        parsed.sort(key=lambda item: item["time"])
+        return parsed
+
+    def _load_tickers(self, underlying: str) -> list[Any]:
+        now = monotonic()
+        cached = self._tickers_cache
+        if cached is not None and cached[1] == underlying and now - cached[0] < _TICKERS_TTL:
+            return cached[2]
         try:
             response = self._client.get(
                 "/v2/tickers",
                 params={
                     "contract_types": "call_options,put_options",
-                    "underlying_asset_symbols": underlying.upper(),
+                    "underlying_asset_symbols": underlying,
                 },
             )
         except httpx.HTTPError as exc:
@@ -79,14 +160,8 @@ class DeltaIndiaChain:
         tickers = payload.get("result") if isinstance(payload, dict) else None
         if not isinstance(tickers, list):
             raise OpenAlgoError("delta india tickers: 'result' was not a list")
-        wanted = _expiry_from_token(expiry_date)
-        return chain_from_tickers(
-            tickers,
-            underlying=underlying.upper(),
-            expiry=wanted,
-            strike_count=strike_count,
-            strike_step=self._strike_step,
-        )
+        self._tickers_cache = (now, underlying, tickers)
+        return tickers
 
 
 def chain_from_tickers(
@@ -213,6 +288,29 @@ def _expiry_from_ddmmyy(raw: str) -> date | None:
         return datetime.strptime(raw, "%d%m%y").date()
     except (TypeError, ValueError):
         return None
+
+
+def _oa_label(day: date) -> str:
+    return f"{day.day:02d}-{_MONTH_ABBR[day.month - 1]}-{day.year % 100:02d}"
+
+
+def _parse_candle(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        ts = int(raw.get("time") or 0)
+    except (TypeError, ValueError):
+        return None
+    if ts <= 0:
+        return None
+    return {
+        "time": ts,
+        "open": _num(raw.get("open")),
+        "high": _num(raw.get("high")),
+        "low": _num(raw.get("low")),
+        "close": _num(raw.get("close")),
+        "volume": _num(raw.get("volume")),
+    }
 
 
 def _num(raw: Any) -> float:

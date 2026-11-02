@@ -28,6 +28,51 @@ LOGIN_RATE_LIMIT_HOUR = get_login_rate_limit_hour()
 brlogin_bp = Blueprint("brlogin", __name__, url_prefix="/")
 
 
+def reconnect_action(logged_in: bool, has_live_token: bool, has_oauth_payload: bool) -> str | None:
+    """Decide whether a broker callback should skip OAuth.
+
+    A live app session with a dead broker token must still run OAuth (Kite
+    request_token, etc.). Skipping to the dashboard is what loops reconnect
+    back to "Broker Session Expired". None means continue the broker auth.
+    """
+    if logged_in and has_live_token:
+        return "dashboard"
+    if logged_in and not has_oauth_payload:
+        return "broker"
+    return None
+
+
+def _has_live_broker_token(username: str | None) -> bool:
+    if not username:
+        return False
+    from database.auth_db import get_auth_token
+
+    try:
+        return bool(get_auth_token(username))
+    except Exception:
+        logger.exception("Failed checking live broker token for reconnect")
+        return False
+
+
+def _has_oauth_payload() -> bool:
+    args = request.args
+    form = request.form
+    return bool(
+        args.get("code")
+        or args.get("request_token")
+        or args.get("request-token")
+        or args.get("requestToken")
+        or args.get("session")
+        or form.get("code")
+        or form.get("request_token")
+        or form.get("userid")
+        or form.get("clientid")
+        or form.get("totp")
+        or form.get("otp")
+        or form.get("pin")
+    )
+
+
 @brlogin_bp.errorhandler(429)
 def ratelimit_handler(e):
     return jsonify(error="Rate limit exceeded"), 429
@@ -55,10 +100,20 @@ def broker_callback(broker, para=None):
             logger.warning(f"User not in session for {broker} callback, redirecting to login")
             return redirect(url_for("auth.login"))
 
-    if session.get("logged_in"):
-        # Store broker in session and g
+    action = reconnect_action(
+        logged_in=bool(session.get("logged_in")),
+        has_live_token=_has_live_broker_token(session.get("user")),
+        has_oauth_payload=_has_oauth_payload(),
+    )
+    if action == "dashboard":
         session["broker"] = broker
         return redirect(url_for("dashboard_bp.dashboard"))
+    if action == "broker":
+        logger.info(
+            f"Broker token missing for {session.get('user')} on {broker} callback "
+            "with no OAuth payload — sending to reconnect"
+        )
+        return redirect("/broker")
 
     broker_auth_functions = app.broker_auth_functions
     auth_function = broker_auth_functions.get(f"{broker}_auth")

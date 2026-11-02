@@ -55,16 +55,21 @@ export default function Login() {
         if (sessionResponse.ok) {
           const sessionData = await sessionResponse.json()
 
-          if (sessionData.status === 'success' && sessionData.logged_in && sessionData.broker) {
-            // Already fully logged in with broker, go to dashboard
+          if (
+            sessionData.status === 'success' &&
+            sessionData.logged_in &&
+            sessionData.broker &&
+            !sessionData.broker_session_expired
+          ) {
+            // Already fully logged in with a live broker token
             navigate('/dashboard', { replace: true })
             return
           } else if (
             sessionData.status === 'success' &&
-            sessionData.authenticated &&
-            !sessionData.logged_in
+            (sessionData.broker_session_expired ||
+              (sessionData.authenticated && !sessionData.logged_in))
           ) {
-            // Logged in but no broker, go to broker selection
+            // App session is fine but broker is missing/expired — reconnect
             navigate('/broker', { replace: true })
             return
           }

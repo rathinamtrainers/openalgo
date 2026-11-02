@@ -1,0 +1,21 @@
+[Unit]
+Description=CoA Historify archive — cash-index ATM 1m
+After=network-online.target openalgo.service
+Wants=network-online.target
+Wants=openalgo.service
+
+[Service]
+Type=oneshot
+User=openalgo
+Group=openalgo
+WorkingDirectory=/opt/openalgo/current
+Environment=TZ=Asia/Kolkata
+Environment=PYTHONUNBUFFERED=1
+Environment=OPENALGO_ROOT=/opt/openalgo/current
+Environment=STRIKE_DESK_SRC=/opt/strike-desk/current/strike_desk/src
+ExecStart=/opt/openalgo/current/.venv/bin/python /opt/strike-desk/current/strike_desk/scripts/coa_historify_archive.py
+TimeoutStartSec=1800
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

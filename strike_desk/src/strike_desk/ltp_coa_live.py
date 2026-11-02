@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +19,22 @@ from .coa_boards import (
     expiry_date_for_board,
     pick_listed_expiry,
 )
+
+try:
+    from .coa_boards import crypto_session_day
+except ImportError:  # GCE boards older than the BTC UTC session key
+
+    def crypto_session_day(now: datetime) -> date:
+        stamp = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        return stamp.astimezone(timezone.utc).date()
 from .config import IST, Settings
 from .errors import AnalyzerOff, OpenAlgoError
 from .ltp_coa import evaluate
+
+try:
+    from .ltp_coa import apply_premium_extension
+except ImportError:  # GCE evaluate older than premium EOS
+    apply_premium_extension = None
 from .ltp_coa_brief import build_brief, publish_public_brief, tape_to_dict, update_tape
 from .ltp_coa_exits import (
     OpenTrade,
@@ -30,6 +44,7 @@ from .ltp_coa_exits import (
 )
 from .ltp_coa_intel import apply_handbook, atm_oi, intel_to_dict
 from .ltp_coa_replay import expiry_token
+from .ltp_coa_trades import record_entry, record_exit, record_mark
 from .ofa_analyzer import pick_atm_option
 from .openalgo_client import OpenAlgoClient
 from .tradetron_hands import COA_BUY_CE, COA_BUY_PE, COA_EXIT, CoaHands
@@ -80,7 +95,10 @@ class CoaLiveRunner:
                 self._touch_heartbeat(now)
                 return sent
 
-        expiry_day = self._expiry_day(now.date())
+        expiry_anchor = (
+            crypto_session_day(now) if self.board.session == "crypto" else now.date()
+        )
+        expiry_day = self._expiry_day(expiry_anchor)
         if expiry_day is None:
             logger.info("coa live %s skipped: no expiry", self.board.slug)
             self._touch_heartbeat(now)
@@ -99,23 +117,43 @@ class CoaLiveRunner:
             logger.info("coa live %s skipped: empty chain", self.board.slug)
             self._touch_heartbeat(now)
             return sent
-        snap = evaluate(
+        if self.board.session == "crypto":
+            raw_exp = payload.get("expiry")
+            if raw_exp:
+                try:
+                    expiry_day = date.fromisoformat(str(raw_exp)[:10])
+                except ValueError:
+                    pass
+        snap = _call_supported(
+            evaluate,
             chain,
             spot,
             atm=atm,
             strike_step=self.board.strike_step,
             extension_pts=self.board.extension_pts,
             expiry_kind=self.board.expiry_kind,
+            yellow_scope="side" if self.board.session == "crypto" else "chain",
         )
+        if apply_premium_extension is not None:
+            snap = apply_premium_extension(
+                snap,
+                chain,
+                fallback_pts=self.board.extension_pts,
+                expiry_kind=self.board.expiry_kind,
+            )
         state = _load_state(self._state_path)
         call_oi, put_oi = atm_oi(chain, atm)
-        snap, intel = apply_handbook(
+        crypto_key = expiry_day.isoformat() if self.board.session == "crypto" else None
+        snap, intel = _call_supported(
+            apply_handbook,
             snap,
             state.get("intel"),
             now,
             call_oi=call_oi,
             put_oi=put_oi,
             expiry_kind=self.board.expiry_kind,
+            session=self.board.session,
+            session_key=crypto_key,
         )
         state["intel"] = intel_to_dict(intel)
         clock = now.astimezone(IST).time()
@@ -124,8 +162,21 @@ class CoaLiveRunner:
         if open_trade is not None:
             trade = _trade_from_dict(open_trade)
             ltp = _atm_ltp(chain, trade.strike, trade.side)
+            prev_peak = 0.0
+            if isinstance(open_trade, dict):
+                prev_peak = round(float(open_trade.get("peak") or 0), 2)
             trade.note_ltp(ltp)
-            reason = decide_exit(
+            new_peak = round(float(trade.peak or 0), 2)
+            if ltp > 0 and new_peak > prev_peak:
+                record_mark(
+                    self._settings.state_dir,
+                    self.board,
+                    trade,
+                    ltp=ltp,
+                    **_blotter_kwargs(state),
+                )
+            reason = _call_supported(
+                decide_exit,
                 clock,
                 spot,
                 ltp,
@@ -140,27 +191,43 @@ class CoaLiveRunner:
                 if self._send(COA_EXIT):
                     sent.append(COA_EXIT)
                     logger.info("coa live %s exit %s ltp=%.2f", self.board.slug, reason, ltp)
+                    record_exit(
+                        self._settings.state_dir,
+                        self.board,
+                        trade,
+                        now=now,
+                        exit_ltp=ltp,
+                        reason=reason,
+                        exit_scenario=snap.scenario,
+                        **_blotter_kwargs(state),
+                    )
                     state["open"] = None
+                    state["blotter"] = None
                     state["analyzer_symbol"] = ""
                     state["analyzer_qty"] = 0
                     state["last_exit"] = None if "flatten" in reason else now.isoformat()
-                self._publish_brief(now, snap, state)
-                self._touch_heartbeat(now)
-                return sent
-            state["open"] = _trade_to_dict(trade)
-            self._publish_brief(now, snap, state)
+                    self._publish_brief(now, snap, state, session_key=crypto_key)
+                    self._touch_heartbeat(now)
+                    return sent
+            opened = _trade_to_dict(trade)
+            opened["last_ltp"] = ltp
+            state["open"] = opened
+            self._publish_brief(now, snap, state, session_key=crypto_key)
             self._touch_heartbeat(now)
             return sent
 
-        if not self.board.always_open and not in_entry_window(
-            clock, start=self.board.entry_open, end=self.board.entry_close
+        if not self.board.always_open and not _call_supported(
+            in_entry_window,
+            clock,
+            start=self.board.entry_open,
+            end=self.board.entry_close,
         ):
-            self._publish_brief(now, snap, state)
+            self._publish_brief(now, snap, state, session_key=crypto_key)
             self._touch_heartbeat(now)
             return sent
         last_exit = _parse_ts(state.get("last_exit"))
         if not can_reenter(now, last_exit):
-            self._publish_brief(now, snap, state)
+            self._publish_brief(now, snap, state, session_key=crypto_key)
             self._touch_heartbeat(now)
             return sent
         if snap.signal == "BUY_CE":
@@ -169,7 +236,17 @@ class CoaLiveRunner:
                 self._analyze_buy(state, chain, atm, "CE", expiry_day)
                 if self._send(COA_BUY_CE):
                     sent.append(COA_BUY_CE)
-                    state["open"] = _trade_to_dict(_new_trade("CE", ltp, now, atm, snap))
+                    opened = _new_trade("CE", ltp, now, atm, snap)
+                    blotter = _blotter_contract(
+                        self.board, self._settings, chain, atm, "CE", expiry_day
+                    )
+                    payload = _trade_to_dict(opened)
+                    payload["last_ltp"] = ltp
+                    state["open"] = payload
+                    state["blotter"] = blotter
+                    record_entry(
+                        self._settings.state_dir, self.board, opened, **blotter
+                    )
                     logger.info(
                         "coa live %s BUY_CE ltp=%.2f CoA %s",
                         self.board.slug,
@@ -182,14 +259,24 @@ class CoaLiveRunner:
                 self._analyze_buy(state, chain, atm, "PE", expiry_day)
                 if self._send(COA_BUY_PE):
                     sent.append(COA_BUY_PE)
-                    state["open"] = _trade_to_dict(_new_trade("PE", ltp, now, atm, snap))
+                    opened = _new_trade("PE", ltp, now, atm, snap)
+                    blotter = _blotter_contract(
+                        self.board, self._settings, chain, atm, "PE", expiry_day
+                    )
+                    payload = _trade_to_dict(opened)
+                    payload["last_ltp"] = ltp
+                    state["open"] = payload
+                    state["blotter"] = blotter
+                    record_entry(
+                        self._settings.state_dir, self.board, opened, **blotter
+                    )
                     logger.info(
                         "coa live %s BUY_PE ltp=%.2f CoA %s",
                         self.board.slug,
                         ltp,
                         snap.scenario,
                     )
-        self._publish_brief(now, snap, state)
+        self._publish_brief(now, snap, state, session_key=crypto_key)
         self._touch_heartbeat(now)
         return sent
 
@@ -278,28 +365,53 @@ class CoaLiveRunner:
         except OpenAlgoError:
             logger.exception("coa analyzer SELL failed")
 
-    def _publish_brief(self, now: datetime, snap, state: dict) -> None:
-        tape = update_tape(state.get("tape"), snap, now)
+    def _publish_brief(
+        self,
+        now: datetime,
+        snap,
+        state: dict,
+        *,
+        session_key: str | None = None,
+    ) -> None:
+        tape = _call_supported(
+            update_tape,
+            state.get("tape"),
+            snap,
+            now,
+            session=self.board.session,
+            session_key=session_key,
+        )
         state["tape"] = tape_to_dict(tape)
-        payload = build_brief(
+        in_window = (
+            True
+            if self.board.always_open
+            else _call_supported(
+                in_entry_window,
+                now.astimezone(IST).time(),
+                start=self.board.entry_open,
+                end=self.board.entry_close,
+            )
+        )
+        payload = _call_supported(
+            build_brief,
             snap,
             now,
             tape,
-            in_window=(
-                True
-                if self.board.always_open
-                else in_entry_window(
-                    now.astimezone(IST).time(),
-                    start=self.board.entry_open,
-                    end=self.board.entry_close,
-                )
-            ),
+            in_window=in_window,
             index_name=self.board.index_name,
             strike_step=self.board.strike_step,
             market=self.board.slug,
             extension_pts=self.board.extension_pts,
             hands_posted=_hands_side(state.get("open")),
         )
+        if isinstance(payload, dict):
+            payload["disclaimer"] = (
+                "Map, not advice. Call-buy zone = floor minus that put's LTP "
+                "(÷ |delta| when the chain has it). Put-buy zone = ceiling plus "
+                "that call's LTP. Not the LTP Calculator volume-click. "
+                "ZeroTouchAlgo is not a SEBI-registered Investment Adviser or "
+                "Research Analyst."
+            )
         try:
             from .ltp_coa_narrate import polish_brief
 
@@ -319,8 +431,6 @@ class CoaLiveRunner:
         return expiry_date_for_board(day, self.board, self._is_trading_day)
 
     def _listed_expiry(self, day: date) -> date | None:
-        if self.board.option_exchange == "CRYPTO":
-            return None
         cached = self._listed_cache
         if cached is not None and cached[0] == day:
             return cached[1]
@@ -411,11 +521,64 @@ def make_btc_runner(
     )
 
 
+def _call_supported(fn, *args, **kwargs):
+    """Drop kwargs the GCE module does not yet accept."""
+    params = inspect.signature(fn).parameters
+    if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in params.values()):
+        return fn(*args, **kwargs)
+    allowed = {key: value for key, value in kwargs.items() if key in params}
+    return fn(*args, **allowed)
+
+
 def _hands_side(open_trade: dict | None) -> str | None:
     if not isinstance(open_trade, dict):
         return None
     side = str(open_trade.get("side") or "").upper()
     return side if side in {"CE", "PE"} else None
+
+
+def _blotter_contract(
+    board: CoaBoard,
+    settings: Settings,
+    chain: list,
+    atm: float,
+    side: str,
+    expiry_day: date | None,
+) -> dict[str, Any]:
+    symbol, lot = _atm_contract(chain, atm, side)
+    lots = max(int(getattr(settings, "coa_lots", 1) or 1), 1)
+    qty = 0
+    if lot:
+        order_quantity = getattr(board, "order_quantity", None)
+        qty = int(order_quantity(lot, lots)) if callable(order_quantity) else int(lot) * lots
+    expiry = expiry_day.strftime("%d %b %Y") if expiry_day else None
+    session = getattr(board, "session", "cash")
+    return {
+        "symbol": symbol or None,
+        "lot_size": int(lot) if lot else None,
+        "lots": lots,
+        "qty": qty or None,
+        "expiry": expiry,
+        "currency": "USD" if session == "crypto" else "INR",
+    }
+
+
+def _blotter_kwargs(state: dict) -> dict[str, Any]:
+    raw = state.get("blotter") if isinstance(state.get("blotter"), dict) else {}
+    out = {
+        "symbol": str(raw.get("symbol") or state.get("analyzer_symbol") or "") or None,
+        "lot_size": raw.get("lot_size"),
+        "lots": raw.get("lots"),
+        "qty": raw.get("qty"),
+        "expiry": raw.get("expiry"),
+        "currency": raw.get("currency"),
+    }
+    if not out["qty"]:
+        try:
+            out["qty"] = int(state.get("analyzer_qty") or 0) or None
+        except (TypeError, ValueError):
+            out["qty"] = None
+    return {key: value for key, value in out.items() if value is not None}
 
 
 def _new_trade(side: str, ltp: float, now: datetime, atm: float, snap) -> OpenTrade:

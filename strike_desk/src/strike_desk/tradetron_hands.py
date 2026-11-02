@@ -47,6 +47,10 @@ def build_payload(token: str, pairs: tuple[tuple[str, int], ...]) -> dict[str, s
 COA_BUY_CE = "buy_ce"
 COA_BUY_PE = "buy_pe"
 COA_EXIT = "exit"
+M1_BUY_CE = "m1_buy_ce"
+M1_BUY_PE = "m1_buy_pe"
+M1_EXIT = "m1_exit"
+_M1_ACTIONS = frozenset({M1_BUY_CE, M1_BUY_PE, M1_EXIT})
 
 # Per-board webhook suffix. Nifty stays unsuffixed so the live template
 # keeps firing the same flags. Never copy Nifty onto Banknifty or Sensex.
@@ -75,6 +79,17 @@ def coa_flag_pairs(action: str, suffix: str = "") -> tuple[tuple[str, int], ...]
     if action == COA_EXIT:
         return ((exit_k, 1), (buy_ce, 0), (buy_pe, 0))
     raise ValueError(f"unknown CoA hands action {action!r}")
+
+
+def m1_flag_pairs(action: str) -> tuple[tuple[str, int], ...]:
+    """BTC M1 Sniper flags. Never share ltp_* with CoA on the same book."""
+    if action == M1_BUY_CE:
+        return (("m1_buy_ce", 1), ("m1_buy_pe", 0), ("m1_exit", 0))
+    if action == M1_BUY_PE:
+        return (("m1_buy_pe", 1), ("m1_buy_ce", 0), ("m1_exit", 0))
+    if action == M1_EXIT:
+        return (("m1_exit", 1), ("m1_buy_ce", 0), ("m1_buy_pe", 0))
+    raise ValueError(f"unknown M1 hands action {action!r}")
 
 
 _COA_MAP: dict[str, tuple[tuple[str, int], ...]] = {
@@ -154,7 +169,12 @@ class CoaHands:
         slug = (board or "nifty").strip().lower()
         if slug not in self._boards:
             raise ValueError(f"unknown CoA board {board!r}")
-        pairs = coa_flag_pairs(action, _COA_SUFFIX[slug])
+        if action in _M1_ACTIONS:
+            if slug != "btc-options":
+                raise ValueError("M1 sniper flags are BTC-only")
+            pairs = m1_flag_pairs(action)
+        else:
+            pairs = coa_flag_pairs(action, _COA_SUFFIX[slug])
         payload = build_payload(self._token, pairs)
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(

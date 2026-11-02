@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request
 from limiter import limiter
 from services.desk_decisions_service import list_decisions
 from services.strategy_books_service import list_strategy_books
-from services.strategy_timeline_service import list_timeline
+from services.strategy_timeline_service import list_bank_board, list_timeline
 from utils.session import check_session_validity
 
 strategy_books_bp = Blueprint("strategy_books_bp", __name__)
@@ -16,6 +16,17 @@ strategy_books_bp = Blueprint("strategy_books_bp", __name__)
 @limiter.limit("60/minute")
 def get_strategy_books():
     return jsonify({"status": "success", "books": list_strategy_books()})
+
+
+@strategy_books_bp.route("/strategy/api/books/board", methods=["GET"])
+@check_session_validity
+@limiter.limit("60/minute")
+def get_strategy_bank_board():
+    try:
+        snippet = int(request.args.get("snippet", 5))
+    except (TypeError, ValueError):
+        snippet = 5
+    return jsonify({"status": "success", "books": list_bank_board(snippet=snippet)})
 
 
 @strategy_books_bp.route("/strategy/api/books/<book_id>/decisions", methods=["GET"])

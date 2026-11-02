@@ -14,8 +14,9 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getStrategyBooks, type StrategyBook } from '@/api/strategy-books'
+import { getStrategyBankBoard, getStrategyBooks, type StrategyBook } from '@/api/strategy-books'
 import { strategyApi } from '@/api/strategy'
+import { StrategyBankBoard } from './StrategyBankBoard'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -68,29 +69,28 @@ export default function StrategyIndex() {
     fetchHostConfig()
   }, [])
 
-  const fetchBooks = async () => {
+  const fetchBooks = async (quiet = false) => {
     try {
-      setBooksLoading(true)
-      setBooks(await getStrategyBooks())
+      if (!quiet) setBooksLoading(true)
+      try {
+        setBooks(await getStrategyBankBoard())
+      } catch {
+        setBooks(await getStrategyBooks())
+      }
     } catch {
-      showToast.error('Failed to load running books', 'strategy')
+      if (!quiet) showToast.error('Failed to load the strategy bank', 'strategy')
     } finally {
       setBooksLoading(false)
     }
   }
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: one-time fetch on mount
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch on mount, then poll the board
   useEffect(() => {
     fetchStrategies()
     fetchBooks()
+    const timer = window.setInterval(() => fetchBooks(true), 30000)
+    return () => window.clearInterval(timer)
   }, [])
-
-  const bookBadge = (status: StrategyBook['run_status']) => {
-    if (status === 'live-entered') return { label: 'Live-Entered', variant: 'default' as const }
-    if (status === 'active') return { label: 'Active', variant: 'default' as const }
-    if (status === 'parked') return { label: 'Parked', variant: 'secondary' as const }
-    return { label: 'Mind down', variant: 'destructive' as const }
-  }
 
   // Get webhook URL using host config
   const getWebhookUrl = (webhookId: string): string => {
@@ -158,7 +158,7 @@ export default function StrategyIndex() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">My Strategies</h1>
           <p className="text-muted-foreground">
-            Running Strike Desk books, then webhook templates
+            Current status, latest events, decisions, and audit for every book in the bank
           </p>
         </div>
         <div className="flex gap-2">
@@ -187,78 +187,18 @@ export default function StrategyIndex() {
         </TabsList>
         <TabsContent value="running" className="space-y-4 pt-2">
           <p className="text-sm text-muted-foreground">
-            Status only. Click a book for its event timeline. Analyzer fills stay in ZeroTouchAlgo
-            Analyze. Hands books fill on Tradetron. This page does not execute.
+            Plain-language board for every Strike Desk book. Open Full log for the complete
+            timeline. Analyzer, OFA, and CoA dual-exec fills stay in ZeroTouchAlgo Analyze.
+            Hands flags go to Tradetron. This page does not execute.
           </p>
           {booksLoading ? (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-4">
               {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-40" />
+                <Skeleton key={i} className="h-56 w-full" />
               ))}
             </div>
-          ) : books.length === 0 ? (
-            <Card className="py-10">
-              <CardContent className="text-center text-muted-foreground">
-                No Strike Desk books registered.
-              </CardContent>
-            </Card>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {books.map((book) => {
-                const badge = bookBadge(book.run_status)
-                const href = book.audit_href || `/strategy/books/${book.id}`
-                const card = (
-                  <Card className="relative overflow-hidden hover:border-primary/50 transition-colors">
-                    <div
-                      className={`absolute top-0 left-0 right-0 h-1 ${
-                        book.run_status === 'live-entered'
-                          ? 'bg-green-500'
-                          : book.run_status === 'active'
-                            ? 'bg-blue-500'
-                            : book.run_status === 'parked'
-                              ? 'bg-gray-400'
-                              : 'bg-red-500'
-                      }`}
-                    />
-                    <CardHeader className="pb-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="space-y-1">
-                          <CardTitle className="text-lg">{book.name}</CardTitle>
-                          <CardDescription>
-                            {book.kind_label} · {book.underlying}
-                          </CardDescription>
-                        </div>
-                        <Badge variant={badge.variant}>{badge.label}</Badge>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-2 text-sm">
-                      <p className="text-muted-foreground">{book.detail}</p>
-                      <div className="flex flex-wrap gap-2">
-                        <Badge variant="outline" className="font-normal">
-                          {book.execution_label}
-                        </Badge>
-                        {book.tt_sid != null && (
-                          <Badge variant="outline" className="font-normal font-mono">
-                            SID {book.tt_sid}
-                          </Badge>
-                        )}
-                        <Badge variant="outline" className="font-normal">
-                          mind {book.mind}
-                        </Badge>
-                        <Badge variant="outline" className="font-normal">
-                          timeline
-                        </Badge>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )
-                return (
-                  <Link key={book.id} to={href} className="block h-full">
-                    {card}
-                  </Link>
-                )
-              })}
-            </div>
+            <StrategyBankBoard books={books} />
           )}
         </TabsContent>
         <TabsContent value="webhooks" className="space-y-6 pt-2">

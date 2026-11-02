@@ -93,3 +93,7 @@ yarn-error.log*
 
 # Windows NUL file
 nul
+
+# Telegram desk secrets and runtime ledger
+services/telegram-desk/config.env
+services/telegram-desk/data/

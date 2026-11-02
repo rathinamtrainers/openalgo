@@ -31,7 +31,9 @@ export function AuthSync({ children }: AuthSyncProps) {
           const data = await response.json()
 
           if (data.status === 'success' && data.logged_in && data.broker) {
-            // Flask session is authenticated with broker - sync to Zustand
+            // Flask session is authenticated with broker - sync to Zustand.
+            // broker_session_expired still keeps the app session so Lab and
+            // reconnect stay reachable; the callback must not skip Kite.
             setUser({
               username: data.user,
               broker: data.broker,

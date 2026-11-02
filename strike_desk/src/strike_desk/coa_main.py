@@ -16,6 +16,7 @@ from .config import get_settings
 from .delta_india import DeltaIndiaChain
 from .errors import OpenAlgoError
 from .ltp_coa_live import make_btc_runner, make_cash_runners, make_mcx_runners
+from .ltp_m1_live import make_m1_runner
 from .observability import Redactor, configure_logging
 from .openalgo_client import OpenAlgoClient
 from .session import SessionGate
@@ -114,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         runners.append(make_btc_runner(settings, delta, btc_hands))
+        runners.append(make_m1_runner(settings, delta, btc_hands))
 
         signal.signal(signal.SIGTERM, _handle_stop)
         signal.signal(signal.SIGINT, _handle_stop)

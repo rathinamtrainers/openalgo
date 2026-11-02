@@ -6,7 +6,7 @@ from flask import Blueprint, jsonify, request, session
 from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview
-from services.greeks_lab_coa import get_coa_boards
+from services.greeks_lab_coa import get_coa_boards, get_coa_trades
 from services.greeks_lab_service import get_greeks_lab_data
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -30,6 +30,21 @@ def greeks_lab_coa():
     except Exception:
         logger.exception("Error in Greeks lab CoA board")
         return jsonify({"status": "error", "message": "Failed to load CoA board"}), 500
+
+
+@greeks_lab_bp.route("/greekslab/api/coa-trades", methods=["GET"])
+@cross_origin()
+@check_session_validity
+def greeks_lab_coa_trades():
+    """Append-only CoA Hands blotter. ATM-leg mark, never tokens."""
+    try:
+        login_username = session.get("user")
+        if not login_username:
+            return jsonify({"status": "error", "message": "Authentication required"}), 401
+        return jsonify(get_coa_trades()), 200
+    except Exception:
+        logger.exception("Error in Greeks lab CoA trades")
+        return jsonify({"status": "error", "message": "Failed to load CoA trades"}), 500
 
 
 @greeks_lab_bp.route("/greekslab/api/snapshot", methods=["POST"])

@@ -1,0 +1,14 @@
+[Unit]
+Description=ZeroTouchAlgo desk Telegram health check
+After=zta-desk-telegram.service
+
+[Service]
+Type=oneshot
+User=zta-desk
+Group=zta-desk
+EnvironmentFile=/opt/zta-desk/config.env
+ExecStart=/usr/bin/python3 /opt/zta-desk/healthcheck.py
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/zta-desk
+PrivateTmp=yes

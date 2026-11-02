@@ -1,15 +1,14 @@
 import { ArrowLeft, RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import {
-  getBookTimeline,
-  type StrategyTimeline,
-  type StrategyTimelineEvent,
-} from '@/api/strategy-books'
+import { getBookTimeline, type StrategyTimeline, type StrategyTimelineEvent } from '@/api/strategy-books'
+import { StrategyPerformancePanel } from '@/components/strategy/StrategyPerformancePanel'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { formatStrategyPnl, strategyPnlClass } from '@/lib/strategy-performance'
 import { showToast } from '@/utils/toast'
 
 const KINDS = ['all', 'decision', 'fill', 'status', 'action'] as const
@@ -31,9 +30,7 @@ function outcomeClass(outcome: string | null, kind: string) {
 function TimelineRow({ event }: { event: StrategyTimelineEvent }) {
   return (
     <li className="relative pl-8 pb-6 last:pb-0">
-      <span
-        className={`absolute left-0 top-1.5 h-3 w-3 rounded-full ${kindClass(event.kind)}`}
-      />
+      <span className={`absolute left-0 top-1.5 h-3 w-3 rounded-full ${kindClass(event.kind)}`} />
       <span className="absolute left-[5px] top-5 bottom-0 w-px bg-border last:hidden" />
       <div className="space-y-1">
         <div className="flex flex-wrap items-center gap-2">
@@ -53,12 +50,49 @@ function TimelineRow({ event }: { event: StrategyTimelineEvent }) {
   )
 }
 
+function isKeyDecision(event: StrategyTimelineEvent) {
+  return (
+    event.kind === 'decision' ||
+    event.kind === 'status' ||
+    event.kind === 'action' ||
+    (event.kind === 'fill' && event.outcome === 'enter')
+  )
+}
+
+function EventList({
+  events,
+  empty,
+}: {
+  events: StrategyTimelineEvent[]
+  empty: string
+}) {
+  if (!events.length) {
+    return (
+      <Card className="py-10">
+        <CardContent className="text-center text-muted-foreground">{empty}</CardContent>
+      </Card>
+    )
+  }
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <ol className="relative">
+          {events.map((event) => (
+            <TimelineRow key={event.event_id} event={event} />
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
+  )
+}
+
 export default function StrategyBookTimeline() {
   const { bookId = 'analyzer-nifty' } = useParams()
   const [log, setLog] = useState<StrategyTimeline | null>(null)
   const [loading, setLoading] = useState(true)
   const [day, setDay] = useState('')
   const [kind, setKind] = useState<(typeof KINDS)[number]>('all')
+  const [section, setSection] = useState('decisions')
 
   const load = useCallback(async () => {
     try {
@@ -82,6 +116,26 @@ export default function StrategyBookTimeline() {
   }, [load])
 
   const latest = log?.latest || log?.events[0]
+  const performance = log?.performance
+  const summary = performance?.summary
+  const decisions = useMemo(() => {
+    const fromApi = log?.sections?.key_decisions
+    if (fromApi && fromApi.length > 0) {
+      return fromApi
+    }
+    return (log?.events || []).filter(isKeyDecision)
+  }, [log])
+  const eventLog = useMemo(
+    () => log?.sections?.event_log || log?.events || [],
+    [log]
+  )
+  const auditTrail = useMemo(
+    () =>
+      log?.sections?.audit_trail ||
+      log?.events.filter((row) => row.kind === 'status' || row.kind === 'action' || row.kind === 'fill') ||
+      [],
+    [log]
+  )
 
   return (
     <div className="container mx-auto py-6 space-y-6">
@@ -96,7 +150,7 @@ export default function StrategyBookTimeline() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">{log?.name || 'Strategy timeline'}</h1>
             <p className="text-muted-foreground">
-              Event timeline for this book. Each row says what happened and why.
+              Performance, key decisions, event log, and audit trail for this book.
             </p>
           </div>
         </div>
@@ -106,7 +160,7 @@ export default function StrategyBookTimeline() {
         </Button>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Latest</CardDescription>
@@ -118,13 +172,36 @@ export default function StrategyBookTimeline() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Shown events</CardDescription>
-            <CardTitle className="text-lg">{log?.events.length ?? 0}</CardTitle>
+            <CardDescription>Performance</CardDescription>
+            <CardTitle className={`text-lg ${strategyPnlClass(summary?.total_pnl)}`}>
+              {formatStrategyPnl(summary?.total_pnl)}
+            </CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            {Object.entries(log?.counts || {})
-              .map(([key, value]) => `${key} ${value}`)
-              .join(' · ') || '—'}
+            {summary?.roi_pct != null
+              ? `${summary.roi_pct > 0 ? '+' : ''}${summary.roi_pct}% RoI · ${summary.fills} fills`
+              : `${summary?.fills ?? 0} fills · ${summary?.closed_round_trips ?? 0} closed`}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Execution</CardDescription>
+            <CardTitle className="text-lg">
+              {log?.execution_target === 'tradetron-hands'
+                ? 'Tradetron Hands'
+                : log?.execution_target === 'openalgo-tradetron'
+                  ? 'OpenAlgo Analyze + Tradetron Hands'
+                  : log?.execution_target === 'openalgo'
+                    ? 'OpenAlgo Analyze'
+                    : log?.execution_target || '—'}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground font-mono">
+            {log?.tt_sid != null
+              ? `SID ${log.tt_sid}`
+              : log?.tt_template_id != null
+                ? `template ${log.tt_template_id}`
+                : 'No Tradetron SID'}
           </CardContent>
         </Card>
         <Card>
@@ -172,22 +249,36 @@ export default function StrategyBookTimeline() {
 
       {loading && !log ? (
         <Skeleton className="h-96 w-full" />
-      ) : !log?.events.length ? (
-        <Card className="py-10">
-          <CardContent className="text-center text-muted-foreground">
-            No events match this filter. New decisions, fills, and status changes will land here.
-          </CardContent>
-        </Card>
       ) : (
-        <Card>
-          <CardContent className="pt-6">
-            <ol className="relative">
-              {log.events.map((event) => (
-                <TimelineRow key={event.event_id} event={event} />
-              ))}
-            </ol>
-          </CardContent>
-        </Card>
+        <Tabs value={section} onValueChange={setSection}>
+          <TabsList>
+            <TabsTrigger value="decisions">Key decisions</TabsTrigger>
+            <TabsTrigger value="performance">Performance</TabsTrigger>
+            <TabsTrigger value="events">Event log</TabsTrigger>
+            <TabsTrigger value="audit">Audit trail</TabsTrigger>
+          </TabsList>
+          <TabsContent value="decisions" className="pt-4">
+            <EventList
+              events={decisions}
+              empty="No key decisions yet. When the mind enters, holds, or flips, rows land here."
+            />
+          </TabsContent>
+          <TabsContent value="performance" className="pt-4">
+            <StrategyPerformancePanel performance={performance} />
+          </TabsContent>
+          <TabsContent value="events" className="pt-4">
+            <EventList
+              events={eventLog}
+              empty="No events match this filter. New decisions, fills, and status changes will land here."
+            />
+          </TabsContent>
+          <TabsContent value="audit" className="pt-4">
+            <EventList
+              events={auditTrail}
+              empty="No audit rows yet. Status changes, Hands actions, and Analyze fills appear here."
+            />
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   )

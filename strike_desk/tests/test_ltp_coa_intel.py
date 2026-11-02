@@ -103,3 +103,27 @@ def test_first_eos_hit_blocks_a_second_tag_at_same_support():
 def test_atm_oi_reads_the_atm_row():
     chain = _ladder(ce_oi_24050=111, pe_oi_24050=222, ce_oi_24100=9, pe_oi_23900=8)
     assert atm_oi(chain, ATM) == (111.0, 222.0)
+
+
+def test_crypto_skips_coa2_and_keeps_intel_across_ist_midnight():
+    chain = _strong()
+    now = datetime(2026, 10, 16, 11, 0, tzinfo=IST)
+    snap = evaluate(chain, spot=23980, atm=ATM, extension_pts=20)
+    intel = IntelState(session_date="2026-10-31", call_oi=10_000, put_oi=10_000)
+    refined, kept = apply_handbook(
+        snap,
+        intel,
+        now,
+        call_oi=8000,
+        put_oi=8000,
+        session="crypto",
+        session_key="2026-10-31",
+    )
+    assert refined.coa2 is None
+    assert refined.signal == "BUY_CE"
+    assert kept.session_date == "2026-10-31"
+    later = datetime(2026, 10, 17, 0, 15, tzinfo=IST)
+    _, still = apply_handbook(
+        snap, kept, later, call_oi=8000, put_oi=8000, session="crypto", session_key="2026-10-31"
+    )
+    assert still.session_date == "2026-10-31"

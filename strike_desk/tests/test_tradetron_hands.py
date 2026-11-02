@@ -91,6 +91,40 @@ def test_cash_hands_reject_mcx_board():
         raise AssertionError("cash Hands must not post MCX flags")
 
 
+def test_m1_flags_do_not_share_coa_ltp_keys():
+    from strike_desk.tradetron_hands import (
+        COA_BUY_CE,
+        M1_BUY_CE,
+        M1_BUY_PE,
+        M1_EXIT,
+        coa_flag_pairs,
+        m1_flag_pairs,
+    )
+
+    coa = {pair[0] for pair in coa_flag_pairs(COA_BUY_CE, "")}
+    m1 = {pair[0] for pair in m1_flag_pairs(M1_BUY_CE)}
+    m1.update(pair[0] for pair in m1_flag_pairs(M1_BUY_PE))
+    m1.update(pair[0] for pair in m1_flag_pairs(M1_EXIT))
+    assert coa == {"ltp_buy_ce", "ltp_buy_pe", "ltp_exit"}
+    assert m1 == {"m1_buy_ce", "m1_buy_pe", "m1_exit"}
+    assert coa.isdisjoint(m1)
+
+
+def test_cash_hands_reject_m1_flags():
+    from strike_desk.tradetron_hands import CASH_HANDS_BOARDS, M1_BUY_CE, CoaHands
+
+    hands = CoaHands.__new__(CoaHands)
+    hands._token = "cash-token"
+    hands._url = "https://api.tradetron.tech/api?"
+    hands._boards = CASH_HANDS_BOARDS
+    try:
+        hands.send(M1_BUY_CE, board="nifty")
+    except ValueError as exc:
+        assert "BTC-only" in str(exc) or "nifty" in str(exc).lower()
+    else:
+        raise AssertionError("cash Hands must not post M1 flags")
+
+
 def test_mcx_hands_reject_nifty_board():
     from strike_desk.tradetron_hands import COA_BUY_CE, MCX_HANDS_BOARDS, CoaHands
 

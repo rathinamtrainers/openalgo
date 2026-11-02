@@ -10,7 +10,7 @@ Writer-only weekly range (L1–L3) is not a buy filter and is not applied here.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Literal
 
 from .config import IST
@@ -66,11 +66,20 @@ def apply_handbook(
     call_oi: float = 0.0,
     put_oi: float = 0.0,
     expiry_kind: str = "weekly",
+    session: str = "cash",
+    session_key: str | None = None,
 ) -> tuple[CoaSnapshot, IntelState]:
-    """Overlay Game of %, SOC, CoA 2.0, and first-hit on a CoA 1.0 snapshot."""
+    """Overlay Game of %, SOC, CoA 2.0, and first-hit on a CoA 1.0 snapshot.
+
+    Cash and MCX reset at IST midnight and apply CoA 2.0 in 09:45–14:30 IST.
+    Crypto skips both: the tape follows ``session_key`` (listed expiry).
+    """
     intel = _from_raw(state)
     now = now.astimezone(IST) if now.tzinfo else now.replace(tzinfo=IST)
-    day = now.date().isoformat()
+    if session == "crypto":
+        day = session_key or now.astimezone(timezone.utc).date().isoformat()
+    else:
+        day = now.date().isoformat()
     if intel.session_date != day:
         intel = IntelState(session_date=day)
 
@@ -114,7 +123,7 @@ def apply_handbook(
     clock = now.timetz().replace(tzinfo=None)
     call_dir = _oi_dir(intel.call_oi or intel.prev_call_oi, call_oi)
     put_dir = _oi_dir(intel.put_oi or intel.prev_put_oi, put_oi)
-    coa2 = _coa2(clock, call_dir, put_dir)
+    coa2 = None if session == "crypto" else _coa2(clock, call_dir, put_dir)
 
     allow_ce = snap.allow_ce
     allow_pe = snap.allow_pe
