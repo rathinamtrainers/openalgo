@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 strike-desk = "strike_desk.__main__:main"
+desk-health = "strike_desk.desk_health:main"
 
 [dependency-groups]
 dev = [

@@ -593,6 +593,12 @@ def _cmd_coa_live(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "health":
+        from .desk_health import main as health_main
+
+        return health_main(argv[1:])
+
     parser = argparse.ArgumentParser(prog="strike-desk", description="Strike Desk decision tick")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -604,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("resume", help="release the kill switch")
     subparsers.add_parser("status", help="show liveness, kill state, decisions and reads")
+    subparsers.add_parser(
+        "health",
+        help="read-only Strike Desk health card (no API key, no orders)",
+    )
     subparsers.add_parser("regime", help="run one regime read now and print it")
 
     journal_parser = subparsers.add_parser("journal", help="print today's decisions")
