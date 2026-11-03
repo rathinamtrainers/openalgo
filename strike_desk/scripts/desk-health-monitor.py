@@ -10,6 +10,7 @@ From the worktree or a clone:
     uv run --project strike_desk python strike_desk/scripts/desk-health-monitor.py
     uv run --project strike_desk python -m strike_desk.desk_health --remote
     uv run --project strike_desk python -m strike_desk.desk_health --loop 60
+    uv run --project strike_desk python -m strike_desk.desk_health --remote --hourly --alert
 
 On GCE (after scp of desk_health.py):
 

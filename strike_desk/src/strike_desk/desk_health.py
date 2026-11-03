@@ -14,7 +14,10 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -64,6 +67,7 @@ HANDS_NEEDLES = (
     "coa analyzer",
     "hands posted",
 )
+ANALYZER_HANDS_NEEDLES = ("analyzer hands", "an_ce", "an_pe", "an_exit")
 CRASH_NEEDLES = ("live_symbols", "TypeError")
 
 DEFAULT_STATE_DIR = Path("/var/lib/strike-desk")
@@ -83,6 +87,26 @@ ANALYZER_ENTRY_CLOSE = dtime(15, 10)
 HEARTBEAT_STALE_S = 20 * 60  # two missed 15-min ticks
 COA_HEARTBEAT_STALE_S = 10 * 60
 HANDS_STALE_S = 30 * 60
+BRIEF_STALE_S = 180
+HOURLY_SECONDS = 3600
+MCX_OPEN = dtime(9, 20)
+MCX_CLOSE = dtime(23, 15)
+
+SECRET_ENV_KEYS = (
+    "TELEGRAM_CHAT_BOT_TOKEN",
+    "DESK_HEALTH_TELEGRAM_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+)
+CHAT_ENV_KEYS = ("DESK_HEALTH_CHAT_ID", "ARJUN_ADMIN_IDS", "OWNER_CHAT_ID")
+TOKEN_FILE_CANDIDATES = (
+    Path("/opt/zta-desk/config.env"),
+    Path(os.environ.get("DESK_HEALTH_TELEGRAM_ENV") or ""),
+    Path.home() / ".zta-desk.env",
+)
+SUBSCRIBER_DB_CANDIDATES = (
+    Path("/var/lib/zta-desk/arjun_subscribers.db"),
+    Path("/opt/zta-desk/arjun_subscribers.db"),
+)
 
 
 @dataclass(frozen=True)
@@ -254,6 +278,7 @@ class HealthReport:
     analyzer: dict[str, Any]
     ages: dict[str, Any]
     sids: list[dict[str, Any]]
+    books: list[dict[str, Any]]
     quadshield: dict[str, Any]
     alerts: list[str]
     raw: dict[str, Any] = field(default_factory=dict)
@@ -556,20 +581,40 @@ def collect_host_facts(
     coa_live = _redact(_load_json_file(state / "coa_live.json"))
     events = _redact(_load_json_file(state / "events.json"))
     stack = _redact(_load_json_file(stack_path))
+    briefs: dict[str, Any] = {}
+    for name in (
+        "public-brief.json",
+        "public-brief-banknifty.json",
+        "public-brief-sensex.json",
+        "public-brief-crudeoil.json",
+        "public-brief-natgas.json",
+        "public-brief-btc-options.json",
+        "public-brief-eth-options.json",
+    ):
+        meta = _file_meta(state / name)
+        payload = _redact(_load_json_file(state / name))
+        if meta is not None:
+            if isinstance(payload, dict):
+                meta["as_of_ist"] = payload.get("as_of_ist") or payload.get("computed_at")
+            briefs[name] = meta
 
     return {
         "collected_at_utc": datetime.now(tz=UTC).isoformat(),
         "source": source,
         "source_path": source_path,
         "state_dir": str(state),
-        "units": _systemctl("strike-desk", "strike-desk-coa", "openalgo"),
+        "units": _systemctl("strike-desk", "strike-desk-coa", "openalgo", "strike-desk-ofa"),
         "heartbeat": _file_meta(state / "heartbeat"),
         "coa_heartbeat": _file_meta(state / "coa.heartbeat"),
+        "strikeshield_heartbeat": _file_meta(state / "strikeshield.heartbeat"),
+        "ofa_heartbeat": _file_meta(state / "ofa.heartbeat"),
         "kill_switch": _file_meta(state / "KILL"),
         "strikeshield": shield,
         "coa_live": coa_live,
+        "ofa": _redact(_load_json_file(state / "ofa.json")),
         "events": events,
         "stack": stack,
+        "briefs": briefs,
         "decisions": decisions,
         "log_hits": _journalctl_hits(),
     }
@@ -604,9 +649,6 @@ def _classify_day(facts: dict[str, Any], day: str) -> list[dict[str, Any]]:
         item["class_detail"] = klass.detail
         rows.append(item)
     return rows
-
-
-ANALYZER_HANDS_NEEDLES = ("analyzer hands", "an_ce", "an_pe", "an_exit")
 
 
 def _hands_age_s(
@@ -725,6 +767,524 @@ def _quadshield(facts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _book_profile(sid: SidWatch) -> dict[str, Any]:
+    if sid.book_id in {"coa-mcx"}:
+        session, unit, beat, needles = (
+            "mcx",
+            "strike-desk-coa",
+            "coa",
+            ("ltp_buy", "ltp_exit", "coa analyzer"),
+        )
+        brief = "public-brief-crudeoil.json"
+    elif sid.book_id in {"coa-btc"}:
+        session, unit, beat, needles = (
+            "crypto",
+            "strike-desk-coa",
+            "coa",
+            ("ltp_buy", "ltp_exit"),
+        )
+        brief = "public-brief-btc-options.json"
+    elif sid.book_id.startswith("coa-eth"):
+        session, unit, beat, needles = (
+            "crypto",
+            "strike-desk-coa",
+            "coa",
+            ("ltp_buy", "ltp_exit"),
+        )
+        brief = "public-brief-eth-options.json"
+    elif sid.kind == "coa":
+        session, unit, beat, needles = (
+            "cash",
+            "strike-desk-coa",
+            "coa",
+            ("ltp_buy", "ltp_exit", "coa analyzer"),
+        )
+        brief = "public-brief.json"
+    elif sid.kind == "strikeshield":
+        session, unit, beat, needles = (
+            "cash",
+            "strike-desk",
+            "shield",
+            ("buy_wings", "sell_shorts", "exit_shorts", "exit_all"),
+        )
+        brief = None
+    elif sid.kind == "ofa":
+        session, unit, beat, needles = (
+            "cash",
+            "strike-desk-ofa",
+            "ofa",
+            ("of_long", "of_short", "of_exit"),
+        )
+        brief = None
+    elif sid.kind == "overlay":
+        session, unit, beat, needles = ("cash", "strike-desk", "desk", ("_el",))
+        brief = None
+    else:
+        session, unit, beat, needles = (
+            "cash",
+            "strike-desk",
+            "desk",
+            ANALYZER_HANDS_NEEDLES,
+        )
+        brief = None
+    return {
+        "session": session,
+        "unit": unit,
+        "heartbeat": beat,
+        "hands_needles": needles,
+        "brief_file": brief,
+    }
+
+
+def _session_on_for(kind: str, now: datetime) -> bool:
+    ist = now_ist(now)
+    if kind == "crypto":
+        return True
+    if kind == "mcx":
+        return ist.weekday() < 6 and MCX_OPEN <= ist.time() <= MCX_CLOSE
+    return bool(cash_session(now)["cash_session_on"])
+
+
+def _heartbeat_age(facts: dict[str, Any], which: str) -> float | None:
+    key = {
+        "desk": "heartbeat",
+        "coa": "coa_heartbeat",
+        "shield": "strikeshield_heartbeat",
+        "ofa": "ofa_heartbeat",
+    }.get(which)
+    if not key:
+        return None
+    meta = facts.get(key)
+    if isinstance(meta, dict):
+        try:
+            return float(meta.get("age_s"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def align_books(
+    facts: dict[str, Any],
+    *,
+    now: datetime,
+    qs: dict[str, Any],
+    analyzer: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """One alignment row per catalogued SID. Never places orders."""
+    units = facts.get("units") or {}
+    stack = facts.get("stack") if isinstance(facts.get("stack"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for sid in WATCHED_SIDS:
+        profile = _book_profile(sid)
+        session_on = _session_on_for(profile["session"], now)
+        unit_state = str(units.get(profile["unit"]) or "")
+        beat_age = _heartbeat_age(facts, profile["heartbeat"])
+        hands_age, hands_detail = _hands_age_s(
+            facts,
+            now,
+            needles=profile["hands_needles"],
+            empty=f"no {sid.book_id} Hands pulse",
+        )
+        brief_meta = (facts.get("briefs") or {}).get(profile["brief_file"] or "")
+        brief_age = brief_meta.get("age_s") if isinstance(brief_meta, dict) else None
+        issues: list[str] = []
+        alignment = "ok"
+
+        if unit_state and unit_state != "active" and session_on:
+            if profile["unit"] == "strike-desk-ofa" and not stack.get("ofa_enabled"):
+                pass
+            else:
+                issues.append(f"unit {profile['unit']}={unit_state or 'missing'}")
+                alignment = "broken"
+
+        if sid.kind == "analyzer":
+            if analyzer.get("live_symbols_crashes"):
+                issues.append(f"live_symbols crash x{analyzer['live_symbols_crashes']}")
+                alignment = "broken"
+            elif (analyzer.get("dispositions") or {}).get("defect"):
+                issues.append("journal internal-error / defect")
+                alignment = "broken"
+            if session_on and isinstance(beat_age, (int, float)) and beat_age > HEARTBEAT_STALE_S:
+                issues.append(f"desk heartbeat stale {int(beat_age)}s")
+                alignment = "broken" if alignment == "broken" else "fishy"
+            if analyzer.get("reasons", {}).get(ENTER_REASON) and hands_age is None:
+                issues.append("risk-cleared but no Analyzer Hands")
+                alignment = "broken" if alignment == "broken" else "fishy"
+
+        elif sid.kind == "strikeshield":
+            if qs.get("flag"):
+                issues.append(str(qs["flag"]))
+                alignment = "broken"
+            shield_on = bool(stack.get("strikeshield_enabled")) or qs.get("mind") != "flat"
+            stale_lim = 90 if shield_on else HEARTBEAT_STALE_S
+            if (
+                session_on
+                and shield_on
+                and isinstance(beat_age, (int, float))
+                and beat_age > stale_lim
+            ):
+                issues.append(f"shield heartbeat stale {int(beat_age)}s")
+                alignment = "broken" if alignment == "broken" else "fishy"
+            if not sid.mapped and alignment == "ok":
+                issues.append("unmapped catalog - no TT read")
+
+        elif sid.kind == "coa":
+            stale = COA_HEARTBEAT_STALE_S if profile["session"] != "crypto" else BRIEF_STALE_S
+            if session_on and isinstance(beat_age, (int, float)) and beat_age > stale:
+                issues.append(f"CoA heartbeat stale {int(beat_age)}s")
+                alignment = "broken" if alignment == "broken" else "fishy"
+            if session_on and isinstance(brief_age, (int, float)) and brief_age > BRIEF_STALE_S:
+                issues.append(f"brief stale {int(brief_age)}s")
+                alignment = "broken" if alignment == "broken" else "fishy"
+
+        elif sid.kind == "ofa":
+            enabled = bool(stack.get("ofa_enabled"))
+            if enabled and session_on and isinstance(beat_age, (int, float)) and beat_age > 90:
+                issues.append(f"OFA heartbeat stale {int(beat_age)}s")
+                alignment = "broken" if alignment == "broken" else "fishy"
+            elif not enabled:
+                issues.append("OFA off")
+
+        elif sid.kind == "overlay":
+            if session_on and isinstance(beat_age, (int, float)) and beat_age > HEARTBEAT_STALE_S:
+                issues.append(f"desk heartbeat stale {int(beat_age)}s")
+                alignment = "fishy"
+
+        if session_on and alignment == "ok" and not issues:
+            issues.append("aligned")
+
+        rows.append(
+            {
+                "book_id": sid.book_id,
+                "name": sid.name,
+                "sid": sid.sid,
+                "kind": sid.kind,
+                "mapped": sid.mapped,
+                "expected_legs": sid.expected_legs,
+                "session": profile["session"],
+                "session_on": session_on,
+                "unit": profile["unit"],
+                "unit_state": unit_state or "n/a",
+                "alignment": alignment,
+                "issues": issues,
+                "heartbeat_s": beat_age,
+                "hands_s": hands_age,
+                "hands_detail": hands_detail,
+                "brief_s": brief_age,
+            }
+        )
+    return rows
+
+
+def should_alert(report: HealthReport) -> bool:
+    if report.severity == "critical":
+        return True
+    return any(book.get("alignment") in {"fishy", "broken"} for book in report.books)
+
+
+def render_alert(report: HealthReport) -> str:
+    """Compact private Telegram text. Never an order."""
+    broken = [book for book in report.books if book.get("alignment") == "broken"]
+    fishy = [book for book in report.books if book.get("alignment") == "fishy"]
+    ok_n = sum(1 for book in report.books if book.get("alignment") == "ok")
+    lines = [
+        f"Desk health {report.collected_at_ist} [{report.severity}]",
+        report.headline,
+        f"books: {len(broken)} broken / {len(fishy)} fishy / {ok_n} ok",
+    ]
+    for book in (*broken, *fishy):
+        detail = "; ".join(book.get("issues") or []) or book.get("alignment")
+        lines.append(f"- {book['sid']} {book['book_id']}: {book['alignment']} ({detail})")
+    if report.alerts:
+        lines.append("alerts: " + " | ".join(report.alerts[:6]))
+    lines.append("Monitor only. No orders.")
+    return "\n".join(lines)
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        if not path.is_file():
+            return out
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            out[key.strip()] = value.strip().strip("'").strip('"')
+    except OSError:
+        return {}
+    return out
+
+
+def _private_chat_ids(raw: str | None) -> list[str]:
+    """Keep private user chats. Skip public channels (-100...). Never log the ids."""
+    out: list[str] = []
+    text = str(raw or "").strip()
+    for part in text.replace(";", ",").split(","):
+        item = part.strip()
+        if not item or not item.lstrip("-").isdigit():
+            continue
+        if item.startswith("-100"):
+            continue
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _first_user_chat(raw: str | None) -> str:
+    chats = _private_chat_ids(raw)
+    return chats[0] if chats else ""
+
+
+def _subscriber_db_candidates() -> list[Path]:
+    extra = os.environ.get("DESK_HEALTH_SUBSCRIBER_DB") or ""
+    data_dir = os.environ.get("DATA_DIR") or ""
+    out: list[Path] = []
+    if extra:
+        out.append(Path(extra))
+    if data_dir:
+        out.append(Path(data_dir) / "arjun_subscribers.db")
+    out.extend(path for path in SUBSCRIBER_DB_CANDIDATES if str(path))
+    return out
+
+
+def _subscriber_chats() -> list[str]:
+    """Active private chats from arjun_subscribers.db. Ids stay on this host."""
+    seen: list[str] = []
+    for path in _subscriber_db_candidates():
+        if not path.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = conn.execute(
+                    "SELECT telegram_id FROM arjun_subscribers "
+                    "WHERE status = 'active' AND telegram_id > 0"
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        for (tid,) in rows:
+            item = str(int(tid))
+            if item not in seen:
+                seen.append(item)
+        if seen:
+            return seen
+    return seen
+
+
+def resolve_telegram_secrets() -> dict[str, Any]:
+    """Find ZTA_Arjun_Bot token + private chat(s). Never print the token or ids."""
+    env = {key: os.environ.get(key, "") for key in (*SECRET_ENV_KEYS, *CHAT_ENV_KEYS)}
+    source = "env"
+    if not any(env.get(key) for key in SECRET_ENV_KEYS):
+        for path in TOKEN_FILE_CANDIDATES:
+            if not str(path) or not path.is_file():
+                continue
+            loaded = _parse_env_file(path)
+            env.update({key: loaded.get(key, env.get(key, "")) for key in env})
+            source = str(path)
+            if any(env.get(key) for key in SECRET_ENV_KEYS):
+                break
+    token = (
+        env.get("TELEGRAM_CHAT_BOT_TOKEN")
+        or env.get("DESK_HEALTH_TELEGRAM_TOKEN")
+        or env.get("TELEGRAM_BOT_TOKEN")
+        or ""
+    ).strip()
+    chats = (
+        _private_chat_ids(os.environ.get("DESK_HEALTH_CHAT_ID"))
+        or _private_chat_ids(env.get("DESK_HEALTH_CHAT_ID"))
+        or _private_chat_ids(env.get("ARJUN_ADMIN_IDS"))
+        or _private_chat_ids(env.get("OWNER_CHAT_ID"))
+    )
+    chat_source = "env"
+    if not chats:
+        chats = _subscriber_chats()
+        chat_source = "arjun_subscribers" if chats else "missing"
+    return {
+        "token": token,
+        "chat_id": chats[0] if chats else "",
+        "chat_ids": chats,
+        "source": source if token else "missing",
+        "chat_source": chat_source,
+        "ok": "yes" if token and chats else "no",
+    }
+
+
+def send_telegram(text: str, *, token: str, chat_id: str) -> dict[str, Any]:
+    """Private sendMessage. Token is only used in the request, never logged."""
+    body = json.dumps(
+        {
+            "chat_id": chat_id,
+            "text": text[:3500],
+            "disable_web_page_preview": True,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode("utf-8", errors="replace")[:200]
+        return {"ok": False, "error": f"HTTP {exc.code}", "body": err}
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": type(exc).__name__}
+    return {
+        "ok": bool(payload.get("ok")),
+        "message_id": (payload.get("result") or {}).get("message_id"),
+    }
+
+
+def send_telegram_many(text: str, *, token: str, chat_ids: list[str]) -> dict[str, Any]:
+    """Fan out one alert to private chats. Never returns the chat ids."""
+    sent = 0
+    failed = 0
+    last_id = None
+    last_err = None
+    for chat_id in chat_ids:
+        result = send_telegram(text, token=token, chat_id=chat_id)
+        if result.get("ok"):
+            sent += 1
+            last_id = result.get("message_id")
+        else:
+            failed += 1
+            last_err = result.get("error") or result.get("body")
+    return {
+        "ok": sent > 0,
+        "message_id": last_id,
+        "sent": sent,
+        "failed": failed,
+        "chat_count": len(chat_ids),
+        "error": None if sent else last_err,
+    }
+
+
+def telegram_status_payload(secrets: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Public status only. No token, no chat ids."""
+    resolved = secrets or resolve_telegram_secrets()
+    return {
+        "ok": resolved["ok"],
+        "source": resolved["source"],
+        "chat_configured": bool(resolved.get("chat_id")),
+        "chat_count": len(resolved.get("chat_ids") or []),
+        "chat_source": resolved.get("chat_source") or "missing",
+        "token_configured": bool(resolved.get("token")),
+    }
+
+
+def deliver_alert(text: str, *, prefer_gce: bool = False) -> dict[str, Any]:
+    """Send via local Arjun token, or GCE /opt/zta-desk/config.env. No orders."""
+    secrets = resolve_telegram_secrets()
+    if secrets["ok"] == "yes" and not prefer_gce:
+        result = send_telegram_many(text, token=secrets["token"], chat_ids=secrets["chat_ids"])
+        result["via"] = secrets["source"]
+        result["chat_source"] = secrets["chat_source"]
+        return result
+    if os.name == "nt" or prefer_gce:
+        return _deliver_alert_via_gce(text)
+    if secrets["ok"] == "yes":
+        result = send_telegram_many(text, token=secrets["token"], chat_ids=secrets["chat_ids"])
+        result["via"] = secrets["source"]
+        result["chat_source"] = secrets["chat_source"]
+        return result
+    return {"ok": False, "error": "no Telegram token/chat (ZTA_Arjun_Bot)", "via": "missing"}
+
+
+def _gce_scp(local: Path, remote: str) -> None:
+    subprocess.run(
+        [
+            _gcloud_bin(),
+            "compute",
+            "scp",
+            str(local),
+            f"{GCE_INSTANCE}:{remote}",
+            f"--zone={GCE_ZONE}",
+            f"--project={GCE_PROJECT}",
+            "--quiet",
+        ],
+        check=True,
+        timeout=90,
+    )
+
+
+def _gce_ssh(command: str, *, timeout: int = 90) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            _gcloud_bin(),
+            "compute",
+            "ssh",
+            GCE_INSTANCE,
+            f"--zone={GCE_ZONE}",
+            f"--project={GCE_PROJECT}",
+            "--quiet",
+            "--command",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _parse_remote_json(raw: str, *, fallback: str) -> dict[str, Any]:
+    text = (raw or "").strip()
+    try:
+        return json.loads(text[text.find("{") : text.rfind("}") + 1])
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": text[:240] or fallback}
+
+
+def _gce_telegram_status() -> dict[str, Any]:
+    """Status only. Runs as zta-desk so config.env is readable. No secrets returned."""
+    remote_py = "/tmp/desk_health_probe.py"
+    _gce_scp(Path(__file__).resolve(), remote_py)
+    cmd = (
+        f"chmod 644 {remote_py} && "
+        "sudo -u zta-desk bash -lc "
+        f"'set -a && . /opt/zta-desk/config.env && set +a && "
+        f"python3 {remote_py} --telegram-status'"
+    )
+    proc = _gce_ssh(cmd)
+    payload = _parse_remote_json(
+        (proc.stdout or "").strip() or (proc.stderr or "").strip(),
+        fallback=f"exit {proc.returncode}",
+    )
+    payload["via"] = "gce:/opt/zta-desk/config.env"
+    return payload
+
+
+def _deliver_alert_via_gce(text: str) -> dict[str, Any]:
+    """Send on GCE using /opt/zta-desk/config.env. Token never copied back."""
+    remote_alert = "/tmp/desk_health_alert.txt"
+    remote_py = "/tmp/desk_health_probe.py"
+    local = Path(os.environ.get("TEMP") or "/tmp") / "desk_health_alert.txt"
+    local.write_text(text, encoding="utf-8")
+    _gce_scp(Path(__file__).resolve(), remote_py)
+    _gce_scp(local, remote_alert)
+    cmd = (
+        f"chmod 644 {remote_py} {remote_alert} && "
+        "sudo -u zta-desk bash -lc "
+        f"'set -a && . /opt/zta-desk/config.env && set +a && "
+        f"python3 {remote_py} --send-alert --alert-file {remote_alert}'"
+    )
+    proc = _gce_ssh(cmd)
+    payload = _parse_remote_json(
+        (proc.stdout or "").strip() or (proc.stderr or "").strip(),
+        fallback=f"exit {proc.returncode}",
+    )
+    payload["via"] = "gce:/opt/zta-desk/config.env"
+    return payload
+
+
 def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> HealthReport:
     current = now or datetime.now(tz=UTC)
     session = cash_session(current)
@@ -770,21 +1330,40 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
         alerts.append(f"strike-desk heartbeat stale ({int(desk_age)}s).")
     if session_on and isinstance(coa_age, (int, float)) and coa_age > COA_HEARTBEAT_STALE_S:
         alerts.append(f"strike-desk-coa heartbeat stale ({int(coa_age)}s).")
-    if session_on and analyzer_hands_age is None and day_rows:
-        alerts.append("No Analyzer Hands pulse (an_ce/an_pe/an_exit) while ticks ran.")
-    if session_on and hands_age is None:
-        alerts.append("No Hands pulse found for today (Analyzer/CoA/QuadShield).")
-    elif session_on and hands_age is not None and hands_age > HANDS_STALE_S:
-        alerts.append(f"Last Hands pulse {int(hands_age)}s ago.")
-
+    if session_on and analyzer_hands_age is None and ENTER_REASON in reasons:
+        alerts.append("No Analyzer Hands pulse after a risk-cleared enter.")
     qs = _quadshield(facts)
     if qs.get("flag"):
         alerts.append(f"QuadShield: {qs['flag']}")
+    for name, state in units.items():
+        if state and state != "active":
+            alerts.append(f"unit {name} is {state}")
+
+    analyzer_block = {
+        "sid": 999431310,
+        "day": day,
+        "ticks": len(day_rows),
+        "reasons": dict(reasons),
+        "dispositions": dict(dispositions),
+        "live_symbols_crashes": live_hits,
+    }
+    books = align_books(
+        facts,
+        now=current,
+        qs=qs,
+        analyzer=analyzer_block,
+    )
+    if any(book.get("alignment") == "broken" for book in books):
+        for book in books:
+            if book.get("alignment") == "broken":
+                alerts.append(f"{book['book_id']}: " + "; ".join(book.get("issues") or ["broken"]))
 
     defect_only = bool(dispositions.get("defect")) and not dispositions.get("stand-aside")
-    if live_hits or (session_on and defect_only):
+    broken_books = any(book.get("alignment") == "broken" for book in books)
+    fishy_books = any(book.get("alignment") == "fishy" for book in books)
+    if live_hits or (session_on and defect_only) or broken_books:
         severity = "critical"
-    elif alerts:
+    elif alerts or fishy_books:
         severity = "degraded"
     elif day_rows or not session_on:
         severity = "ok"
@@ -864,6 +1443,7 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
             "last_analyzer_tick_s": last_tick_age,
         },
         sids=sids,
+        books=books,
         quadshield=qs,
         alerts=alerts,
         raw={"log_hits": (facts.get("log_hits") or [])[-8:]},
@@ -922,13 +1502,14 @@ def render_card(report: HealthReport) -> str:
         f"observed={report.quadshield.get('observed_legs')}  "
         f"flag={report.quadshield.get('flag')}",
         "",
-        "Watched SIDs",
+        "Books",
     ]
-    for sid in report.sids:
-        mapped = "mapped" if sid.get("mapped") else "UNMAPPED"
+    for book in report.books:
+        mapped = "mapped" if book.get("mapped") else "UNMAPPED"
+        detail = "; ".join(book.get("issues") or [])
         lines.append(
-            f"  {sid['sid']}  {sid['book_id']:<22}  {sid['kind']:<12}  "
-            f"{sid['expected_legs']}leg  {mapped}  {sid['flags']}"
+            f"  {book['alignment']:<7}  {book['sid']}  {book['book_id']:<22}  "
+            f"{book['kind']:<12}  {mapped}  {detail}"
         )
     if report.alerts:
         lines.append("")
@@ -1015,11 +1596,63 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--loop", type=int, metavar="SECONDS", help="repeat every N seconds")
     parser.add_argument(
+        "--hourly",
+        action="store_true",
+        help="check now, then every 3600s (alignment loop)",
+    )
+    parser.add_argument(
+        "--alert",
+        action="store_true",
+        help="send a Telegram message when any book is fishy or broken",
+    )
+    parser.add_argument(
+        "--dry-run-alert",
+        action="store_true",
+        help="print the Telegram alert text without sending",
+    )
+    parser.add_argument(
+        "--telegram-status",
+        action="store_true",
+        help="print whether a ZTA_Arjun_Bot token/chat is resolvable (no secrets)",
+    )
+    parser.add_argument(
+        "--send-alert",
+        action="store_true",
+        help="send --alert-file using env tokens (host-side helper)",
+    )
+    parser.add_argument("--alert-file", type=Path, help="alert body for --send-alert")
+    parser.add_argument(
         "--write",
         type=Path,
         help="also write the latest report JSON to this path",
     )
     args = parser.parse_args(argv)
+
+    if args.telegram_status:
+        if args.remote:
+            payload = _gce_telegram_status()
+            print(json.dumps(payload))
+            return 0 if payload.get("ok") == "yes" else 1
+        payload = telegram_status_payload()
+        print(json.dumps(payload))
+        return 0 if payload["ok"] == "yes" else 1
+
+    if args.send_alert:
+        body = args.alert_file.read_text(encoding="utf-8") if args.alert_file else sys.stdin.read()
+        secrets = resolve_telegram_secrets()
+        if secrets["ok"] != "yes":
+            print(json.dumps({**telegram_status_payload(secrets), "error": "no token/chat"}))
+            return 1
+        result = send_telegram_many(body, token=secrets["token"], chat_ids=secrets["chat_ids"])
+        print(
+            json.dumps(
+                {
+                    **{k: v for k, v in result.items() if k != "token"},
+                    "chat_source": secrets["chat_source"],
+                }
+            )
+        )
+        return 0 if result.get("ok") else 1
 
     def once() -> tuple[int, str]:
         if args.probe:
@@ -1040,14 +1673,28 @@ def main(argv: list[str] | None = None) -> int:
         if args.write:
             args.write.parent.mkdir(parents=True, exist_ok=True)
             args.write.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+        alert = render_alert(report)
+        if args.dry_run_alert:
+            print("")
+            print("--- telegram (dry run) ---")
+            print(alert)
+        elif args.alert and should_alert(report):
+            result = deliver_alert(alert)
+            print(
+                f"telegram: ok={result.get('ok')} via={result.get('via')} "
+                f"id={result.get('message_id')} err={result.get('error')}"
+            )
+        elif args.alert:
+            print("telegram: skipped (all books aligned)")
         return _exit_code(report), text
 
-    if args.loop:
+    interval = HOURLY_SECONDS if args.hourly else args.loop
+    if interval:
         last_code = 0
         try:
             while True:
                 last_code, _ = once()
-                time.sleep(max(15, args.loop))
+                time.sleep(max(15, int(interval)))
         except KeyboardInterrupt:
             return last_code
         return last_code

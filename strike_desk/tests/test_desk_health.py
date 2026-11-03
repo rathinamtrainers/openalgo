@@ -13,7 +13,11 @@ from strike_desk.desk_health import (
     collect_host_facts,
     is_live_symbols_crash,
     main,
+    render_alert,
     render_card,
+    resolve_telegram_secrets,
+    should_alert,
+    telegram_status_payload,
 )
 
 
@@ -257,3 +261,159 @@ def test_cli_probe_and_card(tmp_path, capsys):
     assert "Monitor only" in card
     saved = json.loads(out_path.read_text(encoding="utf-8"))
     assert saved["analyzer"]["sid"] == 999431310
+    assert {row["sid"] for row in saved["books"]} == {sid.sid for sid in WATCHED_SIDS}
+
+
+def test_every_catalogued_book_has_alignment():
+    facts = {
+        "source": "journal",
+        "source_path": "/tmp/x",
+        "decisions": [],
+        "units": {
+            "strike-desk": "active",
+            "strike-desk-coa": "active",
+            "openalgo": "active",
+        },
+        "strikeshield": {"set1": False, "set2open": False},
+        "log_hits": [],
+        "coa_heartbeat": {"age_s": 9},
+        "heartbeat": {"age_s": 40},
+    }
+    now = datetime(2026, 11, 3, 5, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert [book["sid"] for book in report.books] == [sid.sid for sid in WATCHED_SIDS]
+    kinds = {book["kind"] for book in report.books}
+    assert kinds == {"analyzer", "coa", "strikeshield", "ofa", "overlay"}
+
+
+def test_alert_text_lists_broken_books_and_skips_when_aligned(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-err",
+                "2026-11-03T08:26:00+00:00",
+                "2026-11-03",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "internal-error",
+                "TypeError: Journal.live_symbols() takes 1 positional argument but 2 were given",
+                None,
+                None,
+                120,
+                "{}",
+            )
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {"strike-desk": "failed", "strike-desk-coa": "active"}
+    facts["strikeshield"] = {"set1": True, "set2open": True, "open_legs": 3}
+    now = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert should_alert(report) is True
+    text = render_alert(report)
+    assert "999431310" in text
+    assert "live_symbols" in text
+    assert "3-of-4" in text
+    assert "Monitor only" in text
+    assert "999575526" in text
+
+
+def test_telegram_secrets_missing_without_env(monkeypatch):
+    for key in (
+        "TELEGRAM_CHAT_BOT_TOKEN",
+        "DESK_HEALTH_TELEGRAM_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+        "DESK_HEALTH_CHAT_ID",
+        "ARJUN_ADMIN_IDS",
+        "OWNER_CHAT_ID",
+        "DESK_HEALTH_TELEGRAM_ENV",
+        "DESK_HEALTH_SUBSCRIBER_DB",
+        "DATA_DIR",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    secrets = resolve_telegram_secrets()
+    assert secrets["ok"] == "no"
+    assert secrets["token"] == ""
+    status = telegram_status_payload(secrets)
+    assert status["token_configured"] is False
+    assert status["chat_configured"] is False
+    assert "chat_id" not in status
+
+
+def test_telegram_skips_public_channel(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_BOT_TOKEN", "dummy:token")
+    monkeypatch.setenv("OWNER_CHAT_ID", "-1001234567890")
+    for key in (
+        "DESK_HEALTH_CHAT_ID",
+        "ARJUN_ADMIN_IDS",
+        "DESK_HEALTH_SUBSCRIBER_DB",
+        "DATA_DIR",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    secrets = resolve_telegram_secrets()
+    assert secrets["ok"] == "no"
+    assert secrets["chat_id"] == ""
+    assert secrets["chat_ids"] == []
+
+
+def test_telegram_falls_back_to_active_subscribers(tmp_path, monkeypatch):
+    db = tmp_path / "arjun_subscribers.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE arjun_subscribers (
+                telegram_id INTEGER PRIMARY KEY,
+                status TEXT,
+                plan TEXT
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO arjun_subscribers VALUES (?, ?, ?)",
+            [
+                (123456789, "active", "free"),
+                (987654321, "active", "free"),
+                (111, "revoked", "free"),
+                (-100555, "active", "free"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setenv("TELEGRAM_CHAT_BOT_TOKEN", "dummy:token")
+    monkeypatch.setenv("OWNER_CHAT_ID", "-1001234567890")
+    monkeypatch.setenv("DESK_HEALTH_SUBSCRIBER_DB", str(db))
+    for key in ("DESK_HEALTH_CHAT_ID", "ARJUN_ADMIN_IDS", "DATA_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    secrets = resolve_telegram_secrets()
+    assert secrets["ok"] == "yes"
+    assert secrets["chat_source"] == "arjun_subscribers"
+    assert secrets["chat_ids"] == ["123456789", "987654321"]
+    status = telegram_status_payload(secrets)
+    assert status["chat_count"] == 2
+    assert status["chat_source"] == "arjun_subscribers"
+    assert "123456789" not in json.dumps(status)
+
+
+def test_dry_run_alert_prints_without_sending(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_BOT_TOKEN", raising=False)
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(journal, [])
+    code = main(
+        [
+            "--journal",
+            str(journal),
+            "--state-dir",
+            str(tmp_path),
+            "--dry-run-alert",
+        ]
+    )
+    assert code in {0, 1}
+    out = capsys.readouterr().out
+    assert "telegram (dry run)" in out
+    assert "Monitor only" in out
