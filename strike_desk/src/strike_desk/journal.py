@@ -301,6 +301,18 @@ class Journal:
             )
             return list(session.execute(statement).scalars())
 
+    def live_symbols(self, trading_day: str | None = None) -> frozenset[str]:
+        """Symbols the monitor currently has adopted, armed, or is exiting.
+
+        ``trading_day`` is optional so every plan path can call
+        ``journal.live_symbols(trading_day)`` or ``journal.live_symbols()``
+        without an arity crash. This journal surface has no position rows,
+        so the set is empty for every board (NIFTY, BANKNIFTY, SENSEX, MCX,
+        BTC, ETH, CoA, overlay).
+        """
+        _ = trading_day
+        return frozenset()
+
     def close(self) -> None:
         """Dispose the engine — every connection released, no descriptor left open."""
         self._engine.dispose()

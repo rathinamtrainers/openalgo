@@ -116,3 +116,31 @@ def test_record_decision_appends_jsonl_export(journal, tmp_path, monkeypatch):
     lines = export.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     assert "tick-from-journal" in lines[0]
+
+
+def _unmanaged_symbols(journal, trading_day, positions):
+    """Same call graph.py plan uses on GCE: live_symbols(trading_day)."""
+    live = journal.live_symbols(trading_day)
+    unmanaged = []
+    for position in positions:
+        symbol = str(position.get("symbol") or "").strip().upper()
+        if symbol and symbol not in live:
+            unmanaged.append(symbol)
+    return unmanaged
+
+
+@pytest.mark.parametrize(
+    "index_symbol",
+    ["NIFTY", "BANKNIFTY", "SENSEX", "CRUDEOIL", "BTC", "ETH", "COA", "OVERLAY"],
+)
+def test_live_symbols_accepts_optional_trading_day(journal, index_symbol):
+    """Plan/graph callers pass trading_day; stub journals used to take only self."""
+    trading_day = "2026-11-03"
+    assert journal.live_symbols() == frozenset()
+    assert journal.live_symbols(trading_day) == frozenset()
+    assert journal.live_symbols(trading_day=trading_day) == frozenset()
+    assert _unmanaged_symbols(
+        journal,
+        trading_day,
+        [{"symbol": f"{index_symbol}03NOV2622600CE"}],
+    ) == [f"{index_symbol}03NOV2622600CE"]
