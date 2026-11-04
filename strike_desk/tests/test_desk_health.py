@@ -13,12 +13,16 @@ from strike_desk.desk_health import (
     classify_tick,
     collect_host_facts,
     is_live_symbols_crash,
+    latest_tick_severity,
     main,
+    public_tick_rows,
     render_alert,
     render_card,
+    render_ticks_html,
     resolve_telegram_secrets,
     should_alert,
     telegram_status_payload,
+    write_ticks,
 )
 
 
@@ -559,3 +563,134 @@ def test_dry_run_alert_prints_without_sending(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "telegram (dry run)" in out
     assert "Monitor only" in out
+
+
+def _aligned_facts(journal: Path, tmp_path: Path) -> dict:
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    facts["coa_heartbeat"] = {"age_s": 9}
+    facts["heartbeat"] = {"age_s": 40}
+    return facts
+
+
+def test_public_ticks_newest_first_header_uses_latest_only(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-broken",
+                "2026-11-04T05:44:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "internal-error",
+                "Declined: the tick raised TypeError before assembling a decision.",
+                None,
+                None,
+                90,
+                "{}",
+            ),
+            (
+                "tick-hold",
+                "2026-11-04T06:28:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "hold",
+                "position-open",
+                "Book already open.",
+                "trending",
+                0.7,
+                80,
+                "{}",
+            ),
+            (
+                "tick-enter",
+                "2026-11-04T06:13:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "enter",
+                "risk-cleared",
+                "Entered: risk cleared.",
+                "trending",
+                0.7,
+                85,
+                "{}",
+            ),
+        ],
+    )
+    facts = _aligned_facts(journal, tmp_path)
+    now = datetime(2026, 11, 4, 7, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    rows = public_tick_rows(report)
+    analyzer = [row for row in rows if row["kind"] == "analyzer-tick"]
+    assert [row["outcome"] for row in analyzer] == ["hold", "enter", "decline"]
+    assert analyzer[0]["severity"] == "ok"
+    assert analyzer[-1]["severity"] == "broken"
+    last_time, last_severity = latest_tick_severity(rows)
+    assert last_time == "11:58"
+    assert last_severity == "ok"
+    books = {row["sid"] for row in rows}
+    assert books == {sid.sid for sid in WATCHED_SIDS}
+    page = render_ticks_html(rows, collected_at_ist=report.collected_at_ist)
+    assert "Time IST" in page
+    assert "<span class=\"sev ok\">ok</span>" in page
+    assert "internal-error" in page
+    assert "CoA" not in page
+    assert "Hands" not in page
+
+
+def test_write_ticks_cli_writes_jsonl_and_html(tmp_path, capsys):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-hold",
+                "2026-11-04T06:28:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "hold",
+                "position-open",
+                "Book already open.",
+                "trending",
+                0.7,
+                80,
+                "{}",
+            )
+        ],
+    )
+    jsonl = tmp_path / "desk-health-ticks.jsonl"
+    code = main(
+        [
+            "--journal",
+            str(journal),
+            "--state-dir",
+            str(tmp_path),
+            "--write-ticks",
+            str(jsonl),
+        ]
+    )
+    assert code in {0, 1}
+    capsys.readouterr()
+    lines = [json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines() if line]
+    analyzer = next(row for row in lines if row["book"] == "Analyzer NIFTY")
+    assert analyzer["sid"] == 999431310
+    assert analyzer["outcome"] == "hold"
+    assert {row["book"] for row in lines} >= {"Analyzer NIFTY", "NIFTY", "BTC"}
+    html_page = jsonl.with_suffix(".html").read_text(encoding="utf-8")
+    assert "<table>" in html_page
+    assert "999431310" in html_page
+    facts = _aligned_facts(journal, tmp_path)
+    written = write_ticks(build_report(facts, now=datetime(2026, 11, 4, 7, 0, tzinfo=UTC)), jsonl)
+    assert Path(written["jsonl"]).is_file()
+    assert Path(written["html"]).is_file()

@@ -9,6 +9,7 @@ Analyze, or patch the live desk.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import shutil
@@ -74,9 +75,28 @@ DEFAULT_STATE_DIR = Path("/var/lib/strike-desk")
 DEFAULT_JOURNAL = DEFAULT_STATE_DIR / "strike_desk.db"
 DEFAULT_EXPORT = Path("/var/tmp/strike-desk-decisions.jsonl")
 DEFAULT_STACK = Path("/var/tmp/strike-desk-stack.json")
+DEFAULT_TICKS_JSONL = DEFAULT_STATE_DIR / "desk-health-ticks.jsonl"
+TICKS_JSONL_FALLBACK = Path("/var/tmp/desk-health-ticks.jsonl")
 GCE_INSTANCE = "strike-desk"
 GCE_ZONE = "asia-south1-a"
 GCE_PROJECT = "ztartcopenalgo"
+
+# Public table labels. No CoA / Hands / playbook jargon on the page.
+PUBLIC_BOOK_LABELS = {
+    "analyzer-nifty": "Analyzer NIFTY",
+    "coa-nifty": "NIFTY",
+    "coa-nifty-live-auto": "NIFTY Live Auto",
+    "qs-nifty": "NIFTY 4-leg",
+    "qs-nifty-env": "NIFTY 4-leg env",
+    "qs-live-auto": "NIFTY 4-leg Live Auto",
+    "qs-unmapped": "NIFTY 4-leg unmapped",
+    "ofa-nifty": "NIFTY depth",
+    "ema120-nifty": "NIFTY overlay",
+    "coa-mcx": "MCX",
+    "coa-btc": "BTC",
+    "coa-eth": "ETH",
+    "coa-eth-active": "ETH active",
+}
 
 # Analyzer cash window used by SID 999431310 (first trade after 09:30, flatten 15:15).
 CASH_OPEN = dtime(9, 15)
@@ -1057,6 +1077,205 @@ def render_alert(report: HealthReport) -> str:
     return "\n".join(lines)
 
 
+def tick_severity(
+    *,
+    reason_code: str | None = None,
+    live_symbols_crash: bool = False,
+    alignment: str | None = None,
+) -> str:
+    """ok / fishy / broken for one tick or book snapshot."""
+    if live_symbols_crash or reason_code in DEFECT_REASONS or reason_code == "live-symbols-crash":
+        return "broken"
+    if alignment in {"broken", "fishy", "ok"}:
+        return alignment
+    if reason_code in WARN_REASONS:
+        return "fishy"
+    if reason_code in STAND_ASIDE_REASONS or reason_code in {ENTER_REASON, HOLD_REASON}:
+        return "ok"
+    if reason_code:
+        return "fishy"
+    return "ok"
+
+
+def _public_reason(text: str) -> str:
+    cleaned = str(text or "").strip()
+    replacements = (
+        ("journal internal-error / defect", "internal-error"),
+        ("live_symbols crash", "internal-error"),
+        ("unmapped catalog - no TT read", "unmapped"),
+        ("CoA heartbeat stale", "heartbeat stale"),
+        ("desk heartbeat stale", "heartbeat stale"),
+        ("shield heartbeat stale", "heartbeat stale"),
+        ("OFA heartbeat stale", "heartbeat stale"),
+        ("CoA ", ""),
+        ("Hands ", ""),
+    )
+    for old, new in replacements:
+        cleaned = cleaned.replace(old, new)
+    return cleaned or "aligned"
+
+
+def _row_sort_key(row: dict[str, Any]) -> str:
+    return str(row.get("at") or row.get("time_ist") or "")
+
+
+def public_tick_rows(report: HealthReport) -> list[dict[str, Any]]:
+    """Analyzer ticks (required) plus one current row per other catalogued book."""
+    rows: list[dict[str, Any]] = []
+    analyzer_ticks = (report.analyzer or {}).get("ticks_today") or []
+    for tick in analyzer_ticks:
+        stamp = _parse_stamp(tick.get("at"))
+        time_ist = tick.get("at_ist")
+        if not time_ist and stamp is not None:
+            time_ist = now_ist(stamp).strftime("%H:%M")
+        elif isinstance(time_ist, str):
+            time_ist = time_ist.replace(" IST", "")
+        reason = str(tick.get("reason_code") or "")
+        rows.append(
+            {
+                "time_ist": time_ist or "",
+                "at": tick.get("at"),
+                "book": PUBLIC_BOOK_LABELS["analyzer-nifty"],
+                "book_id": "analyzer-nifty",
+                "sid": 999431310,
+                "outcome": tick.get("outcome") or "",
+                "reason": reason,
+                "severity": tick_severity(
+                    reason_code=reason,
+                    live_symbols_crash=bool(tick.get("live_symbols_crash")),
+                ),
+                "kind": "analyzer-tick",
+            }
+        )
+
+    collected = report.collected_at_ist or ""
+    collected_clock = collected.split(" ")[1] if " " in collected else collected[:5]
+    collected_iso = None
+    stamp = _parse_stamp(collected.replace(" IST", "+05:30"))
+    if stamp is not None:
+        collected_iso = stamp.astimezone(UTC).isoformat()
+        collected_clock = now_ist(stamp).strftime("%H:%M")
+
+    have_analyzer_ticks = any(row["kind"] == "analyzer-tick" for row in rows)
+    for book in report.books:
+        book_id = str(book.get("book_id") or "")
+        if book_id == "analyzer-nifty" and have_analyzer_ticks:
+            continue
+        issues = [item for item in (book.get("issues") or []) if item != "aligned"]
+        rows.append(
+            {
+                "time_ist": collected_clock,
+                "at": collected_iso,
+                "book": PUBLIC_BOOK_LABELS.get(book_id) or book.get("name") or book_id,
+                "book_id": book_id,
+                "sid": book.get("sid"),
+                "outcome": book.get("alignment") or "ok",
+                "reason": _public_reason(issues[0] if issues else "aligned"),
+                "severity": tick_severity(alignment=str(book.get("alignment") or "ok")),
+                "kind": "book-status",
+            }
+        )
+
+    rows.sort(key=_row_sort_key, reverse=True)
+    return rows
+
+
+def latest_tick_severity(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    """Header uses the newest Analyzer tick only. Older defects stay as rows."""
+    ticks = [row for row in rows if row.get("kind") == "analyzer-tick"]
+    source = ticks[0] if ticks else (rows[0] if rows else None)
+    if source is None:
+        return "", "ok"
+    return str(source.get("time_ist") or ""), str(source.get("severity") or "ok")
+
+
+def render_ticks_html(rows: list[dict[str, Any]], *, collected_at_ist: str = "") -> str:
+    last_time, last_severity = latest_tick_severity(rows)
+    clock = last_time
+    if not clock and collected_at_ist:
+        parts = collected_at_ist.split(" ")
+        clock = parts[1] if len(parts) > 1 else collected_at_ist
+    header_time = html.escape(clock)
+    header_sev = html.escape(last_severity)
+    body_rows = []
+    for row in rows:
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('time_ist') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('book') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('sid') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('outcome') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('reason') or ''))}</td>"
+            f"<td class=\"sev {html.escape(str(row.get('severity') or ''))}\">"
+            f"{html.escape(str(row.get('severity') or ''))}</td>"
+            "</tr>"
+        )
+    table_body = "\n".join(body_rows) or "<tr><td colspan=\"6\">no ticks yet</td></tr>"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Tick status</title>
+  <style>
+    body {{ font: 15px/1.4 ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #111; }}
+    header {{ display: flex; gap: 12px; align-items: baseline; margin-bottom: 16px; }}
+    .sev {{ font-weight: 600; text-transform: lowercase; }}
+    .ok {{ color: #0a7a2f; }}
+    .fishy {{ color: #9a6b00; }}
+    .broken {{ color: #b00020; }}
+    table {{ border-collapse: collapse; width: 100%; max-width: 920px; }}
+    th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }}
+    th {{ font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #555; }}
+  </style>
+</head>
+<body>
+  <header>
+    <strong>{header_time} IST</strong>
+    <span class="sev {header_sev}">{header_sev}</span>
+  </header>
+  <table>
+    <thead>
+      <tr><th>Time IST</th><th>Book</th><th>SID</th><th>Outcome</th><th>Reason</th><th>Severity</th></tr>
+    </thead>
+    <tbody>
+{table_body}
+    </tbody>
+  </table>
+</body>
+</html>
+"""
+
+
+def write_ticks(report: HealthReport, path: Path | None = None) -> dict[str, Any]:
+    """Rebuild JSONL + HTML. Does not append forever; one current table snapshot."""
+    dest = path or DEFAULT_TICKS_JSONL
+    rows = public_tick_rows(report)
+    candidates = [dest]
+    if dest == DEFAULT_TICKS_JSONL:
+        candidates.append(TICKS_JSONL_FALLBACK)
+    last_error: OSError | None = None
+    for jsonl_path in candidates:
+        try:
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = "".join(json.dumps(row, default=str) + "\n" for row in rows)
+            jsonl_path.write_text(payload, encoding="utf-8")
+            html_path = jsonl_path.with_suffix(".html")
+            html_path.write_text(
+                render_ticks_html(rows, collected_at_ist=report.collected_at_ist),
+                encoding="utf-8",
+            )
+            return {
+                "jsonl": str(jsonl_path),
+                "html": str(html_path),
+                "rows": len(rows),
+            }
+        except OSError as exc:
+            last_error = exc
+    raise last_error or OSError(f"cannot write ticks to {dest}")
+
+
 def _parse_env_file(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
@@ -1594,6 +1813,7 @@ def fetch_gce_facts(
     instance: str = GCE_INSTANCE,
     zone: str = GCE_ZONE,
     project: str = GCE_PROJECT,
+    write_ticks: Path | None = None,
 ) -> dict[str, Any]:
     """Upload this module and run --probe on GCE. Read-only."""
     remote = "/tmp/desk_health_probe.py"
@@ -1609,6 +1829,15 @@ def fetch_gce_facts(
         f"--project={project}",
         "--quiet",
     ]
+    command = f"python3 {remote} --probe"
+    if write_ticks is not None:
+        tmp_jsonl = TICKS_JSONL_FALLBACK.as_posix()
+        command = (
+            f"python3 {remote} --probe --write-ticks {tmp_jsonl}; rc=$?; "
+            "sudo install -m 0644 /var/tmp/desk-health-ticks.jsonl "
+            "/var/tmp/desk-health-ticks.html /var/lib/strike-desk/; "
+            "exit $rc"
+        )
     ssh = [
         gcloud,
         "compute",
@@ -1618,7 +1847,7 @@ def fetch_gce_facts(
         f"--project={project}",
         "--quiet",
         "--command",
-        f"python3 {remote} --probe",
+        command,
     ]
     subprocess.run(scp, check=True, timeout=90)
     proc = subprocess.run(ssh, check=True, capture_output=True, text=True, timeout=90)
@@ -1689,6 +1918,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="also write the latest report JSON to this path",
     )
+    parser.add_argument(
+        "--write-ticks",
+        nargs="?",
+        const=DEFAULT_TICKS_JSONL,
+        default=None,
+        type=Path,
+        help="write public tick JSONL + HTML (default /var/lib/strike-desk/desk-health-ticks.jsonl)",
+    )
     args = parser.parse_args(argv)
 
     if args.telegram_status:
@@ -1717,16 +1954,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if result.get("ok") else 1
 
+    def _maybe_write_ticks(report: HealthReport) -> None:
+        if args.write_ticks is None:
+            return
+        try:
+            written = write_ticks(report, args.write_ticks)
+            print(f"ticks: {written['jsonl']} rows={written['rows']}", file=sys.stderr)
+        except OSError as exc:
+            print(f"ticks: write failed {exc}", file=sys.stderr)
+
     def once() -> tuple[int, str]:
         if args.probe:
             facts = collect_host_facts(state_dir=args.state_dir, journal=args.journal)
+            if args.write_ticks is not None:
+                _maybe_write_ticks(build_report(facts))
             text = json.dumps(facts, default=str)
             print(text)
             return 0, text
         if args.from_json:
             facts = _load_json_text(args.from_json)
         elif args.remote:
-            facts = fetch_gce_facts()
+            facts = fetch_gce_facts(write_ticks=args.write_ticks)
         else:
             facts = collect_host_facts(state_dir=args.state_dir, journal=args.journal)
         report = build_report(facts)
@@ -1736,6 +1984,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.write:
             args.write.parent.mkdir(parents=True, exist_ok=True)
             args.write.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+        if not args.remote:
+            _maybe_write_ticks(report)
         alert = render_alert(report)
         if args.dry_run_alert:
             print("")
