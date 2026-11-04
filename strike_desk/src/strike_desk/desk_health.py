@@ -89,6 +89,9 @@ COA_HEARTBEAT_STALE_S = 10 * 60
 HANDS_STALE_S = 30 * 60
 BRIEF_STALE_S = 180
 HOURLY_SECONDS = 3600
+TICK_SECONDS = 15 * 60
+# Confirm even when aligned. After this IST day, fishy/broken only.
+STATUS_PING_DAY = "2026-11-04"
 MCX_OPEN = dtime(9, 20)
 MCX_CLOSE = dtime(23, 15)
 
@@ -972,10 +975,53 @@ def align_books(
     return rows
 
 
+def _status_ping_today(report: HealthReport) -> bool:
+    return str((report.analyzer or {}).get("day") or "") == STATUS_PING_DAY
+
+
 def should_alert(report: HealthReport) -> bool:
     if report.severity == "critical":
         return True
-    return any(book.get("alignment") in {"fishy", "broken"} for book in report.books)
+    if any(book.get("alignment") in {"fishy", "broken"} for book in report.books):
+        return True
+    return _status_ping_today(report)
+
+
+def _tick_summaries(day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every Analyzer tick for the trading day, oldest first."""
+    dated: list[tuple[datetime, dict[str, Any]]] = []
+    undated: list[dict[str, Any]] = []
+    for row in day_rows:
+        stamp = _parse_stamp(row.get("created_at_utc"))
+        if stamp is None:
+            undated.append(row)
+        else:
+            dated.append((stamp, row))
+    dated.sort(key=lambda item: item[0])
+    out: list[dict[str, Any]] = []
+    for stamp, row in dated:
+        out.append(
+            {
+                "at": row.get("created_at_utc"),
+                "at_ist": now_ist(stamp).strftime("%H:%M IST"),
+                "outcome": row.get("outcome"),
+                "reason_code": row.get("reason_code"),
+                "disposition": row.get("disposition"),
+                "live_symbols_crash": bool(row.get("live_symbols_crash")),
+            }
+        )
+    for row in undated:
+        out.append(
+            {
+                "at": row.get("created_at_utc"),
+                "at_ist": None,
+                "outcome": row.get("outcome"),
+                "reason_code": row.get("reason_code"),
+                "disposition": row.get("disposition"),
+                "live_symbols_crash": bool(row.get("live_symbols_crash")),
+            }
+        )
+    return out
 
 
 def render_alert(report: HealthReport) -> str:
@@ -983,14 +1029,28 @@ def render_alert(report: HealthReport) -> str:
     broken = [book for book in report.books if book.get("alignment") == "broken"]
     fishy = [book for book in report.books if book.get("alignment") == "fishy"]
     ok_n = sum(1 for book in report.books if book.get("alignment") == "ok")
+    ticks = (report.analyzer or {}).get("ticks_today") or []
     lines = [
         f"Desk health {report.collected_at_ist} [{report.severity}]",
         report.headline,
         f"books: {len(broken)} broken / {len(fishy)} fishy / {ok_n} ok",
     ]
+    if _status_ping_today(report) and not broken and not fishy:
+        lines.append("status: confirming (today-only ping even if aligned)")
     for book in (*broken, *fishy):
         detail = "; ".join(book.get("issues") or []) or book.get("alignment")
         lines.append(f"- {book['sid']} {book['book_id']}: {book['alignment']} ({detail})")
+    lines.append(f"Analyzer ticks today ({len(ticks)}):")
+    if ticks:
+        for tick in ticks:
+            when = tick.get("at_ist") or tick.get("at") or "?"
+            flag = " crash" if tick.get("live_symbols_crash") else ""
+            lines.append(
+                f"  {when} {tick.get('outcome')} {tick.get('reason_code')} "
+                f"{tick.get('disposition')}{flag}"
+            )
+    else:
+        lines.append("  none yet")
     if report.alerts:
         lines.append("alerts: " + " | ".join(report.alerts[:6]))
     lines.append("Monitor only. No orders.")
@@ -1416,6 +1476,7 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
                 "regime_label": last.get("regime_label") if last else None,
                 "reason_text": (last.get("reason_text") or "")[:200] if last else None,
             },
+            "ticks_today": _tick_summaries(day_rows),
             "ticks_preview": [
                 {
                     "at": row.get("created_at_utc"),
@@ -1594,12 +1655,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--hourly",
         action="store_true",
-        help="check now, then every 3600s (alignment loop)",
+        help="check now, then every 3600s (legacy alignment loop)",
+    )
+    parser.add_argument(
+        "--every-15",
+        dest="every_15",
+        action="store_true",
+        help="check now, then every 900s (Analyzer tick cadence)",
     )
     parser.add_argument(
         "--alert",
         action="store_true",
-        help="send a Telegram message when any book is fishy or broken",
+        help="send Telegram on fishy/broken, and on 2026-11-04 even if aligned",
     )
     parser.add_argument(
         "--dry-run-alert",
@@ -1684,7 +1751,7 @@ def main(argv: list[str] | None = None) -> int:
             print("telegram: skipped (all books aligned)")
         return _exit_code(report), text
 
-    interval = HOURLY_SECONDS if args.hourly else args.loop
+    interval = TICK_SECONDS if args.every_15 else HOURLY_SECONDS if args.hourly else args.loop
     if interval:
         last_code = 0
         try:

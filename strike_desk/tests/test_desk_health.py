@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from strike_desk.desk_health import (
+    STATUS_PING_DAY,
     WATCHED_SIDS,
     build_report,
     cash_session,
@@ -367,6 +368,99 @@ def test_alert_text_lists_broken_books_and_skips_when_aligned(tmp_path):
     assert "3-of-4" in text
     assert "Monitor only" in text
     assert "999575526" in text
+    assert "Analyzer ticks today (1):" in text
+    assert "internal-error" in text
+
+
+def test_status_ping_today_lists_every_tick_even_when_ok(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-a",
+                "2026-11-04T04:00:00+00:00",
+                STATUS_PING_DAY,
+                "NIFTY",
+                "schedule",
+                "decline",
+                "regime-weak-trend",
+                "Declined: weak trend.",
+                "trending",
+                0.4,
+                90,
+                "{}",
+            ),
+            (
+                "tick-b",
+                "2026-11-04T04:15:00+00:00",
+                STATUS_PING_DAY,
+                "NIFTY",
+                "schedule",
+                "decline",
+                "regime-weak-trend",
+                "Declined: weak trend.",
+                "trending",
+                0.41,
+                88,
+                "{}",
+            ),
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    facts["coa_heartbeat"] = {"age_s": 9}
+    facts["heartbeat"] = {"age_s": 40}
+    now = datetime(2026, 11, 4, 5, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert report.analyzer["day"] == STATUS_PING_DAY
+    assert report.severity in {"ok", "degraded"}
+    assert should_alert(report) is True
+    text = render_alert(report)
+    assert "today-only ping even if aligned" in text
+    assert "Analyzer ticks today (2):" in text
+    assert text.index("09:30 IST") < text.index("09:45 IST")
+    assert text.count("regime-weak-trend") >= 2
+
+
+def test_other_days_skip_telegram_when_aligned(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-1",
+                "2026-11-02T04:00:00+00:00",
+                "2026-11-02",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "regime-weak-trend",
+                "Declined: weak trend.",
+                "trending",
+                0.41,
+                100,
+                "{}",
+            )
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    now = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert report.analyzer["day"] == "2026-11-02"
+    assert report.severity in {"ok", "degraded"}
+    assert should_alert(report) is False
 
 
 def test_telegram_secrets_missing_without_env(monkeypatch):

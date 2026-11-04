@@ -1,11 +1,11 @@
-# Hourly Strike Desk alignment + Telegram alert. No orders. No tokens in this file.
-# Register once (current user) — path has a space, so use Register-ScheduledTask:
+# 15-min Strike Desk alignment + Telegram status ping. No orders. No tokens in this file.
+# Registered as task StrikeDeskHealth (15-minute repetition).
 #   $script = "D:\ATZ\zerotouchalgo RT\openalgo-wt-desk-health\strike_desk\scripts\desk-health-hourly.ps1"
 #   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -File `"$script`""
-#   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 9999)
+#   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 9999)
 #   Register-ScheduledTask -TaskName "StrikeDeskHealth" -Action $action -Trigger $trigger -Force
 # Or leave this process running:
-#   uv run python -m strike_desk.desk_health --remote --hourly --alert
+#   uv run python -m strike_desk.desk_health --remote --every-15 --alert
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot

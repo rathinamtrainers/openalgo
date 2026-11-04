@@ -11,6 +11,7 @@ From the worktree or a clone:
     uv run --project strike_desk python -m strike_desk.desk_health --remote
     uv run --project strike_desk python -m strike_desk.desk_health --loop 60
     uv run --project strike_desk python -m strike_desk.desk_health --remote --hourly --alert
+    uv run --project strike_desk python -m strike_desk.desk_health --remote --every-15 --alert
 
 On GCE (after scp of desk_health.py):
 
