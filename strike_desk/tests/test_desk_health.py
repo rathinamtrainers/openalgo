@@ -370,6 +370,80 @@ def test_alert_text_lists_broken_books_and_skips_when_aligned(tmp_path):
     assert "999575526" in text
     assert "Analyzer ticks today (1):" in text
     assert "internal-error" in text
+    assert "latest tick" in text
+
+
+def test_severity_follows_latest_tick_not_earlier_defects(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-err",
+                "2026-11-04T05:29:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "internal-error",
+                "Declined: the tick raised TypeError before assembling a decision.",
+                None,
+                None,
+                120,
+                "{}",
+            ),
+            (
+                "tick-enter",
+                "2026-11-04T06:13:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "enter",
+                "risk-cleared",
+                "Entered: risk cleared.",
+                "trending",
+                0.8,
+                200,
+                "{}",
+            ),
+            (
+                "tick-hold",
+                "2026-11-04T06:28:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "hold",
+                "position-open",
+                "Held: 1 open NIFTY position.",
+                None,
+                None,
+                80,
+                "{}",
+            ),
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    facts["coa_heartbeat"] = {"age_s": 9}
+    facts["heartbeat"] = {"age_s": 40}
+    now = datetime(2026, 11, 4, 7, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert report.analyzer["last_disposition"] == "hold"
+    assert report.analyzer["earlier_defects"] == 1
+    assert report.severity == "ok"
+    analyzer_book = next(book for book in report.books if book["book_id"] == "analyzer-nifty")
+    assert analyzer_book["alignment"] == "ok"
+    text = render_alert(report)
+    assert "[ok]" in text
+    assert "holding" in text.lower()
+    assert "internal-error" in text
+    assert "Analyzer ticks today (3):" in text
+    assert "latest recovered" in "; ".join(analyzer_book.get("issues") or [])
 
 
 def test_status_ping_today_lists_every_tick_even_when_ok(tmp_path):

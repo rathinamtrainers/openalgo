@@ -897,16 +897,25 @@ def align_books(
                 alignment = "broken"
 
         if sid.kind == "analyzer":
-            if analyzer.get("live_symbols_crashes"):
-                issues.append(f"live_symbols crash x{analyzer['live_symbols_crashes']}")
+            last_disp = analyzer.get("last_disposition")
+            last_reason = analyzer.get("last_reason_code") or "unknown"
+            if analyzer.get("last_live_symbols_crash"):
+                issues.append("latest tick live_symbols crash")
                 alignment = "broken"
-            elif (analyzer.get("dispositions") or {}).get("defect"):
-                issues.append("journal internal-error / defect")
+            elif last_disp == "defect":
+                issues.append(f"latest tick {last_reason} / defect")
                 alignment = "broken"
+            elif last_disp in {"enter", "hold"}:
+                issues.append(f"latest tick {last_reason} ({last_disp})")
+            elif last_disp == "stand-aside":
+                issues.append(f"latest tick stand-aside {last_reason}")
+            earlier = int(analyzer.get("earlier_defects") or 0)
+            if earlier and alignment == "ok":
+                issues.append(f"{earlier} earlier defect(s) today; latest recovered")
             if session_on and isinstance(beat_age, (int, float)) and beat_age > HEARTBEAT_STALE_S:
                 issues.append(f"desk heartbeat stale {int(beat_age)}s")
                 alignment = "broken" if alignment == "broken" else "fishy"
-            if analyzer.get("reasons", {}).get(ENTER_REASON) and hands_age is None:
+            if last_disp == "enter" and hands_age is None:
                 issues.append("risk-cleared but no Analyzer Hands")
                 alignment = "broken" if alignment == "broken" else "fishy"
 
@@ -985,6 +994,19 @@ def should_alert(report: HealthReport) -> bool:
     if any(book.get("alignment") in {"fishy", "broken"} for book in report.books):
         return True
     return _status_ping_today(report)
+
+
+def _latest_tick(day_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Newest Analyzer tick by created_at_utc. History stays in day_rows."""
+    dated: list[tuple[datetime, dict[str, Any]]] = []
+    for row in day_rows:
+        stamp = _parse_stamp(row.get("created_at_utc"))
+        if stamp is not None:
+            dated.append((stamp, row))
+    if dated:
+        dated.sort(key=lambda item: item[0])
+        return dated[-1][1]
+    return day_rows[0] if day_rows else None
 
 
 def _tick_summaries(day_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1351,9 +1373,16 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
     dispositions = Counter(str(row.get("disposition") or "unknown") for row in day_rows)
     live_hits = sum(1 for row in day_rows if row.get("live_symbols_crash"))
 
-    last = day_rows[0] if day_rows else None
+    last = _latest_tick(day_rows)
     last_stamp = _parse_stamp(last.get("created_at_utc")) if last else None
     last_tick_age = _age_s(last_stamp, current)
+    last_disp = last.get("disposition") if last else None
+    last_reason = last.get("reason_code") if last else None
+    last_crash = bool(last.get("live_symbols_crash")) if last else False
+    earlier_defects = max(
+        0,
+        int(dispositions.get("defect") or 0) - (1 if last_disp == "defect" else 0),
+    )
 
     hb = facts.get("heartbeat") or {}
     coa_hb = facts.get("coa_heartbeat") or {}
@@ -1374,19 +1403,17 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
     alerts: list[str] = []
     if killed:
         alerts.append("Kill switch is engaged.")
-    if live_hits:
-        alerts.append(
-            f"SID 999431310 live_symbols crash on {live_hits} tick(s) today - not a stand-aside."
-        )
-    elif dispositions.get("defect"):
-        alerts.append(f"{dispositions['defect']} journal defect(s) today.")
+    if last_crash:
+        alerts.append("SID 999431310 latest tick is a live_symbols crash - not a stand-aside.")
+    elif last_disp == "defect":
+        alerts.append(f"SID 999431310 latest tick is {last_reason} / defect.")
     if session_on and not day_rows and units.get("strike-desk") == "active":
         alerts.append("Cash session on and desk unit active, but no Analyzer ticks today.")
     if session_on and isinstance(desk_age, (int, float)) and desk_age > HEARTBEAT_STALE_S:
         alerts.append(f"strike-desk heartbeat stale ({int(desk_age)}s).")
     if session_on and isinstance(coa_age, (int, float)) and coa_age > COA_HEARTBEAT_STALE_S:
         alerts.append(f"strike-desk-coa heartbeat stale ({int(coa_age)}s).")
-    if session_on and analyzer_hands_age is None and ENTER_REASON in reasons:
+    if session_on and analyzer_hands_age is None and last_disp == "enter":
         alerts.append("No Analyzer Hands pulse after a risk-cleared enter.")
     qs = _quadshield(facts)
     if qs.get("flag"):
@@ -1402,6 +1429,10 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
         "reasons": dict(reasons),
         "dispositions": dict(dispositions),
         "live_symbols_crashes": live_hits,
+        "last_disposition": last_disp,
+        "last_reason_code": last_reason,
+        "last_live_symbols_crash": last_crash,
+        "earlier_defects": earlier_defects,
     }
     books = align_books(
         facts,
@@ -1414,10 +1445,10 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
             if book.get("alignment") == "broken":
                 alerts.append(f"{book['book_id']}: " + "; ".join(book.get("issues") or ["broken"]))
 
-    defect_only = bool(dispositions.get("defect")) and not dispositions.get("stand-aside")
     broken_books = any(book.get("alignment") == "broken" for book in books)
     fishy_books = any(book.get("alignment") == "fishy" for book in books)
-    if live_hits or (session_on and defect_only) or broken_books:
+    latest_broken = last_crash or last_disp == "defect"
+    if latest_broken or broken_books:
         severity = "critical"
     elif alerts or fishy_books:
         severity = "degraded"
@@ -1426,22 +1457,25 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
     else:
         severity = "unknown"
 
-    if live_hits:
+    if last_crash:
         headline = (
-            f"NIFTY Analyzer SID 999431310 is broken today: {live_hits} "
-            f"live_symbols crash(es). Not a correct stand-aside."
+            "NIFTY Analyzer SID 999431310 latest tick is a live_symbols crash. "
+            "Not a correct stand-aside."
         )
-    elif day_rows and set(dispositions) <= {"stand-aside"}:
+    elif last_disp == "defect":
         headline = (
-            f"NIFTY Analyzer SID 999431310 stood aside correctly "
-            f"({day_rows[0]['reason_code']} x {len(day_rows)})."
+            f"NIFTY Analyzer SID 999431310 latest tick is {last_reason}. Not a correct stand-aside."
         )
-    elif day_rows and ENTER_REASON in reasons:
-        headline = f"NIFTY Analyzer entered today ({reasons[ENTER_REASON]} risk-cleared)."
-    elif day_rows:
-        headline = f"NIFTY Analyzer {len(day_rows)} tick(s) today: " + ", ".join(
-            f"{code}x{count}" for code, count in reasons.most_common()
+    elif last_disp == "hold":
+        headline = f"NIFTY Analyzer SID 999431310 latest tick is holding ({last_reason})."
+    elif last_disp == "enter":
+        headline = f"NIFTY Analyzer SID 999431310 latest tick entered ({last_reason})."
+    elif last_disp == "stand-aside":
+        headline = (
+            f"NIFTY Analyzer SID 999431310 latest tick stood aside correctly ({last_reason})."
         )
+    elif last:
+        headline = f"NIFTY Analyzer SID 999431310 latest tick: {last_reason}."
     elif not session_on:
         headline = "Cash session off - heartbeat-only is expected for Analyzer / cash CoA."
     else:
@@ -1467,6 +1501,10 @@ def build_report(facts: dict[str, Any], *, now: datetime | None = None) -> Healt
             "reasons": dict(reasons),
             "dispositions": dict(dispositions),
             "live_symbols_crashes": live_hits,
+            "last_disposition": last_disp,
+            "last_reason_code": last_reason,
+            "last_live_symbols_crash": last_crash,
+            "earlier_defects": earlier_defects,
             "last_tick": {
                 "at": last.get("created_at_utc") if last else None,
                 "age_s": last_tick_age,
