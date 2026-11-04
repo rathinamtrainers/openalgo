@@ -1189,6 +1189,50 @@ def latest_tick_severity(rows: list[dict[str, Any]]) -> tuple[str, str]:
     return str(source.get("time_ist") or ""), str(source.get("severity") or "ok")
 
 
+def rollup_severity(rows: list[dict[str, Any]]) -> str:
+    ranks = {"ok": 0, "fishy": 1, "broken": 2}
+    worst = "ok"
+    for row in rows:
+        sev = str(row.get("severity") or "ok")
+        if ranks.get(sev, 0) > ranks[worst]:
+            worst = sev
+    return worst
+
+
+def group_tick_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One group per minute, newest first. Same-minute probe books collapse."""
+    groups: list[dict[str, Any]] = []
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        minute = str(row.get("time_ist") or "")
+        bucket = index.get(minute)
+        if bucket is None:
+            bucket = {"time_ist": minute, "rows": []}
+            index[minute] = bucket
+            groups.append(bucket)
+        bucket["rows"].append(row)
+    for bucket in groups:
+        members = bucket["rows"]
+        bucket["severity"] = rollup_severity(members)
+        bucket["open"] = bucket["severity"] in {"fishy", "broken"}
+    return groups
+
+
+def _html_data_row(row: dict[str, Any], *, css: str = "") -> str:
+    cls = f' class="{css}"' if css else ""
+    return (
+        f"<tr{cls}>"
+        f"<td>{html.escape(str(row.get('time_ist') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('book') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('sid') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('outcome') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('reason') or ''))}</td>"
+        f"<td class=\"sev {html.escape(str(row.get('severity') or ''))}\">"
+        f"{html.escape(str(row.get('severity') or ''))}</td>"
+        "</tr>"
+    )
+
+
 def render_ticks_html(rows: list[dict[str, Any]], *, collected_at_ist: str = "") -> str:
     last_time, last_severity = latest_tick_severity(rows)
     clock = last_time
@@ -1197,20 +1241,23 @@ def render_ticks_html(rows: list[dict[str, Any]], *, collected_at_ist: str = "")
         clock = parts[1] if len(parts) > 1 else collected_at_ist
     header_time = html.escape(clock)
     header_sev = html.escape(last_severity)
-    body_rows = []
-    for row in rows:
-        body_rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(row.get('time_ist') or ''))}</td>"
-            f"<td>{html.escape(str(row.get('book') or ''))}</td>"
-            f"<td>{html.escape(str(row.get('sid') or ''))}</td>"
-            f"<td>{html.escape(str(row.get('outcome') or ''))}</td>"
-            f"<td>{html.escape(str(row.get('reason') or ''))}</td>"
-            f"<td class=\"sev {html.escape(str(row.get('severity') or ''))}\">"
-            f"{html.escape(str(row.get('severity') or ''))}</td>"
-            "</tr>"
+    bodies: list[str] = []
+    for group in group_tick_rows(rows):
+        members = group["rows"]
+        if len(members) == 1:
+            bodies.append(f"<tbody>\n{_html_data_row(members[0])}\n</tbody>")
+            continue
+        open_cls = " open" if group["open"] else ""
+        sev = html.escape(str(group["severity"]))
+        minute = html.escape(str(group["time_ist"]))
+        summary = (
+            f'<tr class="summary">'
+            f"<td>{minute}</td><td></td><td></td><td></td><td></td>"
+            f'<td class="sev {sev}">{sev}</td></tr>'
         )
-    table_body = "\n".join(body_rows) or "<tr><td colspan=\"6\">no ticks yet</td></tr>"
+        details = "\n".join(_html_data_row(row, css="detail") for row in members)
+        bodies.append(f'<tbody class="minute{open_cls}">\n{summary}\n{details}\n</tbody>')
+    table_body = "\n".join(bodies) or "<tbody><tr><td colspan=\"6\">no ticks yet</td></tr></tbody>"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1228,6 +1275,10 @@ def render_ticks_html(rows: list[dict[str, Any]], *, collected_at_ist: str = "")
     table {{ border-collapse: collapse; width: 100%; max-width: 920px; }}
     th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }}
     th {{ font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #555; }}
+    tbody.minute:not(.open) tr.detail {{ display: none; }}
+    tbody.minute tr.summary {{ cursor: pointer; }}
+    tbody.minute tr.summary td:first-child::before {{ content: "▸ "; }}
+    tbody.minute.open tr.summary td:first-child::before {{ content: "▾ "; }}
   </style>
 </head>
 <body>
@@ -1239,10 +1290,13 @@ def render_ticks_html(rows: list[dict[str, Any]], *, collected_at_ist: str = "")
     <thead>
       <tr><th>Time IST</th><th>Book</th><th>SID</th><th>Outcome</th><th>Reason</th><th>Severity</th></tr>
     </thead>
-    <tbody>
 {table_body}
-    </tbody>
   </table>
+  <script>
+    document.querySelectorAll("tbody.minute tr.summary").forEach((row) => {{
+      row.addEventListener("click", () => row.parentElement.classList.toggle("open"));
+    }});
+  </script>
 </body>
 </html>
 """

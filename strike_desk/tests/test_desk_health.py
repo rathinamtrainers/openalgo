@@ -13,6 +13,7 @@ from strike_desk.desk_health import (
     classify_tick,
     collect_host_facts,
     is_live_symbols_crash,
+    group_tick_rows,
     latest_tick_severity,
     main,
     public_tick_rows,
@@ -646,6 +647,29 @@ def test_public_ticks_newest_first_header_uses_latest_only(tmp_path):
     assert "internal-error" in page
     assert "CoA" not in page
     assert "Hands" not in page
+    groups = group_tick_rows(rows)
+    probe = next(group for group in groups if len(group["rows"]) > 1)
+    assert probe["severity"] == "ok"
+    assert probe["open"] is False
+    assert 'tbody class="minute"' in page
+    assert 'tbody class="minute open"' not in page
+    assert page.count("tr class=\"summary\"") == 1
+
+
+def test_probe_minute_auto_expands_when_fishy(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(journal, [])
+    facts = _aligned_facts(journal, tmp_path)
+    facts["coa_heartbeat"] = {"age_s": 900}
+    now = datetime(2026, 11, 4, 7, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    rows = public_tick_rows(report)
+    groups = group_tick_rows(rows)
+    probe = next(group for group in groups if len(group["rows"]) > 1)
+    assert probe["severity"] in {"fishy", "broken"}
+    assert probe["open"] is True
+    page = render_ticks_html(rows, collected_at_ist=report.collected_at_ist)
+    assert 'tbody class="minute open"' in page
 
 
 def test_write_ticks_cli_writes_jsonl_and_html(tmp_path, capsys):
