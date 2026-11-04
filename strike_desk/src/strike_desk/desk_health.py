@@ -317,10 +317,11 @@ def _haystack(*parts: Any) -> str:
 
 
 def is_live_symbols_crash(reason_code: str | None, *texts: Any) -> bool:
+    """True only from THIS tick's text — not a 2-day journalctl blob."""
     blob = _haystack(reason_code, *texts)
-    if "live_symbols" in blob:
-        return True
-    return reason_code == "internal-error" and "typeerror" in blob and "positional argument" in blob
+    if "live_symbols" not in blob:
+        return False
+    return "typeerror" in blob or "positional argument" in blob
 
 
 def classify_tick(
@@ -627,8 +628,6 @@ def _log_blob(facts: dict[str, Any]) -> str:
 
 
 def _classify_day(facts: dict[str, Any], day: str) -> list[dict[str, Any]]:
-    extra = _log_blob(facts)
-    log_crash = "live_symbols" in extra.lower()
     rows: list[dict[str, Any]] = []
     for raw in facts.get("decisions") or []:
         if not isinstance(raw, dict):
@@ -638,11 +637,8 @@ def _classify_day(facts: dict[str, Any], day: str) -> list[dict[str, Any]]:
         klass = classify_tick(
             str(raw.get("reason_code") or ""),
             str(raw.get("reason_text") or ""),
-            extra,
         )
         item = dict(raw)
-        if log_crash and item.get("reason_code") == "internal-error":
-            klass = classify_tick("internal-error", "live_symbols TypeError", extra)
         item["disposition"] = klass.disposition
         item["classified_reason"] = klass.reason_code
         item["live_symbols_crash"] = klass.live_symbols_crash

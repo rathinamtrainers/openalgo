@@ -54,7 +54,18 @@ def test_live_symbols_crash_is_named_defect():
     assert klass.live_symbols_crash is True
     assert klass.disposition == "defect"
     assert klass.reason_code == "live-symbols-crash"
-    assert is_live_symbols_crash("internal-error", "plan node live_symbols(trading_day)")
+    assert is_live_symbols_crash(
+        "internal-error",
+        "live_symbols TypeError: takes 1 positional argument but 2 were given",
+    )
+    assert is_live_symbols_crash("internal-error", "plan node live_symbols(trading_day)") is False
+    assert (
+        is_live_symbols_crash(
+            "internal-error",
+            "Declined: the tick raised AttributeError before assembling a decision.",
+        )
+        is False
+    )
 
 
 def test_cash_session_weekend_is_off():
@@ -122,7 +133,7 @@ def test_report_marks_today_internal_error_as_defect_not_stand_aside(tmp_path):
                 "schedule",
                 "decline",
                 "internal-error",
-                "Declined: the tick raised TypeError before assembling a decision.",
+                "TypeError: Journal.live_symbols() takes 1 positional argument but 2 were given",
                 None,
                 None,
                 120,
@@ -170,6 +181,43 @@ def test_report_marks_today_internal_error_as_defect_not_stand_aside(tmp_path):
     assert "999575526" in card
     assert report.ages["last_analyzer_hands_s"] is None
     assert report.ages["last_hands_s"] is not None
+
+
+def test_stale_journalctl_does_not_relabel_attributeerror(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-ae",
+                "2026-11-04T05:29:24+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "internal-error",
+                "Declined: the tick raised AttributeError before assembling a decision.",
+                None,
+                None,
+                90,
+                "{}",
+            )
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["log_hits"] = [
+        {
+            "line": (
+                "2026-11-03T13:56:00+05:30 host strike-desk[1]: "
+                "TypeError: Journal.live_symbols() takes 1 positional argument but 2 were given"
+            )
+        }
+    ]
+    now = datetime(2026, 11, 4, 6, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert report.analyzer["ticks"] == 1
+    assert report.analyzer["live_symbols_crashes"] == 0
+    assert report.analyzer["dispositions"] == {"defect": 1}
 
 
 def test_report_treats_weak_trend_as_correct_stand_aside(tmp_path):
