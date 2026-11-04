@@ -468,6 +468,80 @@ def test_other_days_skip_telegram_when_aligned(tmp_path):
     assert should_alert(report) is False
 
 
+def test_severity_follows_latest_tick_not_earlier_defects(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(
+        journal,
+        [
+            (
+                "tick-err",
+                "2026-11-04T05:29:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "decline",
+                "internal-error",
+                "Declined: the tick raised TypeError before assembling a decision.",
+                None,
+                None,
+                120,
+                "{}",
+            ),
+            (
+                "tick-enter",
+                "2026-11-04T06:13:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "enter",
+                "risk-cleared",
+                "Entered: risk cleared.",
+                "trending",
+                0.8,
+                200,
+                "{}",
+            ),
+            (
+                "tick-hold",
+                "2026-11-04T06:28:00+00:00",
+                "2026-11-04",
+                "NIFTY",
+                "schedule",
+                "hold",
+                "position-open",
+                "Held: 1 open NIFTY position.",
+                None,
+                None,
+                80,
+                "{}",
+            ),
+        ],
+    )
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    facts["coa_heartbeat"] = {"age_s": 9}
+    facts["heartbeat"] = {"age_s": 40}
+    now = datetime(2026, 11, 4, 7, 0, tzinfo=UTC)
+    report = build_report(facts, now=now)
+    assert report.analyzer["last_disposition"] == "hold"
+    assert report.analyzer["earlier_defects"] == 1
+    assert report.severity == "ok"
+    analyzer_book = next(book for book in report.books if book["book_id"] == "analyzer-nifty")
+    assert analyzer_book["alignment"] == "ok"
+    text = render_alert(report)
+    assert "[ok]" in text
+    assert "holding" in text.lower()
+    assert "internal-error" in text
+    assert "Analyzer ticks today (3):" in text
+    assert "journal defect" not in text
+    assert "latest recovered" in "; ".join(analyzer_book.get("issues") or [])
+
+
 def test_telegram_secrets_missing_without_env(monkeypatch):
     for key in (
         "TELEGRAM_CHAT_BOT_TOKEN",
@@ -643,7 +717,7 @@ def test_public_ticks_newest_first_header_uses_latest_only(tmp_path):
     assert books == {sid.sid for sid in WATCHED_SIDS}
     page = render_ticks_html(rows, collected_at_ist=report.collected_at_ist)
     assert "Time IST" in page
-    assert "<span class=\"sev ok\">ok</span>" in page
+    assert '<span class="sev ok">ok</span>' in page
     assert "internal-error" in page
     assert "CoA" not in page
     assert "Hands" not in page
@@ -653,7 +727,7 @@ def test_public_ticks_newest_first_header_uses_latest_only(tmp_path):
     assert probe["open"] is False
     assert 'tbody class="minute"' in page
     assert 'tbody class="minute open"' not in page
-    assert page.count("tr class=\"summary\"") == 1
+    assert page.count('tr class="summary"') == 1
 
 
 def test_probe_minute_auto_expands_when_fishy(tmp_path):
