@@ -313,6 +313,15 @@ class Journal:
         _ = trading_day
         return frozenset()
 
+    def session_stopped(self, trading_day: str | None = None) -> bool:
+        """Host PositionRow journal latches a daily stop. This surface never has one."""
+        _ = trading_day
+        return False
+
+    def open_approvals(self) -> list[Any]:
+        """Host journal returns outstanding approval rows. This surface has none."""
+        return []
+
     def close(self) -> None:
         """Dispose the engine — every connection released, no descriptor left open."""
         self._engine.dispose()

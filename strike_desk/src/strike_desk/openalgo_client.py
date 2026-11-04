@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
 
-from .config import Settings
+from .config import IST, Settings
 from .errors import OpenAlgoError, ReadOnlyViolation
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_MARKERS = ("access_token", "incorrect api_key", "invalid token")
+
+
+def _token_dead(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TOKEN_MARKERS)
 
 
 def _iso_day(value: date | str) -> str:
@@ -47,6 +54,34 @@ class OpenAlgoClient:
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
             headers={"User-Agent": "strike-desk/0.2"},
         )
+
+    def broker_token_error(self) -> str | None:
+        """One quote and one history probe. Returns a detail when the access token is dead.
+
+        Graph plan calls this on every board. Must exist — a missing method
+        becomes ``internal-error`` on the tick.
+        """
+        settings = self._settings
+        today = datetime.now(tz=IST).date()
+        start = (today - timedelta(days=5)).isoformat()
+        end = today.isoformat()
+        try:
+            self.quotes(settings.index_symbol, settings.index_spot_exchange)
+        except OpenAlgoError as exc:
+            if _token_dead(exc):
+                return str(exc)
+        try:
+            self.history(
+                settings.index_symbol,
+                settings.index_spot_exchange,
+                "D",
+                start,
+                end,
+            )
+        except OpenAlgoError as exc:
+            if _token_dead(exc):
+                return str(exc)
+        return None
 
     def close(self) -> None:
         self._client.close()
