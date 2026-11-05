@@ -110,7 +110,7 @@ HANDS_STALE_S = 30 * 60
 BRIEF_STALE_S = 180
 HOURLY_SECONDS = 3600
 TICK_SECONDS = 15 * 60
-# Confirm even when aligned. After this IST day, fishy/broken only.
+# Legacy one-day flag. Cash-session pings (including ok) no longer depend on it.
 STATUS_PING_DAY = "2026-11-04"
 MCX_OPEN = dtime(9, 20)
 MCX_CLOSE = dtime(23, 15)
@@ -1008,12 +1008,18 @@ def _status_ping_today(report: HealthReport) -> bool:
     return str((report.analyzer or {}).get("day") or "") == STATUS_PING_DAY
 
 
+def _cash_session_on(report: HealthReport) -> bool:
+    session = report.session or {}
+    return bool(session.get("on") or session.get("cash_session_on"))
+
+
 def should_alert(report: HealthReport) -> bool:
+    """Telegram every cash-session pass, including [ok]. After hours: fishy/broken only."""
     if report.severity == "critical":
         return True
     if any(book.get("alignment") in {"fishy", "broken"} for book in report.books):
         return True
-    return _status_ping_today(report)
+    return _cash_session_on(report)
 
 
 def _latest_tick(day_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1077,8 +1083,8 @@ def render_alert(report: HealthReport) -> str:
         report.headline,
         f"books: {len(broken)} broken / {len(fishy)} fishy / {ok_n} ok",
     ]
-    if _status_ping_today(report) and not broken and not fishy:
-        lines.append("status: confirming (today-only ping even if aligned)")
+    if _cash_session_on(report) and not broken and not fishy:
+        lines.append("status: cash-session ping (including ok)")
     for book in (*broken, *fishy):
         detail = "; ".join(book.get("issues") or []) or book.get("alignment")
         lines.append(f"- {book['sid']} {book['book_id']}: {book['alignment']} ({detail})")
@@ -1987,7 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--alert",
         action="store_true",
-        help="send Telegram on fishy/broken, and on 2026-11-04 even if aligned",
+        help="send Telegram every cash-session pass (including ok); fishy/broken anytime",
     )
     parser.add_argument(
         "--dry-run-alert",
@@ -2090,7 +2096,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"id={result.get('message_id')} err={result.get('error')}"
             )
         elif args.alert:
-            print("telegram: skipped (all books aligned)")
+            print("telegram: skipped (outside cash session and aligned)")
         return _exit_code(report), text
 
     interval = TICK_SECONDS if args.every_15 else HOURLY_SECONDS if args.hourly else args.loop

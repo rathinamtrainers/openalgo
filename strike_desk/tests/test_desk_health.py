@@ -427,21 +427,21 @@ def test_status_ping_today_lists_every_tick_even_when_ok(tmp_path):
     assert report.severity in {"ok", "degraded"}
     assert should_alert(report) is True
     text = render_alert(report)
-    assert "today-only ping even if aligned" in text
+    assert "cash-session ping (including ok)" in text
     assert "Analyzer ticks today (2):" in text
     assert text.index("09:30 IST") < text.index("09:45 IST")
     assert text.count("regime-weak-trend") >= 2
 
 
-def test_other_days_skip_telegram_when_aligned(tmp_path):
+def test_cash_session_sends_when_aligned(tmp_path):
     journal = tmp_path / "strike_desk.db"
     _write_journal(
         journal,
         [
             (
                 "tick-1",
-                "2026-11-02T04:00:00+00:00",
-                "2026-11-02",
+                "2026-11-05T04:00:00+00:00",
+                "2026-11-05",
                 "NIFTY",
                 "schedule",
                 "decline",
@@ -461,10 +461,27 @@ def test_other_days_skip_telegram_when_aligned(tmp_path):
         "openalgo": "active",
     }
     facts["strikeshield"] = {"set1": False, "set2open": False}
-    now = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
+    now = datetime(2026, 11, 5, 5, 0, tzinfo=UTC)
     report = build_report(facts, now=now)
-    assert report.analyzer["day"] == "2026-11-02"
+    assert report.analyzer["day"] == "2026-11-05"
     assert report.severity in {"ok", "degraded"}
+    assert should_alert(report) is True
+
+
+def test_after_hours_skip_telegram_when_aligned(tmp_path):
+    journal = tmp_path / "strike_desk.db"
+    _write_journal(journal, [])
+    facts = collect_host_facts(state_dir=tmp_path, journal=journal)
+    facts["units"] = {
+        "strike-desk": "active",
+        "strike-desk-coa": "active",
+        "openalgo": "active",
+    }
+    facts["strikeshield"] = {"set1": False, "set2open": False}
+    now = datetime(2026, 11, 5, 11, 0, tzinfo=UTC)  # 16:30 IST, cash off
+    report = build_report(facts, now=now)
+    assert report.session["cash_session_on"] is False
+    assert report.severity in {"ok", "degraded", "unknown"}
     assert should_alert(report) is False
 
 
